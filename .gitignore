@@ -1,0 +1,34 @@
+# Build output
+build/
+build-*/
+tui/target/
+examples/rust/target/
+target/
+
+# Compiled example programs
+examples/c/decompile
+examples/cpp/decompile
+
+# Anything Astral learns belongs to whoever taught it, never to the repository.
+# The two databases that are part of the project itself are the exceptions.
+*.astral
+!data/knowledge.astral
+!contrib/policy.astral
+.astral/
+learned.astral
+
+# Editor and platform noise
+.DS_Store
+*.swp
+*~
+compile_commands.json
+.cache/
+.vscode/
+.idea/
+
+# Build artefacts
+*.o
+*.a
+*.dylib
+*.so
+*.dSYM/

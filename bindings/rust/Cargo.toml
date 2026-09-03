@@ -1,0 +1,15 @@
+[package]
+name = "astral"
+version = "0.1.0"
+edition = "2021"
+description = "Ghidra's decompiler as a Rust library, with no JVM and no Ghidra installation"
+license = "Apache-2.0"
+build = "build.rs"
+
+[lib]
+name = "astral"
+path = "src/lib.rs"
+
+[features]
+# Link the shared library instead of the static one.
+shared = []

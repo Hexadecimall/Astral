@@ -1,0 +1,11 @@
+[package]
+name = "ghidra-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+astral = { path = "../../bindings/rust" }
+
+[[bin]]
+name = "decompile"
+path = "src/main.rs"

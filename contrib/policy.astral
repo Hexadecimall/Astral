@@ -1,0 +1,58 @@
+# Astral contribution policy.
+#
+# `astral contribute database` reads this file from the repository before it
+# sends anything. It is the repository's answer to the question the command
+# asks: is a database submission welcome, and what may it contain?
+#
+# Anything not permitted here is dropped locally, before it leaves the machine.
+
+# Whether submissions are being accepted at all.
+accept yes
+
+# Where a submission lands.
+#
+# A pull request, because that is what a submission is: a file the project can
+# read, review as a diff, and merge in one click. An issue would be a thread
+# somebody has to dig the data back out of.
+#
+# Contributed databases land in this directory and are compiled into the
+# knowledge base at build time, so merging one is all it takes for everyone to
+# get it.
+method pull-request
+path contrib/databases
+
+# A service that accepts submissions from anyone, with no account and no
+# browser. If the project runs one, put its URL here and every installed copy
+# starts using it without needing an update.
+# endpoint https://example.invalid/astral/contributions
+
+# Record kinds that may be sent. Everything else is stripped.
+#
+# These describe what code means, not who wrote it or where it lived:
+#   sig    a function body's fingerprint and the name someone gave it
+#   proto  a function's real prototype
+#   verb   a library call and the purpose it implies
+#   idiom  a pair of calls and the purpose they imply
+#   lit    text a function contains and the purpose it implies
+#   role   how a value is used and what to call it
+#   note   an explanation to attach where something appears
+allow sig
+allow proto
+allow verb
+allow idiom
+allow lit
+allow role
+allow note
+
+# Records containing any of these never leave the machine, whatever their kind.
+# A path or an address says something about a person rather than about code.
+deny /Users/
+deny /home/
+deny C:\
+deny @
+
+# The largest submission accepted, in records.
+limit 200000
+
+# Shown when a submission is refused, or with --dry-run.
+message Only what a name means travels: no paths, no addresses, no file names.

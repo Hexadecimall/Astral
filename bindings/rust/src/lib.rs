@@ -1,0 +1,669 @@
+//! Ghidra's decompiler as a Rust library.
+//!
+//! No JVM, no Ghidra installation: the decompiler core is linked in, and the
+//! binary loading Ghidra normally does in Java happens in native code.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), astral::Error> {
+//! let _library = astral::Library::new(None)?;
+//! let program = astral::Program::open("/bin/ls", None)?;
+//! let entry = program.entry_points()[0];
+//! println!("{}", program.decompile(entry, None)?.c_code());
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod sys;
+
+use std::ffi::{CStr, CString};
+use std::fmt;
+use std::marker::PhantomData;
+use std::os::raw::{c_char, c_int, c_uint};
+use std::path::Path;
+use std::sync::Mutex;
+
+// The C library keeps global state in astral_init/astral_shutdown, so those two
+// are serialized here.
+static INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// A failure reported by the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Error {
+    pub status: Status,
+    pub message: String,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.status, self.message)
+    }
+}
+
+impl std::error::Error for Error {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    InvalidArgument,
+    NotInitialized,
+    Io,
+    UnknownFormat,
+    UnknownLanguage,
+    SpecsMissing,
+    DecompileFailed,
+    NoSuchAddress,
+    Internal,
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = match self {
+            Status::InvalidArgument => "invalid argument",
+            Status::NotInitialized => "not initialized",
+            Status::Io => "i/o failure",
+            Status::UnknownFormat => "unknown executable format",
+            Status::UnknownLanguage => "unknown language",
+            Status::SpecsMissing => "sleigh specifications missing",
+            Status::DecompileFailed => "decompilation failed",
+            Status::NoSuchAddress => "no such address",
+            Status::Internal => "internal failure",
+        };
+        f.write_str(text)
+    }
+}
+
+impl From<c_int> for Status {
+    fn from(code: c_int) -> Self {
+        match code {
+            sys::ASTRAL_ERR_INVALID_ARGUMENT => Status::InvalidArgument,
+            sys::ASTRAL_ERR_NOT_INITIALIZED => Status::NotInitialized,
+            sys::ASTRAL_ERR_IO => Status::Io,
+            sys::ASTRAL_ERR_UNKNOWN_FORMAT => Status::UnknownFormat,
+            sys::ASTRAL_ERR_UNKNOWN_LANGUAGE => Status::UnknownLanguage,
+            sys::ASTRAL_ERR_SPECS_MISSING => Status::SpecsMissing,
+            sys::ASTRAL_ERR_DECOMPILE_FAILED => Status::DecompileFailed,
+            sys::ASTRAL_ERR_NO_SUCH_ADDRESS => Status::NoSuchAddress,
+            _ => Status::Internal,
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+fn last_error(status: Status) -> Error {
+    let message = unsafe { cstr(sys::astral_last_error()) };
+    Error {
+        status,
+        message: if message.is_empty() {
+            "unknown failure".to_string()
+        } else {
+            message
+        },
+    }
+}
+
+unsafe fn cstr(pointer: *const c_char) -> String {
+    if pointer.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(pointer).to_string_lossy().into_owned()
+    }
+}
+
+fn check(code: c_int) -> Result<()> {
+    if code == sys::ASTRAL_OK {
+        Ok(())
+    } else {
+        Err(last_error(Status::from(code)))
+    }
+}
+
+fn to_cstring(value: &str) -> Result<CString> {
+    CString::new(value).map_err(|_| Error {
+        status: Status::InvalidArgument,
+        message: "string contains an interior NUL".to_string(),
+    })
+}
+
+/// Version of this library.
+pub fn version() -> String {
+    unsafe { cstr(sys::astral_version()) }
+}
+
+/// Ghidra release the decompiler core came from.
+pub fn upstream_version() -> String {
+    unsafe { cstr(sys::astral_upstream_version()) }
+}
+
+/// Loads the SLEIGH specifications for as long as it is alive.
+///
+/// Pass `None` to use the installed default or the `ASTRAL_SPECS` environment
+/// variable.
+pub struct Library {
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Library {
+    pub fn new(spec_root: Option<&Path>) -> Result<Self> {
+        let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = match spec_root {
+            Some(path) => Some(to_cstring(&path.to_string_lossy())?),
+            None => None,
+        };
+        let pointer = root.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+        check(unsafe { sys::astral_init(pointer) })?;
+        Ok(Library {
+            _not_send: PhantomData,
+        })
+    }
+
+    /// Languages the loaded specification tree provides.
+    pub fn languages(&self) -> Vec<Language> {
+        let count = unsafe { sys::astral_language_count() };
+        (0..count)
+            .map(|i| unsafe {
+                Language {
+                    id: cstr(sys::astral_language_id(i)),
+                    description: cstr(sys::astral_language_description(i)),
+                }
+            })
+            .collect()
+    }
+}
+
+impl Drop for Library {
+    fn drop(&mut self) {
+        let _guard = INIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe { sys::astral_shutdown() };
+    }
+}
+
+/// Compiles a SLEIGH specification into the `.sla` the decompiler loads.
+pub fn compile_sleigh(slaspec: &Path, sla: &Path) -> Result<()> {
+    let input = to_cstring(&slaspec.to_string_lossy())?;
+    let output = to_cstring(&sla.to_string_lossy())?;
+    check(unsafe { sys::astral_compile_sleigh(input.as_ptr(), output.as_ptr()) })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Language {
+    pub id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Unknown,
+    Raw,
+    Elf,
+    Pe,
+    MachO,
+}
+
+impl From<c_int> for Format {
+    fn from(code: c_int) -> Self {
+        match code {
+            sys::ASTRAL_FORMAT_RAW => Format::Raw,
+            sys::ASTRAL_FORMAT_ELF => Format::Elf,
+            sys::ASTRAL_FORMAT_PE => Format::Pe,
+            sys::ASTRAL_FORMAT_MACHO => Format::MachO,
+            _ => Format::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub name: String,
+    pub address: u64,
+    pub size: u64,
+    pub executable: bool,
+    pub writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Symbol {
+    pub name: String,
+    pub address: u64,
+    pub size: u64,
+    pub is_function: bool,
+    /// A stub standing in for a function in another image, such as `printf`.
+    pub is_import: bool,
+}
+
+/// How [`Program::emit_c`] renders its output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct COptions {
+    /// Inline the runtime rather than including `<astral/decompiled.h>`.
+    pub self_contained: bool,
+    /// Keep the decompiler's warning comments.
+    pub comments: bool,
+}
+
+impl Default for COptions {
+    fn default() -> Self {
+        COptions {
+            self_contained: true,
+            comments: true,
+        }
+    }
+}
+
+impl COptions {
+    fn to_flags(self) -> c_uint {
+        let mut flags = sys::ASTRAL_C_DEFAULT;
+        if !self.self_contained {
+            flags |= sys::ASTRAL_C_INCLUDE_RUNTIME;
+        }
+        if !self.comments {
+            flags |= sys::ASTRAL_C_NO_COMMENTS;
+        }
+        flags
+    }
+}
+
+/// A loaded executable.
+pub struct Program {
+    handle: *mut sys::astral_program,
+}
+
+impl Program {
+    /// Detects the container format and derives the language from the file.
+    pub fn open<P: AsRef<Path>>(path: P, language_id: Option<&str>) -> Result<Self> {
+        let path = to_cstring(&path.as_ref().to_string_lossy())?;
+        let language = language_id.map(to_cstring).transpose()?;
+        let handle = unsafe {
+            sys::astral_program_open(
+                path.as_ptr(),
+                language.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            )
+        };
+        Self::wrap(handle, Status::UnknownFormat)
+    }
+
+    /// Same, from bytes already in memory.
+    pub fn open_bytes(data: &[u8], language_id: Option<&str>) -> Result<Self> {
+        let language = language_id.map(to_cstring).transpose()?;
+        let handle = unsafe {
+            sys::astral_program_open_memory(
+                data.as_ptr() as *const _,
+                data.len(),
+                language.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            )
+        };
+        Self::wrap(handle, Status::UnknownFormat)
+    }
+
+    /// Treats a file as a flat image mapped at `base_address`.
+    pub fn open_raw<P: AsRef<Path>>(path: P, language_id: &str, base_address: u64) -> Result<Self> {
+        let path = to_cstring(&path.as_ref().to_string_lossy())?;
+        let language = to_cstring(language_id)?;
+        let handle =
+            unsafe { sys::astral_program_open_raw(path.as_ptr(), language.as_ptr(), base_address) };
+        Self::wrap(handle, Status::UnknownLanguage)
+    }
+
+    /// Treats bytes as a flat image mapped at `base_address`.
+    pub fn open_raw_bytes(data: &[u8], language_id: &str, base_address: u64) -> Result<Self> {
+        let language = to_cstring(language_id)?;
+        let handle = unsafe {
+            sys::astral_program_open_raw_memory(
+                data.as_ptr() as *const _,
+                data.len(),
+                language.as_ptr(),
+                base_address,
+            )
+        };
+        Self::wrap(handle, Status::UnknownLanguage)
+    }
+
+    fn wrap(handle: *mut sys::astral_program, status: Status) -> Result<Self> {
+        if handle.is_null() {
+            Err(last_error(status))
+        } else {
+            Ok(Program { handle })
+        }
+    }
+
+    pub fn format(&self) -> Format {
+        Format::from(unsafe { sys::astral_program_format(self.handle) })
+    }
+
+    pub fn format_name(&self) -> String {
+        unsafe { cstr(sys::astral_program_format_name(self.handle)) }
+    }
+
+    pub fn language_id(&self) -> String {
+        unsafe { cstr(sys::astral_program_language_id(self.handle)) }
+    }
+
+    pub fn compiler_spec(&self) -> String {
+        unsafe { cstr(sys::astral_program_compiler_spec(self.handle)) }
+    }
+
+    pub fn is_big_endian(&self) -> bool {
+        unsafe { sys::astral_program_is_big_endian(self.handle) != 0 }
+    }
+
+    pub fn pointer_size(&self) -> usize {
+        unsafe { sys::astral_program_pointer_size(self.handle) as usize }
+    }
+
+    pub fn image_base(&self) -> u64 {
+        unsafe { sys::astral_program_image_base(self.handle) }
+    }
+
+    pub fn entry_points(&self) -> Vec<u64> {
+        let count = unsafe { sys::astral_program_entry_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe { sys::astral_program_entry(self.handle, i) })
+            .collect()
+    }
+
+    pub fn segments(&self) -> Vec<Segment> {
+        let count = unsafe { sys::astral_program_segment_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                Segment {
+                    name: cstr(sys::astral_program_segment_name(self.handle, i)),
+                    address: sys::astral_program_segment_address(self.handle, i),
+                    size: sys::astral_program_segment_size(self.handle, i),
+                    executable: sys::astral_program_segment_is_executable(self.handle, i) != 0,
+                    writable: sys::astral_program_segment_is_writable(self.handle, i) != 0,
+                }
+            })
+            .collect()
+    }
+
+    pub fn symbols(&self) -> Vec<Symbol> {
+        let count = unsafe { sys::astral_program_symbol_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                Symbol {
+                    name: cstr(sys::astral_program_symbol_name(self.handle, i)),
+                    address: sys::astral_program_symbol_address(self.handle, i),
+                    size: sys::astral_program_symbol_size(self.handle, i),
+                    is_function: sys::astral_program_symbol_is_function(self.handle, i) != 0,
+                    is_import: sys::astral_program_symbol_is_import(self.handle, i) != 0,
+                }
+            })
+            .collect()
+    }
+
+    /// Reads mapped bytes. The result is short when the range leaves the image.
+    pub fn read(&self, address: u64, size: usize) -> Vec<u8> {
+        let mut buffer = vec![0u8; size];
+        let got = unsafe {
+            sys::astral_program_read(
+                self.handle,
+                address,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.len(),
+            )
+        };
+        buffer.truncate(got);
+        buffer
+    }
+
+    /// Names an address so decompiled output refers to it by that name.
+    pub fn add_symbol(&mut self, address: u64, name: &str, is_function: bool) -> Result<()> {
+        let name = to_cstring(name)?;
+        check(unsafe {
+            sys::astral_program_add_symbol(
+                self.handle,
+                address,
+                name.as_ptr(),
+                if is_function { 1 } else { 0 },
+            )
+        })
+    }
+
+    /// Renames whatever lives at `address`.
+    ///
+    /// The function is rebuilt under the new name, so it reaches the definition
+    /// and every call site. With `learn`, the choice is recorded against a
+    /// fingerprint of the body, so the same code is recognised in other
+    /// programs.
+    pub fn rename(&mut self, address: u64, name: &str, learn: bool) -> Result<()> {
+        let name = to_cstring(name)?;
+        check(unsafe {
+            sys::astral_program_rename(
+                self.handle,
+                address,
+                name.as_ptr(),
+                if learn { 1 } else { 0 },
+            )
+        })
+    }
+
+    /// Whether to name placeholders from evidence in the binary.
+    pub fn set_auto_naming(&mut self, enabled: bool) {
+        unsafe { sys::astral_program_set_auto_naming(self.handle, if enabled { 1 } else { 0 }) };
+    }
+
+    pub fn auto_naming(&self) -> bool {
+        unsafe { sys::astral_program_auto_naming(self.handle) != 0 }
+    }
+
+    /// Sets a decompiler option by its Ghidra name.
+    pub fn set_option(&mut self, name: &str, value: &str) -> Result<()> {
+        let name = to_cstring(name)?;
+        let value = to_cstring(value)?;
+        check(unsafe { sys::astral_program_set_option(self.handle, name.as_ptr(), value.as_ptr()) })
+    }
+
+    pub fn disassemble(&self, address: u64, count: usize) -> Result<String> {
+        let text = unsafe { sys::astral_disassemble(self.handle, address, count as c_int) };
+        Self::take_string(text, Status::NoSuchAddress)
+    }
+
+    pub fn pcode(&self, address: u64, count: usize) -> Result<String> {
+        let text = unsafe { sys::astral_pcode(self.handle, address, count as c_int) };
+        Self::take_string(text, Status::NoSuchAddress)
+    }
+
+    fn take_string(text: *mut c_char, status: Status) -> Result<String> {
+        if text.is_null() {
+            return Err(last_error(status));
+        }
+        let result = unsafe { cstr(text) };
+        unsafe { sys::astral_string_free(text) };
+        Ok(result)
+    }
+
+    /// Decompiles the function at `address`.
+    pub fn decompile(&self, address: u64, name: Option<&str>) -> Result<Function> {
+        let name = name.map(to_cstring).transpose()?;
+        let handle = unsafe {
+            sys::astral_decompile(
+                self.handle,
+                address,
+                name.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            )
+        };
+        if handle.is_null() {
+            Err(last_error(Status::DecompileFailed))
+        } else {
+            Ok(Function { handle })
+        }
+    }
+
+    /// Emits compilable C for the functions at these addresses.
+    ///
+    /// Unlike [`Function::c_code`], which is the decompiler's listing, this is a
+    /// complete translation unit: runtime definitions, declarations for
+    /// everything referenced but not defined, then the bodies.
+    pub fn emit_c(&self, addresses: &[u64], options: COptions) -> Result<String> {
+        let text = unsafe {
+            sys::astral_emit_c(
+                self.handle,
+                addresses.as_ptr(),
+                addresses.len(),
+                options.to_flags(),
+            )
+        };
+        Self::take_string(text, Status::DecompileFailed)
+    }
+
+    /// Emits compilable C for every function symbol in the program.
+    pub fn emit_c_all(&self, options: COptions) -> Result<String> {
+        let text = unsafe { sys::astral_emit_c_all(self.handle, options.to_flags()) };
+        Self::take_string(text, Status::DecompileFailed)
+    }
+
+    /// Decompiles the function symbol with this name.
+    pub fn decompile_symbol(&self, name: &str) -> Result<Function> {
+        match self.symbols().into_iter().find(|s| s.name == name) {
+            Some(symbol) => self.decompile(symbol.address, Some(name)),
+            None => Err(Error {
+                status: Status::NoSuchAddress,
+                message: format!("no symbol named {name}"),
+            }),
+        }
+    }
+}
+
+impl Drop for Program {
+    fn drop(&mut self) {
+        unsafe { sys::astral_program_close(self.handle) };
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variable {
+    pub name: String,
+    pub type_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Call {
+    pub address: u64,
+    pub name: String,
+}
+
+/// What Astral knows, and where it writes what it learns.
+pub struct KnowledgeStats {
+    pub records: usize,
+    pub learned: usize,
+    pub path: String,
+}
+
+/// Reports the knowledge base. Valid after a [`Library`] exists.
+pub fn knowledge() -> KnowledgeStats {
+    unsafe {
+        KnowledgeStats {
+            records: sys::astral_knowledge_size().max(0) as usize,
+            learned: sys::astral_knowledge_learned().max(0) as usize,
+            path: cstr(sys::astral_knowledge_path()),
+        }
+    }
+}
+
+/// One decompiled function.
+pub struct Function {
+    handle: *mut sys::astral_function,
+}
+
+impl Function {
+    pub fn name(&self) -> String {
+        unsafe { cstr(sys::astral_function_name(self.handle)) }
+    }
+
+    pub fn address(&self) -> u64 {
+        unsafe { sys::astral_function_address(self.handle) }
+    }
+
+    pub fn size(&self) -> u64 {
+        unsafe { sys::astral_function_size(self.handle) }
+    }
+
+    pub fn c_code(&self) -> String {
+        unsafe { cstr(sys::astral_function_c_code(self.handle)) }
+    }
+
+    pub fn signature(&self) -> String {
+        unsafe { cstr(sys::astral_function_signature(self.handle)) }
+    }
+
+    pub fn return_type(&self) -> String {
+        unsafe { cstr(sys::astral_function_return_type(self.handle)) }
+    }
+
+    pub fn calling_convention(&self) -> String {
+        unsafe { cstr(sys::astral_function_calling_convention(self.handle)) }
+    }
+
+    pub fn parameters(&self) -> Vec<Variable> {
+        let count = unsafe { sys::astral_function_parameter_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                Variable {
+                    name: cstr(sys::astral_function_parameter_name(self.handle, i)),
+                    type_name: cstr(sys::astral_function_parameter_type(self.handle, i)),
+                }
+            })
+            .collect()
+    }
+
+    pub fn locals(&self) -> Vec<Variable> {
+        let count = unsafe { sys::astral_function_local_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                Variable {
+                    name: cstr(sys::astral_function_local_name(self.handle, i)),
+                    type_name: cstr(sys::astral_function_local_type(self.handle, i)),
+                }
+            })
+            .collect()
+    }
+
+    pub fn callees(&self) -> Vec<Call> {
+        let count = unsafe { sys::astral_function_callee_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                Call {
+                    address: sys::astral_function_callee(self.handle, i),
+                    name: cstr(sys::astral_function_callee_name(self.handle, i)),
+                }
+            })
+            .collect()
+    }
+
+    /// Why Astral chose this name, empty when the binary supplied it.
+    pub fn naming_reason(&self) -> String {
+        unsafe { cstr(sys::astral_function_naming_reason(self.handle)) }
+    }
+
+    /// Values Astral named, as (what the decompiler called it, what it is now).
+    pub fn applied_renames(&self) -> Vec<(String, String)> {
+        let count = unsafe { sys::astral_function_rename_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe {
+                (
+                    cstr(sys::astral_function_rename_from(self.handle, i)),
+                    cstr(sys::astral_function_rename_to(self.handle, i)),
+                )
+            })
+            .collect()
+    }
+
+    /// Explanations the knowledge base attached to this body.
+    pub fn comments(&self) -> Vec<String> {
+        let count = unsafe { sys::astral_function_comment_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe { cstr(sys::astral_function_comment(self.handle, i)) })
+            .collect()
+    }
+
+    pub fn block_addresses(&self) -> Vec<u64> {
+        let count = unsafe { sys::astral_function_block_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe { sys::astral_function_block_address(self.handle, i) })
+            .collect()
+    }
+}
+
+impl Drop for Function {
+    fn drop(&mut self) {
+        unsafe { sys::astral_function_free(self.handle) };
+    }
+}

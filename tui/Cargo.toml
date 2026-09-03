@@ -1,0 +1,17 @@
+[package]
+name = "astral-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI for the Astral decompiler"
+
+[[bin]]
+name = "astral-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+astral = { path = "../bindings/rust" }
+
+[profile.release]
+opt-level = 2

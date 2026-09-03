@@ -1,0 +1,469 @@
+# Astral knowledge base, version 1.
+#
+# What a decompiler recovers is structure; what it cannot recover is intent.
+# This file states the intent that is recoverable from evidence a binary still
+# carries: which library functions a body calls, what text it prints, how a
+# value is used. Each record is one piece of that knowledge.
+#
+# Format: <kind> <field> [<field> ...]   Fields are separated by whitespace,
+# and the last field of a record runs to the end of the line. Lines beginning
+# with # are comments. A record read later overrides an earlier one with the
+# same key, so a user's own database wins over this one.
+#
+# Kinds:
+#   verb  <callee> <name>          a function whose dominant call is <callee>
+#   idiom <a>+<b> <name>           a function calling both <a> and <b>
+#   lit   <word>[|<word>] <name>   a function whose text contains any of <word>
+#   role  <shape> <name>           a variable used in the shape <shape>
+#   stop  <word>                   a word too generic to name anything after
+#   junk  <prefix>                 a decompiler placeholder, replaceable
+#   proto <name> <declaration>     the real prototype of a library function
+#   hdr   <name> <header>          the standard header declaring it
+#   note  <trigger> <text>         a comment to attach where <trigger> appears
+#   sig   <hash> <length> <name>   a function body's fingerprint and its name
+
+# ---------------------------------------------------------------- variables
+#
+# How a value is used says what it is. These shapes are recognised from the
+# p-code, so they hold regardless of how the code was written.
+
+role arrow      node
+role deref      ptr
+role indexed    buf
+role zero_inc   i
+role zero_accum sum
+role countdown  remaining
+role returned   result
+role bound      n
+role string     s
+role byte_ptr   data
+role self_mul   x
+role flag       flag
+role size       size
+role capacity   cap
+role count      count
+role total      total
+
+# Words that name nothing useful, so a string containing only these is not
+# used as a source of names.
+stop the
+stop a
+stop an
+stop and
+stop or
+stop for
+stop with
+stop please
+stop enter
+stop input
+stop value
+stop values
+stop number
+stop your
+stop you
+stop this
+stop that
+stop error
+stop failed
+stop success
+stop done
+stop ok
+stop usage
+stop chars
+stop char
+stop string
+stop int
+stop test
+stop main
+stop out
+stop in
+stop is
+stop of
+stop to
+
+# Names the decompiler invents when it has nothing better. Anything matching
+# one of these prefixes may be replaced by a name derived from evidence.
+junk uVar
+junk iVar
+junk cVar
+junk bVar
+junk sVar
+junk lVar
+junk fVar
+junk dVar
+junk pVar
+junk auVar
+junk aiVar
+junk acVar
+junk abVar
+junk axVar
+junk xVar
+junk uStack
+junk iStack
+junk cStack
+junk aStack
+junk auStack
+junk local_
+junk param_
+junk unaff_
+junk extraout_
+junk in_stack_
+junk var_
+
+# ---------------------------------------------------------------- functions
+#
+# A single dominant library call is weak evidence, but it is evidence: a
+# function whose only real work is fopen is an open-a-file function.
+
+verb fopen           openFile
+verb freopen         reopenFile
+verb fclose          closeFile
+verb fread           readFile
+verb fwrite          writeFile
+verb fgets           readLine
+verb fputs           writeLine
+verb fseek           seekFile
+verb ftell           fileOffset
+verb rewind          rewindFile
+verb fflush          flushFile
+verb remove          removeFile
+verb rename          renameFile
+verb tmpfile         makeTempFile
+verb open            openFile
+verb close           closeHandle
+verb read            readBytes
+verb write           writeBytes
+verb lseek           seekHandle
+verb stat            statPath
+verb fstat           statHandle
+verb lstat           statLink
+verb mkdir           makeDirectory
+verb rmdir           removeDirectory
+verb opendir         openDirectory
+verb readdir         readDirectory
+verb closedir        closeDirectory
+verb unlink          deleteFile
+verb chmod           setPermissions
+verb chown           setOwner
+verb access          checkAccess
+verb realpath        resolvePath
+verb readlink        readLink
+verb symlink         makeLink
+
+verb printf          printMessage
+verb fprintf         printMessage
+verb sprintf         formatString
+verb snprintf        formatString
+verb vsnprintf       formatString
+verb puts            printMessage
+verb putchar         printCharacter
+verb perror          reportError
+verb scanf           readInput
+verb sscanf          parseString
+verb fscanf          readInput
+verb getchar         readCharacter
+verb getline         readLine
+
+verb malloc          allocate
+verb calloc          allocateZeroed
+verb realloc         resize
+verb free            release
+verb memcpy          copyMemory
+verb memmove         moveMemory
+verb memset          fillMemory
+verb memcmp          compareMemory
+verb memchr          findByte
+verb bzero           zeroMemory
+
+verb strlen          measureString
+verb strcpy          copyString
+verb strncpy         copyString
+verb strlcpy         copyString
+verb strcat          appendString
+verb strncat         appendString
+verb strcmp          compareStrings
+verb strncmp         compareStrings
+verb strcasecmp      compareStrings
+verb strchr          findCharacter
+verb strrchr         findCharacter
+verb strstr          findSubstring
+verb strtok          splitString
+verb strdup          duplicateString
+verb strerror        describeError
+verb strspn          spanString
+verb strcspn         spanString
+
+verb atoi            parseInteger
+verb atol            parseInteger
+verb atof            parseNumber
+verb strtol          parseInteger
+verb strtoul         parseInteger
+verb strtod          parseNumber
+verb abs             absoluteValue
+verb labs            absoluteValue
+verb pow             power
+verb sqrt            squareRoot
+verb sin             sine
+verb cos             cosine
+verb tan             tangent
+verb log             logarithm
+verb exp             exponential
+verb floor           roundDown
+verb ceil            roundUp
+verb round           roundNearest
+verb rand            randomNumber
+verb srand           seedRandom
+
+verb qsort           sortArray
+verb bsearch         searchArray
+
+verb exit            terminate
+verb abort           terminate
+verb atexit          registerExitHandler
+verb system          runCommand
+verb fork            forkProcess
+verb execv           runProgram
+verb execve          runProgram
+verb execvp          runProgram
+verb waitpid         waitForProcess
+verb kill            signalProcess
+verb signal          installHandler
+verb sigaction       installHandler
+verb getenv          readEnvironment
+verb setenv          writeEnvironment
+verb getpid          processId
+verb sleep           pause
+verb usleep          pause
+verb nanosleep       pause
+verb time            currentTime
+verb clock           clockTicks
+verb gettimeofday    currentTime
+verb localtime       localTime
+verb gmtime          utcTime
+verb strftime        formatTime
+verb mktime          makeTime
+
+verb socket          openSocket
+verb bind            bindSocket
+verb listen          listenSocket
+verb accept          acceptConnection
+verb connect         openConnection
+verb send            sendData
+verb sendto          sendData
+verb recv            receiveData
+verb recvfrom        receiveData
+verb shutdown        shutdownSocket
+verb getaddrinfo     resolveHost
+verb gethostbyname   resolveHost
+verb inet_addr       parseAddress
+verb inet_ntoa       formatAddress
+verb htons           hostToNetwork
+verb ntohs           networkToHost
+
+verb pthread_create      startThread
+verb pthread_join        joinThread
+verb pthread_mutex_lock  lock
+verb pthread_mutex_unlock unlock
+verb pthread_cond_wait   waitCondition
+verb pthread_cond_signal signalCondition
+verb mmap                mapMemory
+verb munmap              unmapMemory
+verb mprotect            protectMemory
+verb dlopen              loadLibrary
+verb dlsym               findSymbol
+verb dlclose             unloadLibrary
+
+verb isalpha         isLetter
+verb isdigit         isDigit
+verb isspace         isWhitespace
+verb isupper         isUpperCase
+verb islower         isLowerCase
+verb toupper         toUpperCase
+verb tolower         toLowerCase
+
+# Two calls together say far more than either alone. These are checked before
+# the single-call verbs.
+idiom open+read              readFile
+idiom fopen+fread            readFile
+idiom fopen+fgets            readFileLines
+idiom open+write             writeFile
+idiom fopen+fwrite           writeFile
+idiom opendir+readdir        listDirectory
+idiom socket+connect         openConnection
+idiom socket+bind            startServer
+idiom socket+listen          startServer
+idiom accept+recv            handleClient
+idiom accept+read            handleClient
+idiom connect+send           sendRequest
+idiom malloc+memcpy          cloneBuffer
+idiom malloc+free            manageBuffer
+idiom malloc+realloc         growBuffer
+idiom fork+execv             runProgram
+idiom fork+waitpid           runAndWait
+idiom pthread_create+pthread_join  runThreads
+idiom mmap+mprotect          mapExecutable
+idiom dlopen+dlsym           loadPlugin
+idiom getaddrinfo+connect    openConnection
+idiom strtok+strcmp          parseArguments
+idiom qsort+bsearch          sortAndSearch
+
+# What a function says about itself. A literal is strong evidence of purpose,
+# so these outrank the call-based rules.
+lit usage:|Usage:|--help              printUsage
+lit version|Version|VERSION           printVersion
+lit password|Password|passwd          verifyPassword
+lit incorrect|Incorrect|wrong password  verifyPassword
+lit access denied|Access denied       checkAccess
+lit permission denied                 checkAccess
+lit login|Login|username              authenticate
+lit connecting|Connecting             openConnection
+lit listening|Listening on            startServer
+lit out of memory|Out of memory       allocate
+lit segmentation|Segmentation         handleCrash
+lit copyright|Copyright               printBanner
+
+# ------------------------------------------------------------------ comments
+#
+# Where the decompiler emits something that reads as nonsense but means
+# something specific, say what it means.
+
+note halt_baddata    execution reached bytes the disassembler could not decode
+note switchD         a jump table the decompiler resolved statically
+note __stack_chk_fail  the compiler's stack guard fired
+note _Unwind_Resume  C++ exception unwinding continues here
+note CONCAT          two smaller values glued into a wider one
+note SUB             a slice of a wider value
+note in_stack_       a value the caller left on the stack; the prototype is incomplete
+note unaff_          a register the decompiler could not attribute to this function
+note extraout_       a second value returned in another register
+
+# -------------------------------------------------------- library prototypes
+#
+# Types written in the decompiler's own core type names. WORD and SWORD stand
+# for a pointer-sized unsigned and signed integer, filled in per architecture.
+
+proto printf     extern int4 printf(char *format, ...);
+proto fprintf    extern int4 fprintf(void *stream, char *format, ...);
+proto sprintf    extern int4 sprintf(char *buffer, char *format, ...);
+proto snprintf   extern int4 snprintf(char *buffer, WORD size, char *format, ...);
+proto scanf      extern int4 scanf(char *format, ...);
+proto sscanf     extern int4 sscanf(char *input, char *format, ...);
+proto puts       extern int4 puts(char *text);
+proto fputs      extern int4 fputs(char *text, void *stream);
+proto putchar    extern int4 putchar(int4 c);
+proto getchar    extern int4 getchar(void);
+proto fopen      extern void *fopen(char *path, char *mode);
+proto fclose     extern int4 fclose(void *stream);
+proto fread      extern WORD fread(void *buffer, WORD size, WORD count, void *stream);
+proto fwrite     extern WORD fwrite(void *buffer, WORD size, WORD count, void *stream);
+proto fseek      extern int4 fseek(void *stream, SWORD offset, int4 origin);
+proto ftell      extern SWORD ftell(void *stream);
+proto fflush     extern int4 fflush(void *stream);
+proto fgets      extern char *fgets(char *buffer, int4 size, void *stream);
+proto perror     extern void perror(char *message);
+proto strlen     extern WORD strlen(char *text);
+proto strcpy     extern char *strcpy(char *destination, char *source);
+proto strncpy    extern char *strncpy(char *destination, char *source, WORD count);
+proto strcat     extern char *strcat(char *destination, char *source);
+proto strncat    extern char *strncat(char *destination, char *source, WORD count);
+proto strcmp     extern int4 strcmp(char *left, char *right);
+proto strncmp    extern int4 strncmp(char *left, char *right, WORD count);
+proto strchr     extern char *strchr(char *text, int4 c);
+proto strrchr    extern char *strrchr(char *text, int4 c);
+proto strstr     extern char *strstr(char *haystack, char *needle);
+proto strdup     extern char *strdup(char *text);
+proto strerror   extern char *strerror(int4 code);
+proto memcpy     extern void *memcpy(void *destination, void *source, WORD count);
+proto memmove    extern void *memmove(void *destination, void *source, WORD count);
+proto memset     extern void *memset(void *destination, int4 value, WORD count);
+proto memcmp     extern int4 memcmp(void *left, void *right, WORD count);
+proto malloc     extern void *malloc(WORD size);
+proto calloc     extern void *calloc(WORD count, WORD size);
+proto realloc    extern void *realloc(void *pointer, WORD size);
+proto free       extern void free(void *pointer);
+proto exit       extern void exit(int4 status);
+proto abort      extern void abort(void);
+proto atoi       extern int4 atoi(char *text);
+proto atol       extern SWORD atol(char *text);
+proto strtol     extern SWORD strtol(char *text, char **end, int4 base);
+proto strtoul    extern WORD strtoul(char *text, char **end, int4 base);
+proto atof       extern float8 atof(char *text);
+proto getenv     extern char *getenv(char *name);
+proto system     extern int4 system(char *command);
+proto open       extern int4 open(char *path, int4 flags, ...);
+proto close      extern int4 close(int4 fd);
+proto read       extern SWORD read(int4 fd, void *buffer, WORD count);
+proto write      extern SWORD write(int4 fd, void *buffer, WORD count);
+proto unlink     extern int4 unlink(char *path);
+proto usleep     extern int4 usleep(uint4 microseconds);
+proto sleep      extern uint4 sleep(uint4 seconds);
+proto qsort      extern void qsort(void *base, WORD count, WORD size, void *compare);
+proto toupper    extern int4 toupper(int4 c);
+proto tolower    extern int4 tolower(int4 c);
+proto isalpha    extern int4 isalpha(int4 c);
+proto isdigit    extern int4 isdigit(int4 c);
+proto isspace    extern int4 isspace(int4 c);
+
+# The header that really declares each of these, preferred over restating the
+# prototype in the emitted C.
+hdr printf stdio.h
+hdr fprintf stdio.h
+hdr sprintf stdio.h
+hdr snprintf stdio.h
+hdr scanf stdio.h
+hdr sscanf stdio.h
+hdr puts stdio.h
+hdr fputs stdio.h
+hdr putchar stdio.h
+hdr getchar stdio.h
+hdr fopen stdio.h
+hdr fclose stdio.h
+hdr fread stdio.h
+hdr fwrite stdio.h
+hdr fseek stdio.h
+hdr ftell stdio.h
+hdr fflush stdio.h
+hdr fgets stdio.h
+hdr perror stdio.h
+hdr strlen string.h
+hdr strcpy string.h
+hdr strncpy string.h
+hdr strcat string.h
+hdr strncat string.h
+hdr strcmp string.h
+hdr strncmp string.h
+hdr strchr string.h
+hdr strrchr string.h
+hdr strstr string.h
+hdr strdup string.h
+hdr strerror string.h
+hdr memcpy string.h
+hdr memmove string.h
+hdr memset string.h
+hdr memcmp string.h
+hdr malloc stdlib.h
+hdr calloc stdlib.h
+hdr realloc stdlib.h
+hdr free stdlib.h
+hdr exit stdlib.h
+hdr abort stdlib.h
+hdr atoi stdlib.h
+hdr atol stdlib.h
+hdr strtol stdlib.h
+hdr strtoul stdlib.h
+hdr atof stdlib.h
+hdr getenv stdlib.h
+hdr system stdlib.h
+hdr qsort stdlib.h
+hdr close unistd.h
+hdr read unistd.h
+hdr write unistd.h
+hdr unlink unistd.h
+hdr usleep unistd.h
+hdr sleep unistd.h
+hdr open fcntl.h
+hdr toupper ctype.h
+hdr tolower ctype.h
+hdr isalpha ctype.h
+hdr isdigit ctype.h
+hdr isspace ctype.h

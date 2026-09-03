@@ -1,0 +1,1148 @@
+// Binds a loaded BinaryImage to Ghidra's decompiler core: a LoadImage over the
+// image, a SleighArchitecture that uses it, and the analysis entry points.
+#include "session.hh"
+
+#include "creal.hh"
+#include "langmap.hh"
+#include "knowledge.hh"
+#include "libc_protos.hh"
+#include "naming.hh"
+
+#include "architecture.hh"
+#include "block.hh"
+#include "funcdata.hh"
+#include "libdecomp.hh"
+#include "printc.hh"
+#include "sleigh_arch.hh"
+#include "slgh_compile.hh"
+#include "types.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+#include <sstream>
+#include <vector>
+
+#include <dirent.h>
+#include <sys/stat.h>
+
+namespace astral_internal {
+namespace {
+
+bool g_initialized = false;
+
+// A LoadImage backed by an in-memory BinaryImage.
+class ImageLoadImage : public ghidra::LoadImage {
+public:
+    ImageLoadImage(const BinaryImage &image, const std::string &archtype)
+        : ghidra::LoadImage(image.path.empty() ? std::string("<memory>") : image.path),
+          image_(image), archtype_(archtype)
+    {
+    }
+
+    void loadFill(ghidra::uint1 *ptr, ghidra::int4 size, const ghidra::Address &addr) override
+    {
+        uint64_t off = addr.getOffset() + vma_adjust_;
+        size_t covered = image_.read(off, ptr, static_cast<size_t>(size));
+        if (covered == 0)
+            throw ghidra::DataUnavailError("Address not in image: 0x" +
+                                           to_hex(addr.getOffset()));
+    }
+
+    std::string getArchType(void) const override { return archtype_; }
+
+    void adjustVma(long adjust) override { vma_adjust_ -= adjust; }
+
+    void openSymbols(void) const override { symbol_cursor_ = 0; }
+
+    bool getNextSymbol(ghidra::LoadImageFunc &record) const override
+    {
+        while (symbol_cursor_ < image_.symbols.size()) {
+            const Symbol &sym = image_.symbols[symbol_cursor_++];
+            if (!sym.is_function)
+                continue;
+            record.address = ghidra::Address(space_, sym.address);
+            record.name = sym.name;
+            return true;
+        }
+        return false;
+    }
+
+    void openSectionInfo(void) const override { section_cursor_ = 0; }
+
+    bool getNextSection(ghidra::LoadImageSection &sec) const override
+    {
+        if (section_cursor_ >= image_.segments.size())
+            return false;
+        const Segment &seg = image_.segments[section_cursor_++];
+        sec.address = ghidra::Address(space_, seg.address);
+        sec.size = seg.size;
+        sec.flags = 0;
+        if (seg.executable)
+            sec.flags |= ghidra::LoadImageSection::code;
+        else
+            sec.flags |= ghidra::LoadImageSection::data;
+        if (!seg.writable)
+            sec.flags |= ghidra::LoadImageSection::readonly;
+        return true;
+    }
+
+    void getReadonly(ghidra::RangeList &list) const override
+    {
+        for (const Segment &seg : image_.segments) {
+            if (seg.writable || seg.size == 0)
+                continue;
+            list.insertRange(space_, seg.address, seg.address + seg.size - 1);
+        }
+    }
+
+    void attachToSpace(ghidra::AddrSpace *space) { space_ = space; }
+
+private:
+    static std::string to_hex(uint64_t v)
+    {
+        std::ostringstream s;
+        s << std::hex << v;
+        return s.str();
+    }
+
+    const BinaryImage &image_;
+    std::string archtype_;
+    ghidra::AddrSpace *space_ = nullptr;
+    uint64_t vma_adjust_ = 0;
+    mutable size_t symbol_cursor_ = 0;
+    mutable size_t section_cursor_ = 0;
+};
+
+// A SleighArchitecture whose load image is the one supplied by this library.
+class StandaloneArchitecture : public ghidra::SleighArchitecture {
+public:
+    StandaloneArchitecture(const BinaryImage &image, const std::string &archid, std::ostream *errs)
+        : ghidra::SleighArchitecture(image.path.empty() ? std::string("<memory>") : image.path,
+                                     archid, errs),
+          image_(image)
+    {
+    }
+
+protected:
+    void buildLoader(ghidra::DocumentStorage &store) override
+    {
+        collectSpecFiles(*errorstream);
+        loader = new ImageLoadImage(image_, getTarget());
+    }
+
+    void resolveArchitecture(void) override
+    {
+        archid = getTarget();
+        ghidra::SleighArchitecture::resolveArchitecture();
+    }
+
+    void postSpecFile(void) override
+    {
+        ghidra::Architecture::postSpecFile();
+        static_cast<ImageLoadImage *>(loader)->attachToSpace(getDefaultCodeSpace());
+    }
+
+private:
+    const BinaryImage &image_;
+};
+
+class StringAssemblyEmit : public ghidra::AssemblyEmit {
+public:
+    explicit StringAssemblyEmit(std::ostringstream &out) : out_(out) {}
+    void dump(const ghidra::Address &addr, const std::string &mnem, const std::string &body) override
+    {
+        addr.printRaw(out_);
+        out_ << ": " << mnem << ' ' << body << '\n';
+    }
+
+private:
+    std::ostringstream &out_;
+};
+
+class StringPcodeEmit : public ghidra::PcodeEmit {
+public:
+    StringPcodeEmit(std::ostringstream &out, const ghidra::Translate *trans)
+        : out_(out), trans_(trans)
+    {
+    }
+
+    void dump(const ghidra::Address &addr, ghidra::OpCode opc, ghidra::VarnodeData *outvar,
+              ghidra::VarnodeData *vars, ghidra::int4 isize) override
+    {
+        addr.printRaw(out_);
+        out_ << ": ";
+        if (outvar != nullptr) {
+            print_varnode(*outvar);
+            out_ << " = ";
+        }
+        out_ << ghidra::get_opname(opc);
+        for (ghidra::int4 i = 0; i < isize; ++i) {
+            out_ << ' ';
+            print_varnode(vars[i]);
+        }
+        out_ << '\n';
+    }
+
+private:
+    void print_varnode(const ghidra::VarnodeData &v)
+    {
+        const std::string name = trans_->getRegisterName(v.space, v.offset, v.size);
+        if (!name.empty()) {
+            out_ << name;
+            return;
+        }
+        out_ << '(' << v.space->getName() << ", 0x" << std::hex << v.offset << std::dec << ", "
+             << v.size << ')';
+    }
+
+    std::ostringstream &out_;
+    const ghidra::Translate *trans_;
+};
+
+// Collects every directory under `root` that holds at least one .ldefs file.
+void collect_spec_dirs(const std::string &root, int depth, std::vector<std::string> &out)
+{
+    if (depth > 6)
+        return;
+    DIR *dir = opendir(root.c_str());
+    if (dir == nullptr)
+        return;
+    bool has_ldefs = false;
+    std::vector<std::string> subdirs;
+    while (struct dirent *entry = readdir(dir)) {
+        const std::string name = entry->d_name;
+        if (name == "." || name == "..")
+            continue;
+        const std::string full = root + "/" + name;
+        struct stat st;
+        if (stat(full.c_str(), &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode))
+            subdirs.push_back(full);
+        else if (name.size() > 6 && name.compare(name.size() - 6, 6, ".ldefs") == 0)
+            has_ldefs = true;
+    }
+    closedir(dir);
+    if (has_ldefs)
+        out.push_back(root);
+    for (const std::string &sub : subdirs)
+        collect_spec_dirs(sub, depth + 1, out);
+}
+
+std::string type_text(ghidra::Datatype *type)
+{
+    if (type == nullptr)
+        return "void";
+    std::ostringstream s;
+    type->printRaw(s);
+    return s.str();
+}
+
+// An integer type wide enough for a varnode of this many bytes.
+const char *width_type(int bytes)
+{
+    if (bytes <= 1)
+        return "uint8_t";
+    if (bytes <= 2)
+        return "uint16_t";
+    if (bytes <= 4)
+        return "uint32_t";
+    return "uint64_t";
+}
+
+// The C type of the expression printed for one argument of a call. Using the
+// varnode's own type keeps the prototype agreeing with the call site; an array
+// is written as a pointer, which is what it decays to when passed.
+std::string argument_type(const ghidra::PcodeOp *call_op, int slot)
+{
+    const ghidra::Varnode *vn = call_op->getIn(slot);
+    ghidra::Datatype *type = vn->getHighTypeReadFacing(call_op);
+    if (type == nullptr || type->getMetatype() == ghidra::TYPE_VOID)
+        return width_type(vn->getSize());
+    if (type->getMetatype() == ghidra::TYPE_ARRAY) {
+        const ghidra::TypeArray *array = static_cast<const ghidra::TypeArray *>(type);
+        return type_text(array->getBase()) + " *";
+    }
+    return type_text(type);
+}
+
+// The C type of the value a call produces. As with arguments, the prototype has
+// to agree with what the call site does: a result the printed code assigns
+// cannot come from a function declared void.
+std::string result_type(const ghidra::FuncProto &proto, const ghidra::PcodeOp *call_op)
+{
+    if (call_op != nullptr && !proto.isOutputLocked()) {
+        const ghidra::Varnode *out = call_op->getOut();
+        if (out != nullptr) {
+            ghidra::Datatype *type = out->getHighTypeDefFacing();
+            if (type != nullptr && type->getMetatype() != ghidra::TYPE_VOID)
+                return type_text(type);
+            return width_type(out->getSize());
+        }
+    }
+    return type_text(proto.getOutputType());
+}
+
+// Renders a callable's C prototype.
+//
+// Where the decompiler locked down a prototype, that is what the call site
+// prints and what gets emitted. Where it did not, the printed call still passes
+// whatever the CALL operation carries, so the arguments are taken from there
+// instead; a prototype that disagreed with its own call sites would not compile.
+std::string prototype_text(const ghidra::FuncProto &proto, const std::string &name,
+                           const ghidra::PcodeOp *call_op)
+{
+    int actual = -1;
+    if (call_op != nullptr && !proto.isInputLocked())
+        actual = static_cast<int>(call_op->numInput()) - 1;
+
+    std::ostringstream s;
+    s << "extern " << result_type(proto, call_op) << ' ' << name << '(';
+    if (actual > proto.numParams()) {
+        for (int i = 0; i < actual; ++i) {
+            if (i != 0)
+                s << ", ";
+            s << argument_type(call_op, i + 1);
+        }
+        s << ");";
+        return s.str();
+    }
+
+    const int count = proto.numParams();
+    for (int i = 0; i < count; ++i) {
+        if (i != 0)
+            s << ", ";
+        s << type_text(proto.getParam(i)->getType());
+    }
+    if (proto.isDotdotdot())
+        s << (count == 0 ? "..." : ", ...");
+    else if (count == 0)
+        s << "void";
+    s << ");";
+    return s.str();
+}
+
+} // namespace
+
+// ------------------------------------------------------------------ global
+
+astral_status initialize(const char *spec_root)
+{
+    std::string root;
+    if (spec_root != nullptr && spec_root[0] != '\0') {
+        root = spec_root;
+    } else if (const char *env = std::getenv("ASTRAL_SPECS")) {
+        root = env;
+    } else {
+        root = ASTRAL_DEFAULT_SPEC_ROOT;
+    }
+
+    // Ghidra's own scan expects a full installation tree. This library ships a
+    // flat <root>/<Processor>/data/languages layout, so the directories holding
+    // .ldefs files are collected directly.
+    std::vector<std::string> spec_dirs;
+    collect_spec_dirs(root, 0, spec_dirs);
+    if (spec_dirs.empty())
+        return ASTRAL_ERR_SPECS_MISSING;
+
+    try {
+        ghidra::startDecompilerLibrary(spec_dirs);
+    } catch (ghidra::LowlevelError &err) {
+        return ASTRAL_ERR_SPECS_MISSING;
+    }
+    g_initialized = true;
+    if (ghidra::SleighArchitecture::getDescriptions().empty())
+        return ASTRAL_ERR_SPECS_MISSING;
+    return ASTRAL_OK;
+}
+
+void terminate()
+{
+    if (!g_initialized)
+        return;
+    ghidra::SleighArchitecture::shutdown();
+    ghidra::shutdownDecompilerLibrary();
+    g_initialized = false;
+}
+
+bool is_initialized() { return g_initialized; }
+
+int language_count()
+{
+    if (!g_initialized)
+        return 0;
+    return static_cast<int>(ghidra::SleighArchitecture::getDescriptions().size());
+}
+
+const char *language_id_at(int index)
+{
+    const auto &all = ghidra::SleighArchitecture::getDescriptions();
+    if (index < 0 || static_cast<size_t>(index) >= all.size())
+        return nullptr;
+    return all[index].getId().c_str();
+}
+
+const char *language_description_at(int index)
+{
+    const auto &all = ghidra::SleighArchitecture::getDescriptions();
+    if (index < 0 || static_cast<size_t>(index) >= all.size())
+        return nullptr;
+    return all[index].getDescription().c_str();
+}
+
+bool compile_sleigh(const std::string &slaspec, const std::string &sla, std::string &error)
+{
+    try {
+        ghidra::AttributeId::initialize();
+        ghidra::ElementId::initialize();
+        ghidra::SleighCompile compiler;
+        std::map<std::string, std::string> defines;
+        compiler.setAllOptions(defines, false, true, false, false, false, false, false, false);
+        if (compiler.run_compilation(slaspec, sla) != 0) {
+            error = "sleigh compilation of " + slaspec + " failed";
+            return false;
+        }
+        return true;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        return false;
+    }
+}
+
+// ----------------------------------------------------------------- session
+
+Session::~Session()
+{
+    delete arch_;
+}
+
+std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &language_override,
+                                         std::string &error)
+{
+    if (!g_initialized) {
+        error = "astral_init has not been called";
+        return nullptr;
+    }
+
+    std::unique_ptr<Session> session(new Session());
+    session->image_ = std::move(image);
+
+    if (!language_override.empty())
+        session->archid_ = complete_architecture(language_override, session->image_.arch.abi, error);
+    else
+        session->archid_ = choose_architecture(session->image_.arch, error);
+    if (session->archid_.empty())
+        return nullptr;
+
+    try {
+        StandaloneArchitecture *arch =
+            new StandaloneArchitecture(session->image_, session->archid_, &session->messages_);
+        ghidra::DocumentStorage store;
+        arch->init(store);
+        session->arch_ = arch;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        const std::string messages = session->messages_.str();
+        if (!messages.empty())
+            error += " (" + messages + ")";
+        return nullptr;
+    } catch (ghidra::DecoderError &err) {
+        error = err.explain;
+        return nullptr;
+    }
+
+    // Register the symbols the loader recovered so calls print by name.
+    try {
+        session->arch_->readLoaderSymbols("::");
+    } catch (ghidra::LowlevelError &err) {
+        // Symbol import is best-effort; a bad entry must not sink the session.
+    }
+    // Typing the library functions it imports is what lets string arguments
+    // print as strings rather than as addresses.
+    try {
+        apply_library_prototypes(session->arch_);
+    } catch (ghidra::LowlevelError &err) {
+    }
+    // A body the user has named before comes back with that name.
+    try {
+        session->apply_learned_names();
+    } catch (ghidra::LowlevelError &err) {
+    }
+    return session;
+}
+
+std::string Session::language_id() const
+{
+    size_t last = archid_.rfind(':');
+    return last == std::string::npos ? archid_ : archid_.substr(0, last);
+}
+
+std::string Session::compiler_spec() const
+{
+    size_t last = archid_.rfind(':');
+    return last == std::string::npos ? std::string() : archid_.substr(last + 1);
+}
+
+bool Session::big_endian() const
+{
+    return arch_ != nullptr && arch_->translate != nullptr && arch_->translate->isBigEndian();
+}
+
+int Session::pointer_size() const
+{
+    if (arch_ == nullptr)
+        return 0;
+    return arch_->getDefaultCodeSpace()->getAddrSize();
+}
+
+bool Session::add_symbol(uint64_t address, const std::string &name, bool is_function,
+                         std::string &error)
+{
+    try {
+        ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+        ghidra::Scope *scope = arch_->symboltab->getGlobalScope();
+        if (is_function)
+            scope->addFunction(addr, name);
+        else
+            scope->addSymbol(name, arch_->types->getBase(pointer_size(), ghidra::TYPE_UNKNOWN),
+                             addr, addr);
+        Symbol sym;
+        sym.address = address;
+        sym.name = name;
+        sym.is_function = is_function;
+        image_.symbols.push_back(std::move(sym));
+        image_.sort_and_dedup_symbols();
+        globals_valid_ = false;
+        return true;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        return false;
+    }
+}
+
+bool Session::set_option(const std::string &name, const std::string &value, std::string &error)
+{
+    try {
+        ghidra::uint4 id = ghidra::ElementId::find(name, 0);
+        if (id == 0) {
+            error = "no decompiler option named '" + name + "'";
+            return false;
+        }
+        std::string message = arch_->options->set(id, value, "", "");
+        (void)message;
+        return true;
+    } catch (ghidra::ParseError &err) {
+        error = err.explain;
+        return false;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        return false;
+    }
+}
+
+bool Session::disassemble(uint64_t address, int count, std::string &out, std::string &error)
+{
+    if (count <= 0) {
+        error = "instruction count must be positive";
+        return false;
+    }
+    std::ostringstream s;
+    StringAssemblyEmit emit(s);
+    ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+    // An undecodable byte ends the listing rather than discarding what decoded
+    // before it, which is what a caller walking unknown bytes needs.
+    for (int i = 0; i < count; ++i) {
+        try {
+            int len = arch_->translate->printAssembly(emit, addr);
+            if (len <= 0)
+                break;
+            addr = addr + len;
+        } catch (ghidra::LowlevelError &err) {
+            if (i == 0) {
+                error = err.explain;
+                return false;
+            }
+            break;
+        }
+    }
+    out = s.str();
+    return true;
+}
+
+bool Session::pcode(uint64_t address, int count, std::string &out, std::string &error)
+{
+    if (count <= 0) {
+        error = "instruction count must be positive";
+        return false;
+    }
+    std::ostringstream s;
+    StringPcodeEmit emit(s, arch_->translate);
+    ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+    for (int i = 0; i < count; ++i) {
+        try {
+            int len = arch_->translate->oneInstruction(emit, addr);
+            if (len <= 0)
+                break;
+            addr = addr + len;
+        } catch (ghidra::LowlevelError &err) {
+            if (i == 0) {
+                error = err.explain;
+                return false;
+            }
+            break;
+        }
+    }
+    out = s.str();
+    return true;
+}
+
+bool Session::decompile(uint64_t address, const std::string &name, FunctionResult &out,
+                        std::string &error)
+{
+    if (!image_.contains(address)) {
+        error = "address is not mapped by the image";
+        return false;
+    }
+    try {
+        ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+        ghidra::Scope *global = arch_->symboltab->getGlobalScope();
+        ghidra::Funcdata *fd = global->queryFunction(addr);
+        if (fd == nullptr) {
+            std::string funcname = name;
+            if (funcname.empty())
+                arch_->nameFunction(addr, funcname);
+            fd = global->addFunction(addr, funcname)->getFunction();
+        } else if (!name.empty() && fd->getName() != name) {
+            // A caller-supplied name wins over whatever the loader recorded.
+            arch_->symboltab->getGlobalScope()->renameSymbol(fd->getSymbol(), name);
+        }
+
+        if (fd->hasNoCode()) {
+            error = "no code at that address";
+            return false;
+        }
+        if (fd->isProcStarted())
+            arch_->clearAnalysis(fd);
+
+        ghidra::AddrSpace *space = addr.getSpace();
+        fd->followFlow(ghidra::Address(space, 0), ghidra::Address(space, space->getHighest()));
+
+        arch_->allacts.getCurrent()->reset(*fd);
+        arch_->allacts.getCurrent()->perform(*fd);
+
+        analyse_function(fd, out);
+
+        // Following flow can create function symbols for call targets.
+        globals_valid_ = false;
+
+        if (auto_naming_) {
+            const std::string chosen = apply_naming(fd, out);
+            if (!chosen.empty()) {
+                // The recovered name is cached in the function and in every
+                // call site that refers to it, so the function is rebuilt under
+                // its new name rather than relabelled after the fact.
+                const std::string reason = out.naming_reason;
+                global->removeSymbol(fd->getSymbol());
+                fd = global->addFunction(addr, chosen)->getFunction();
+                // Now that it has a name, anything known about a function of
+                // that name applies: the prototype read from the source that
+                // built it gives real argument types and argument names.
+                apply_known_prototype(chosen);
+                ghidra::AddrSpace *again = addr.getSpace();
+                fd->followFlow(ghidra::Address(again, 0),
+                               ghidra::Address(again, again->getHighest()));
+                arch_->allacts.getCurrent()->reset(*fd);
+                arch_->allacts.getCurrent()->perform(*fd);
+                analyse_function(fd, out);
+                out.naming_reason = reason;
+                // Name its values again, now that the body is final.
+                apply_naming(fd, out);
+            }
+        }
+
+        realize_c(out);
+        collect_externals(out, fd);
+        return true;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        return false;
+    } catch (ghidra::DecoderError &err) {
+        error = err.explain;
+        return false;
+    }
+}
+
+
+const std::map<std::string, Session::GlobalSymbol> &Session::globals() const
+{
+    if (globals_valid_)
+        return globals_;
+    globals_.clear();
+    const ghidra::Scope *scope = arch_->symboltab->getGlobalScope();
+    for (ghidra::MapIterator it = scope->begin(); it != scope->end(); ++it) {
+        const ghidra::SymbolEntry *entry = *it;
+        if (entry == nullptr || entry->isPiece())
+            continue;
+        ghidra::Symbol *symbol = entry->getSymbol();
+        if (symbol == nullptr || symbol->getName().empty())
+            continue;
+        GlobalSymbol record;
+        record.address = entry->getAddr().getOffset();
+        record.is_function = dynamic_cast<ghidra::FunctionSymbol *>(symbol) != nullptr;
+        record.type_text = type_text(symbol->getType());
+        globals_.emplace(symbol->getName(), std::move(record));
+    }
+    globals_valid_ = true;
+    return globals_;
+}
+
+// Works out what the emitted body references without declaring, and renders a C
+// declaration for each: an exact prototype for a call, the recovered type for a
+// global, and a width-appropriate guess for an unnamed memory location.
+void Session::collect_externals(FunctionResult &result, const void *funcdata) const
+{
+    const ghidra::Funcdata *fd = static_cast<const ghidra::Funcdata *>(funcdata);
+
+    std::set<std::string> declared;
+    declared.insert(result.name);
+    for (const std::string &name : result.parameter_names)
+        declared.insert(name);
+    for (const std::string &name : result.local_names)
+        declared.insert(name);
+
+    // Prototypes for the call sites, which know the exact argument types. A
+    // target with no symbol is printed under a name derived from its address,
+    // so register the prototype under that spelling as well.
+    std::map<std::string, std::string> call_prototypes;
+    for (int i = 0; i < fd->numCalls(); ++i) {
+        const ghidra::FuncCallSpecs *call = fd->getCallSpecs(i);
+        std::string names[2];
+        names[0] = result.callee_names[static_cast<size_t>(i)];
+        if (!call->getEntryAddress().isInvalid())
+            arch_->nameFunction(call->getEntryAddress(), names[1]);
+        for (const std::string &name : names) {
+            if (name.empty() || name == result.name)
+                continue;
+            call_prototypes.emplace(name, prototype_text(*call, name, call->getOp()));
+        }
+    }
+
+    const std::map<std::string, GlobalSymbol> &known = globals();
+    std::set<std::string> seen;
+    for (const Identifier &identifier : scan_identifiers(result.c_code_real)) {
+        const std::string &name = identifier.name;
+        if (declared.count(name) != 0 || seen.count(name) != 0)
+            continue;
+        if (is_runtime_identifier(name))
+            continue;
+        seen.insert(name);
+
+        Declaration declaration;
+        declaration.name = name;
+
+        auto prototype = call_prototypes.find(name);
+        if (prototype != call_prototypes.end()) {
+            declaration.text = prototype->second;
+            declaration.is_function = true;
+            auto known_entry = known.find(name);
+            if (known_entry != known.end())
+                declaration.address = known_entry->second.address;
+            result.externals.push_back(std::move(declaration));
+            continue;
+        }
+
+        auto known_entry = known.find(name);
+        if (known_entry != known.end()) {
+            declaration.address = known_entry->second.address;
+            declaration.is_function = known_entry->second.is_function;
+            if (known_entry->second.is_function) {
+                ghidra::Funcdata *callee =
+                    arch_->symboltab->getGlobalScope()->queryFunction(name);
+                declaration.text = callee != nullptr
+                    ? prototype_text(callee->getFuncProto(), name, nullptr)
+                    : "extern void " + name + "();";
+            } else {
+                declaration.text =
+                    "extern " + format_declaration(known_entry->second.type_text, name) + ";";
+            }
+            result.externals.push_back(std::move(declaration));
+            continue;
+        }
+
+        // Not a symbol: an unnamed location the printer named after its type and
+        // address, such as iRam000000010000c068 or a call target.
+        declaration.is_function = identifier.called;
+        if (identifier.called) {
+            declaration.text = "extern void " + name + "();";
+        } else {
+            declaration.text = "extern " + unnamed_location_type(name) + " " + name + ";";
+        }
+        result.externals.push_back(std::move(declaration));
+    }
+}
+
+
+// Reads everything Astral reports about a function out of the decompiled form.
+void Session::analyse_function(void *funcdata, FunctionResult &out)
+{
+    ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
+    ghidra::Scope *global = arch_->symboltab->getGlobalScope();
+    out = FunctionResult();
+    std::ostringstream code;
+    arch_->print->setOutputStream(&code);
+    arch_->print->docFunction(fd);
+
+    out.name = fd->getName();
+    out.address = fd->getAddress().getOffset();
+    out.size = static_cast<uint64_t>(fd->getSize());
+    out.c_code = code.str();
+
+    const ghidra::FuncProto &proto = fd->getFuncProto();
+    out.calling_convention = proto.getModelName();
+    out.return_type = type_text(proto.getOutputType());
+
+    std::ostringstream sig;
+    sig << out.return_type << ' ' << out.name << '(';
+    for (int i = 0; i < proto.numParams(); ++i) {
+        ghidra::ProtoParameter *param = proto.getParam(i);
+        std::string ptype = type_text(param->getType());
+        out.parameter_types.push_back(ptype);
+        out.parameter_names.push_back(param->getName());
+        if (i != 0)
+            sig << ", ";
+        sig << ptype << ' ' << param->getName();
+    }
+    if (proto.numParams() == 0)
+        sig << "void";
+    sig << ')';
+    out.signature = sig.str();
+
+    const ghidra::Scope *locals = fd->getScopeLocal();
+    for (ghidra::MapIterator it = locals->begin(); it != locals->end(); ++it) {
+        const ghidra::SymbolEntry *entry = *it;
+        if (entry->isPiece())
+            continue;
+        ghidra::Symbol *sym = entry->getSymbol();
+        if (sym == nullptr || sym->getName().empty())
+            continue;
+        if (dynamic_cast<ghidra::FunctionSymbol *>(sym) != nullptr)
+            continue;
+        if (sym->getCategory() == 0) // formal parameters, already reported
+            continue;
+        out.local_names.push_back(sym->getName());
+        out.local_types.push_back(type_text(sym->getType()));
+    }
+
+    for (int i = 0; i < fd->numCalls(); ++i) {
+        const ghidra::FuncCallSpecs *call = fd->getCallSpecs(i);
+        const ghidra::Address &entry = call->getEntryAddress();
+        // An indirect call has no static target, and its address carries no
+        // space; asking anything of it would dereference null.
+        if (entry.isInvalid()) {
+            out.callees.push_back(0);
+            out.callee_names.push_back(std::string());
+            continue;
+        }
+        out.callees.push_back(entry.getOffset());
+        ghidra::Funcdata *callee = global->queryFunction(entry);
+        out.callee_names.push_back(callee != nullptr ? callee->getName() : std::string());
+    }
+
+    const ghidra::BlockGraph &blocks = fd->getBasicBlocks();
+    for (int i = 0; i < blocks.getSize(); ++i)
+        out.block_addresses.push_back(blocks.getBlock(i)->getStart().getOffset());
+
+}
+
+// Names what the decompiler could only number, using the evidence the body
+// still carries, then prints it again so the names appear throughout.
+std::string Session::apply_naming(void *funcdata, FunctionResult &out)
+{
+    ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
+    const Knowledge &knowledge = Knowledge::instance();
+
+    // A name the user chose for this same body, in this or any other program,
+    // outranks anything Astral could infer: it is the one piece of evidence
+    // that came from someone who knew.
+    std::string learned;
+    if (knowledge.is_placeholder(out.name))
+        learned = learned_name_for(out.address, out.size);
+
+    NamingResult naming = analyse(out.c_code, out.name, out.callee_names, out.local_names,
+                                  out.parameter_names, knowledge);
+    if (!learned.empty()) {
+        naming.function_name = learned;
+        naming.function_reason = "you named this body before";
+    }
+    if (naming.empty())
+        return std::string();
+
+    bool renamed_function = false;
+
+    // Local variables first: renaming these changes nothing else, so it is safe
+    // even when the evidence is only suggestive.
+    if (!naming.variables.empty()) {
+        ghidra::Scope *locals = fd->getScopeLocal();
+        for (const auto &rename : naming.variables) {
+            ghidra::Symbol *symbol = nullptr;
+            for (ghidra::MapIterator it = locals->begin(); it != locals->end(); ++it) {
+                const ghidra::SymbolEntry *entry = *it;
+                if (entry == nullptr || entry->isPiece())
+                    continue;
+                if (entry->getSymbol() != nullptr && entry->getSymbol()->getName() == rename.first) {
+                    symbol = entry->getSymbol();
+                    break;
+                }
+            }
+            if (symbol == nullptr)
+                continue;
+            try {
+                locals->renameSymbol(symbol, rename.second);
+                out.applied_renames.push_back(rename);
+            } catch (ghidra::LowlevelError &) {
+                // A name the scope will not accept is simply not applied.
+            }
+        }
+    }
+
+    // The function's own name is a stronger claim, so it is only made when the
+    // current one carries no information. The caller performs it, because a
+    // function has to be rebuilt under its name for that name to propagate.
+    std::string proposed_name;
+    if (!naming.function_name.empty() && knowledge.is_placeholder(out.name)) {
+        ghidra::Scope *global = arch_->symboltab->getGlobalScope();
+        proposed_name = naming.function_name;
+        for (int suffix = 2; global->queryFunction(proposed_name) != nullptr && suffix < 100;
+             ++suffix)
+            proposed_name = naming.function_name + std::to_string(suffix);
+        out.naming_reason = proposed_name + ": " + naming.function_reason;
+        renamed_function = true;
+    }
+
+    out.comments = naming.comments;
+
+    if (!renamed_function && !out.applied_renames.empty()) {
+        // Renaming locals changes nothing the analysis depends on, so printing
+        // again is enough to make the new names appear throughout.
+        std::ostringstream code;
+        arch_->print->setOutputStream(&code);
+        arch_->print->docFunction(fd);
+        out.c_code = code.str();
+    }
+    return proposed_name;
+}
+
+// The name the knowledge base holds for the body at this address, if any.
+//
+// Where a function ends is rarely known exactly: the decompiler's recovered
+// size and the size a symbol table reported are usually different numbers for
+// the same code. So rather than trusting one length, every length the database
+// holds is tried, and the longest match wins because it is the most specific.
+std::string Session::learned_name_for(uint64_t address, uint64_t size) const
+{
+    const Knowledge &knowledge = Knowledge::instance();
+    const std::set<uint32_t> &lengths = knowledge.signature_lengths();
+    if (lengths.empty())
+        return std::string();
+
+    const uint32_t longest = *lengths.rbegin();
+    size_t window = std::min<size_t>(longest, 1u << 18);
+    if (size > 0)
+        window = std::max<size_t>(window, static_cast<size_t>(std::min<uint64_t>(size, 1u << 18)));
+
+    std::vector<uint8_t> body(window);
+    const size_t got = image_.read(address, body.data(), body.size());
+    if (got < 8)
+        return std::string();
+    body.resize(got);
+
+    const std::string processor = language_id().substr(0, language_id().find(':'));
+    std::string best;
+    uint32_t best_length = 0;
+    fingerprint_prefixes(body.data(), body.size(), processor, lengths,
+                         [&](uint32_t length, uint64_t hash) {
+                             const std::string name = knowledge.signature_name(hash, length);
+                             if (!name.empty() && length > best_length) {
+                                 best_length = length;
+                                 best = name;
+                             }
+                         });
+    return best;
+}
+
+// Gives a named function the prototype the knowledge base holds for that name.
+void Session::apply_known_prototype(const std::string &name)
+{
+    const std::string declaration = Knowledge::instance().prototype_for(name);
+    if (declaration.empty())
+        return;
+    try {
+        std::istringstream stream(size_types_for(declaration));
+        ghidra::parse_C(arch_, stream);
+    } catch (ghidra::ParseError &) {
+    } catch (ghidra::LowlevelError &) {
+    }
+}
+
+int Session::learn_symbols(std::string &error)
+{
+    Knowledge &knowledge = Knowledge::instance();
+    const std::string processor = language_id().substr(0, language_id().find(':'));
+    int learned = 0;
+
+    for (const Symbol &symbol : image_.symbols) {
+        // Only bodies this program actually contains, under names someone
+        // meant. An import stub is another image's code, and a placeholder
+        // name teaches nothing.
+        if (!symbol.is_function || symbol.is_import)
+            continue;
+        if (symbol.name.empty() || knowledge.is_placeholder(symbol.name))
+            continue;
+        if (symbol.size < 16 || symbol.size >= (1u << 20))
+            continue;
+
+        std::vector<uint8_t> body(static_cast<size_t>(symbol.size));
+        if (image_.read(symbol.address, body.data(), body.size()) != body.size())
+            continue;
+        uint64_t hash = 0;
+        if (!fingerprint(body.data(), body.size(), processor, hash))
+            continue;
+        if (knowledge.signature_name(hash, static_cast<uint32_t>(symbol.size)) == symbol.name)
+            continue;
+        std::string learn_error;
+        if (knowledge.learn_signature(hash, static_cast<uint32_t>(symbol.size), symbol.name,
+                                      learn_error)) {
+            ++learned;
+        } else if (error.empty()) {
+            error = learn_error;
+        }
+    }
+    return learned;
+}
+
+bool Session::rename(uint64_t address, const std::string &name, bool learn, std::string &error)
+{
+    if (name.empty()) {
+        error = "a rename needs a name";
+        return false;
+    }
+    try {
+        ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+        ghidra::Scope *global = arch_->symboltab->getGlobalScope();
+        ghidra::Funcdata *fd = global->queryFunction(addr);
+        if (fd != nullptr) {
+            // A function caches its own name, and so does every call site that
+            // refers to it, so the old one is discarded and rebuilt rather than
+            // relabelled. The next decompilation analyses it under its name.
+            global->removeSymbol(fd->getSymbol());
+        }
+        global->addFunction(addr, name);
+        globals_valid_ = false;
+
+        for (Symbol &symbol : image_.symbols)
+            if (symbol.address == address)
+                symbol.name = name;
+
+        if (learn) {
+            // Remember the body, not the address: the same code in another
+            // program should come back with the name the user chose.
+            uint64_t size = fd != nullptr ? static_cast<uint64_t>(fd->getSize()) : 0;
+            for (const Symbol &symbol : image_.symbols)
+                if (symbol.address == address && symbol.size != 0)
+                    size = symbol.size;
+            if (size >= 8 && size < (1u << 20)) {
+                std::vector<uint8_t> body(static_cast<size_t>(size));
+                if (image_.read(address, body.data(), body.size()) == body.size()) {
+                    uint64_t hash = 0;
+                    const std::string processor = language_id().substr(0, language_id().find(':'));
+                    if (fingerprint(body.data(), body.size(), processor, hash)) {
+                        std::string learn_error;
+                        Knowledge::instance().learn_signature(
+                            hash, static_cast<uint32_t>(size), name, learn_error);
+                    }
+                }
+            }
+        }
+        return true;
+    } catch (ghidra::LowlevelError &err) {
+        error = err.explain;
+        return false;
+    }
+}
+
+// Gives a function the name the user chose for the same body in an earlier
+// program, if the knowledge base has seen it.
+void Session::apply_learned_names()
+{
+    const Knowledge &knowledge = Knowledge::instance();
+    const std::string processor = language_id().substr(0, language_id().find(':'));
+    ghidra::Scope *global = arch_->symboltab->getGlobalScope();
+
+    for (Symbol &symbol : image_.symbols) {
+        if (!symbol.is_function || symbol.is_import || symbol.size < 8)
+            continue;
+        if (!knowledge.is_placeholder(symbol.name) && !symbol.name.empty())
+            continue;
+        std::vector<uint8_t> body(static_cast<size_t>(symbol.size));
+        if (image_.read(symbol.address, body.data(), body.size()) != body.size())
+            continue;
+        uint64_t hash = 0;
+        if (!fingerprint(body.data(), body.size(), processor, hash))
+            continue;
+        const std::string learned =
+            knowledge.signature_name(hash, static_cast<uint32_t>(symbol.size));
+        if (learned.empty())
+            continue;
+        symbol.name = learned;
+        try {
+            ghidra::Address addr(arch_->getDefaultCodeSpace(), symbol.address);
+            global->addFunction(addr, learned);
+        } catch (ghidra::LowlevelError &) {
+        }
+    }
+    globals_valid_ = false;
+}
+
+bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained, bool comments,
+                     std::string &out, std::string &error)
+{
+    if (addresses.empty()) {
+        error = "no functions to emit";
+        return false;
+    }
+    std::vector<FunctionResult> results;
+    std::string first_error;
+    for (uint64_t address : addresses) {
+        FunctionResult result;
+        std::string one_error;
+        if (!decompile(address, std::string(), result, one_error)) {
+            if (first_error.empty())
+                first_error = one_error;
+            continue;
+        }
+        results.push_back(std::move(result));
+    }
+    if (results.empty()) {
+        error = first_error.empty() ? "nothing could be decompiled" : first_error;
+        return false;
+    }
+    CEmitOptions options;
+    options.self_contained = self_contained;
+    options.comments = comments;
+    out = emit_c_unit(results, options);
+    return true;
+}
+
+std::vector<uint64_t> Session::function_addresses() const
+{
+    std::vector<uint64_t> addresses;
+    // Imported stubs are named so calls read well, but their bodies belong to
+    // another image and are not this program's code.
+    for (const Symbol &symbol : image_.symbols)
+        if (symbol.is_function && !symbol.is_import)
+            addresses.push_back(symbol.address);
+    return addresses;
+}
+
+} // namespace astral_internal
