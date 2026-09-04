@@ -48,8 +48,8 @@ check "elf: format"      "format     ELF"              "$("$astral" info "$elf")
 check "elf: language"    "x86:LE:64:default"           "$("$astral" info "$elf")"
 check "elf: image base"  "image base 0x400000"         "$("$astral" info "$elf")"
 check "elf: symbols"     "add_values"                  "$("$astral" info "$elf")"
-check "elf: decompiles"  "return param_1"              "$("$astral" decompile -f add_values "$elf")"
-check "elf: branch"      "if (100 < param_1)"          "$("$astral" decompile -f add_values "$elf")"
+check "elf: decompiles"  "return param1"              "$("$astral" decompile -f add_values "$elf")"
+check "elf: branch"      "if (100 < param1)"          "$("$astral" decompile -f add_values "$elf")"
 
 # --------------------------------------------------------------- PE (x86-64)
 pe="$work/tiny_x64.exe"

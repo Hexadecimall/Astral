@@ -646,6 +646,52 @@ std::vector<Identifier> scan_identifiers(const std::string &source)
     return found;
 }
 
+// A control-flow label the decompiler emits for a goto target - code_r0x...,
+// joined_r0x..., switchD_.../caseD_... These are written as `name:` in the body
+// and reached by `goto name`, so they need no declaration; the decompiler still
+// lists them among the externals, where they became `extern char name;` noise.
+// Rewrites the decompiler's underscore-bearing local names to camelCase, so
+// the whole body reads in one style: param_1 -> param1, xStack_70 -> xStack70,
+// in_x1 -> inX1. Only names built from the decompiler's known local prefixes
+// are touched, so keywords, types and real identifiers are left alone.
+std::string camel_case_locals(const std::string &text)
+{
+    static const std::regex local(
+        R"(\b(?:param|in|out|extraout|unaff|unique|register|[a-z]{1,4}Stack)(?:_[0-9A-Za-z]+)+\b)");
+    std::string out;
+    out.reserve(text.size());
+    size_t last = 0;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), local);
+         it != std::sregex_iterator(); ++it) {
+        const std::smatch &m = *it;
+        out.append(text, last, static_cast<size_t>(m.position()) - last);
+        // Drop underscores, uppercasing the character that follows each.
+        std::string name = m.str();
+        std::string camel;
+        camel.reserve(name.size());
+        bool up = false;
+        for (char c : name) {
+            if (c == '_') {
+                up = true;
+            } else {
+                camel.push_back(up ? static_cast<char>(std::toupper((unsigned char)c)) : c);
+                up = false;
+            }
+        }
+        out += camel;
+        last = static_cast<size_t>(m.position()) + static_cast<size_t>(m.length());
+    }
+    out.append(text, last, std::string::npos);
+    return out;
+}
+
+bool is_control_label(const std::string &name)
+{
+    static const std::regex re(
+        R"(^(code_r0x|joined_r0x|switchD_|caseD_|LAB_|do_)[0-9A-Fa-f_]+$)");
+    return std::regex_match(name, re);
+}
+
 bool is_runtime_identifier(const std::string &name)
 {
     if (in_list(C_KEYWORDS, sizeof(C_KEYWORDS) / sizeof(*C_KEYWORDS), name))
@@ -763,6 +809,8 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
         // than the decompiler's byte-width spellings.
         copy.c_code_real = standardize_types(copy.c_code_real, used_stdint);
         copy.signature_real = standardize_types(copy.signature_real, used_stdint);
+        copy.c_code_real = camel_case_locals(copy.c_code_real);
+        copy.signature_real = camel_case_locals(copy.signature_real);
         functions.push_back(std::move(copy));
     }
 
@@ -800,6 +848,9 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     for (const FunctionResult &function : functions) {
         for (const Declaration &declaration : function.externals) {
             if (defined.find(declaration.name) != defined.end())
+                continue;
+            // A goto label is not an external; the body carries its definition.
+            if (is_control_label(declaration.name))
                 continue;
             // A function a standard header declares should come from that
             // header, not from a guessed extern that would clash with it.
