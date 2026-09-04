@@ -559,14 +559,273 @@ proto warnx     extern void warnx(char *fmt, ...);
 proto access    extern int4 access(char *path, int4 mode);
 proto strtoll   extern SWORD strtoll(char *str, char **end, int4 base);
 proto strtoull  extern uint8 strtoull(char *str, char **end, int4 base);
+
+# ============================================================ expanded surface
+#
+# A second, broader pass over the C library: the stdio print/scan variadics,
+# the safe-string and BSD memory calls, more of stdlib/unistd, the time,
+# signal, threading, memory-mapping and BSD-sockets/netdb interfaces. Each
+# gets its declaring header and a prototype whose argument count and return
+# type match the real macOS/POSIX declaration, so a call recovers exactly.
+
+# ---- stdio: the variadic print/scan family and the odds and ends
+proto vprintf    extern int4 vprintf(char *format, void *arguments);
+proto vfprintf   extern int4 vfprintf(void *stream, char *format, void *arguments);
+proto vsprintf   extern int4 vsprintf(char *buffer, char *format, void *arguments);
+proto vsnprintf  extern int4 vsnprintf(char *buffer, WORD size, char *format, void *arguments);
+proto vscanf     extern int4 vscanf(char *format, void *arguments);
+proto vsscanf    extern int4 vsscanf(char *input, char *format, void *arguments);
+proto vfscanf    extern int4 vfscanf(void *stream, char *format, void *arguments);
+proto tmpnam     extern char *tmpnam(char *buffer);
+proto ctermid    extern char *ctermid(char *buffer);
+proto getline    extern SWORD getline(char **line, WORD *capacity, void *stream);
+proto getdelim   extern SWORD getdelim(char **line, WORD *capacity, int4 delimiter, void *stream);
+hdr vprintf stdio.h
+hdr vsprintf stdio.h
+hdr vscanf stdio.h
+hdr vsscanf stdio.h
+hdr vfscanf stdio.h
+hdr tmpnam stdio.h
+hdr ctermid stdio.h
+hdr getline stdio.h
+hdr getdelim stdio.h
+
+# ---- string.h and the BSD strings.h helpers
+proto memmem     extern void *memmem(void *haystack, WORD haystackLength, void *needle, WORD needleLength);
+proto strnlen    extern WORD strnlen(char *text, WORD limit);
+proto strlcpy    extern WORD strlcpy(char *destination, char *source, WORD size);
+proto strlcat    extern WORD strlcat(char *destination, char *source, WORD size);
+proto bcopy      extern void bcopy(void *source, void *destination, WORD count);
+proto bzero      extern void bzero(void *destination, WORD count);
+hdr memmem string.h
+hdr strnlen string.h
+hdr strlcpy string.h
+hdr strlcat string.h
+hdr bcopy strings.h
+hdr bzero strings.h
+
+# ---- stdlib.h: randomness, aligned allocation, temp files, exit handlers
+proto arc4random         extern uint4 arc4random(void);
+proto arc4random_uniform extern uint4 arc4random_uniform(uint4 upperBound);
+proto posix_memalign     extern int4 posix_memalign(void **pointer, WORD alignment, WORD size);
+proto aligned_alloc      extern void *aligned_alloc(WORD alignment, WORD size);
+proto mkstemp            extern int4 mkstemp(char *pathTemplate);
+proto atexit             extern int4 atexit(void *function);
+proto qsort_r            extern void qsort_r(void *base, WORD count, WORD size, void *context, void *compare);
+proto reallocf           extern void *reallocf(void *pointer, WORD size);
+hdr arc4random stdlib.h
+hdr arc4random_uniform stdlib.h
+hdr posix_memalign stdlib.h
+hdr aligned_alloc stdlib.h
+hdr mkstemp stdlib.h
+hdr atexit stdlib.h
+hdr qsort_r stdlib.h
+hdr reallocf stdlib.h
+
+# ---- unistd.h: links, directories, identities, positioned and synced I/O
+proto readlink   extern SWORD readlink(char *path, char *buffer, WORD size);
+proto symlink    extern int4 symlink(char *target, char *linkPath);
+proto chdir      extern int4 chdir(char *path);
+proto getppid    extern int4 getppid(void);
+proto setuid     extern int4 setuid(uint4 uid);
+proto getuid     extern uint4 getuid(void);
+proto geteuid    extern uint4 geteuid(void);
+proto gethostname extern int4 gethostname(char *name, WORD length);
+proto pread      extern SWORD pread(int4 fd, void *buffer, WORD count, SWORD offset);
+proto pwrite     extern SWORD pwrite(int4 fd, void *buffer, WORD count, SWORD offset);
+proto fsync      extern int4 fsync(int4 fd);
+proto sysctlbyname extern int4 sysctlbyname(char *name, void *oldValue, WORD *oldLength, void *newValue, WORD newLength);
+hdr readlink unistd.h
+hdr symlink unistd.h
+hdr chdir unistd.h
+hdr getppid unistd.h
+hdr setuid unistd.h
+hdr getuid unistd.h
+hdr geteuid unistd.h
+hdr gethostname unistd.h
+hdr pread unistd.h
+hdr pwrite unistd.h
+hdr fsync unistd.h
+hdr sysctlbyname sys/sysctl.h
+
+# ---- time.h (and sys/time.h for gettimeofday)
+proto time       extern SWORD time(SWORD *storage);
+proto clock      extern SWORD clock(void);
+proto gettimeofday extern int4 gettimeofday(void *value, void *timezone);
+proto nanosleep  extern int4 nanosleep(void *requested, void *remaining);
+proto localtime  extern void *localtime(SWORD *value);
+proto strftime   extern WORD strftime(char *buffer, WORD size, char *format, void *time);
+proto mktime     extern SWORD mktime(void *time);
+hdr time time.h
+hdr clock time.h
+hdr gettimeofday sys/time.h
+hdr nanosleep time.h
+hdr localtime time.h
+hdr strftime time.h
+hdr mktime time.h
+
+# ---- signal.h
+proto signal     extern void *signal(int4 signal, void *handler);
+proto sigaction  extern int4 sigaction(int4 signal, void *action, void *oldAction);
+proto kill       extern int4 kill(int4 pid, int4 signal);
+proto raise      extern int4 raise(int4 signal);
+hdr signal signal.h
+hdr sigaction signal.h
+hdr kill signal.h
+hdr raise signal.h
+
+# ---- pthread.h (macOS spellings: pthread_setname_np takes only the name)
+proto pthread_create        extern int4 pthread_create(void *thread, void *attributes, void *start, void *argument);
+proto pthread_join          extern int4 pthread_join(void *thread, void **result);
+proto pthread_mutex_lock    extern int4 pthread_mutex_lock(void *mutex);
+proto pthread_mutex_unlock  extern int4 pthread_mutex_unlock(void *mutex);
+proto pthread_self          extern void *pthread_self(void);
+proto pthread_get_stackaddr_np extern void *pthread_get_stackaddr_np(void *thread);
+proto pthread_get_stacksize_np extern WORD pthread_get_stacksize_np(void *thread);
+proto pthread_setname_np    extern int4 pthread_setname_np(char *name);
+hdr pthread_create pthread.h
+hdr pthread_join pthread.h
+hdr pthread_mutex_lock pthread.h
+hdr pthread_mutex_unlock pthread.h
+hdr pthread_self pthread.h
+hdr pthread_get_stackaddr_np pthread.h
+hdr pthread_get_stacksize_np pthread.h
+hdr pthread_setname_np pthread.h
+
+# ---- sys/mman.h
+proto mmap       extern void *mmap(void *address, WORD length, int4 protection, int4 flags, int4 fd, SWORD offset);
+proto munmap     extern int4 munmap(void *address, WORD length);
+proto mprotect   extern int4 mprotect(void *address, WORD length, int4 protection);
+hdr mmap sys/mman.h
+hdr munmap sys/mman.h
+hdr mprotect sys/mman.h
+
+# ---- sys/socket.h
+proto socket     extern int4 socket(int4 domain, int4 type, int4 protocol);
+proto bind       extern int4 bind(int4 socket, void *address, uint4 addressLength);
+proto listen     extern int4 listen(int4 socket, int4 backlog);
+proto accept     extern int4 accept(int4 socket, void *address, uint4 *addressLength);
+proto connect    extern int4 connect(int4 socket, void *address, uint4 addressLength);
+proto send       extern SWORD send(int4 socket, void *buffer, WORD length, int4 flags);
+proto sendto     extern SWORD sendto(int4 socket, void *buffer, WORD length, int4 flags, void *address, uint4 addressLength);
+proto recv       extern SWORD recv(int4 socket, void *buffer, WORD length, int4 flags);
+proto recvfrom   extern SWORD recvfrom(int4 socket, void *buffer, WORD length, int4 flags, void *address, uint4 *addressLength);
+proto shutdown   extern int4 shutdown(int4 socket, int4 how);
+proto setsockopt extern int4 setsockopt(int4 socket, int4 level, int4 option, void *value, uint4 valueLength);
+proto getsockopt extern int4 getsockopt(int4 socket, int4 level, int4 option, void *value, uint4 *valueLength);
+proto getpeername extern int4 getpeername(int4 socket, void *address, uint4 *addressLength);
+proto getsockname extern int4 getsockname(int4 socket, void *address, uint4 *addressLength);
+hdr socket sys/socket.h
+hdr bind sys/socket.h
+hdr listen sys/socket.h
+hdr accept sys/socket.h
+hdr connect sys/socket.h
+hdr send sys/socket.h
+hdr sendto sys/socket.h
+hdr recv sys/socket.h
+hdr recvfrom sys/socket.h
+hdr shutdown sys/socket.h
+hdr setsockopt sys/socket.h
+hdr getsockopt sys/socket.h
+hdr getpeername sys/socket.h
+hdr getsockname sys/socket.h
+
+# ---- netdb.h and arpa/inet.h
+proto getaddrinfo  extern int4 getaddrinfo(char *host, char *service, void *hints, void **result);
+proto freeaddrinfo extern void freeaddrinfo(void *info);
+proto gethostbyname extern void *gethostbyname(char *name);
+proto inet_addr    extern uint4 inet_addr(char *address);
+proto inet_ntoa    extern char *inet_ntoa(uint4 address);
+proto inet_pton    extern int4 inet_pton(int4 family, char *source, void *destination);
+proto inet_ntop    extern char *inet_ntop(int4 family, void *source, char *destination, uint4 size);
+proto htons        extern uint2 htons(uint2 value);
+proto htonl        extern uint4 htonl(uint4 value);
+proto ntohs        extern uint2 ntohs(uint2 value);
+proto ntohl        extern uint4 ntohl(uint4 value);
+hdr inet_addr arpa/inet.h
+hdr inet_ntoa arpa/inet.h
+hdr inet_pton arpa/inet.h
+hdr inet_ntop arpa/inet.h
+hdr htons arpa/inet.h
+hdr htonl arpa/inet.h
+hdr ntohs arpa/inet.h
+hdr ntohl arpa/inet.h
+
+# ------------------------------------------------- naming for the new surface
+#
+# Single-call verbs for functions the first pass did not cover.
+
+verb chdir               changeDirectory
+verb getuid              userId
+verb geteuid             effectiveUserId
+verb setuid              setUserId
+verb getppid             parentProcessId
+verb gethostname         hostName
+verb fsync               syncFile
+verb pread               readBytes
+verb pwrite              writeBytes
+verb sysctlbyname        readSystemControl
+verb arc4random          randomNumber
+verb arc4random_uniform  randomNumber
+verb mkstemp             makeTempFile
+verb tmpnam              makeTempName
+verb ctermid             terminalName
+verb posix_memalign      allocateAligned
+verb aligned_alloc       allocateAligned
+verb reallocf            resize
+verb qsort_r             sortArray
+verb getdelim            readDelimited
+verb memmem              findSubsequence
+verb strnlen             measureString
+verb strlcat             appendString
+verb bcopy               copyMemory
+verb raise               raiseSignal
+verb pthread_self        currentThread
+verb pthread_setname_np  nameThread
+verb pthread_get_stackaddr_np stackAddress
+verb pthread_get_stacksize_np stackSize
+verb setsockopt          configureSocket
+verb getsockopt          readSocketOption
+verb getpeername         peerAddress
+verb getsockname         socketAddress
+verb inet_pton           parseAddress
+verb inet_ntop           formatAddress
+verb inet_ntoa           formatAddress
+verb inet_addr           parseAddress
+verb htonl               hostToNetwork
+verb ntohl               networkToHost
+verb freeaddrinfo        releaseAddressInfo
+verb gai_strerror        describeError
+verb gethostbyname       resolveHost
+verb vfprintf            printMessage
+verb vprintf             printMessage
+verb vsprintf            formatString
+
+# Two calls together, checked before the single-call verbs.
+idiom malloc+strcpy              duplicate
+idiom pthread_mutex_lock+pthread_mutex_unlock  guardSection
+idiom pthread_create+pthread_mutex_lock        runWorkers
+idiom mmap+munmap                mapMemory
+idiom open+fstat                 inspectFile
+idiom sigaction+kill             manageSignals
+idiom getaddrinfo+socket         openConnection
+idiom socket+setsockopt          configureSocket
+idiom getline+strtok             parseLines
+idiom time+localtime             currentDateTime
+idiom gettimeofday+localtime     currentDateTime
+idiom fopen+getline              readFileLines
+
+# What a function says about itself outranks the call-based rules.
+lit connection refused|Connection refused   openConnection
+lit no such file|No such file               openFile
+lit invalid option|unrecognized option|invalid argument  printUsage
+lit too many arguments|too few arguments    printUsage
+lit assertion|Assertion failed              checkInvariant
+lit warning:|Warning:                       reportWarning
+lit fatal|Fatal error                       reportError
+lit cannot open|could not open|unable to open  openFile
+lit not a directory|Not a directory         openDirectory
+lit disk full|No space left                 writeFile
 hdr realpath stdlib.h
 proto realpath extern char *realpath(char *path, char *resolved);
-hdr getaddrinfo netdb.h
-hdr freeaddrinfo netdb.h
-hdr gai_strerror netdb.h
-hdr socket sys/socket.h
-hdr connect sys/socket.h
-hdr shutdown sys/socket.h
-hdr setlocale locale.h
-proto gai_strerror extern char *gai_strerror(int4 ecode);
 hdr malloc_type_malloc malloc/malloc.h
