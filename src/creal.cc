@@ -1541,10 +1541,16 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                         real_global = nm->second;
                         headers.insert(kGlobals.at(real_global));
                     }
+                    // Backing storage is only for a named import slot the code
+                    // dereferences, such as the stack guard. The program's own
+                    // anonymous globals - a buffer pointer it sets itself - must
+                    // start at their real value (zero for .bss), or a `!= NULL`
+                    // test on one reads true before the program allocates it.
+                    bool named_import = options.data_names.count(declaration.address) != 0;
                     if (!real_global.empty()) {
                         definitions.emplace(declaration.name,
                                             decl + " = (void *)&" + real_global + ";");
-                    } else if (data_pointer) {
+                    } else if (data_pointer && named_import) {
                         std::string backing = "BACK_" + declaration.name;
                         definitions.emplace(
                             declaration.name,
