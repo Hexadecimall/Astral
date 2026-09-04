@@ -15,9 +15,9 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.astral" CACHE PATH "Install location" FORCE)
 endif()
 
-include(cmake/GhidraSources.cmake)
+include(cmake/EngineSources.cmake)
 
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ghidra/VERSION ASTRAL_GHIDRA_VERSION)
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/engine/GHIDRA_VERSION ASTRAL_GHIDRA_VERSION)
 string(STRIP "${ASTRAL_GHIDRA_VERSION}" ASTRAL_GHIDRA_VERSION)
 
 find_package(ZLIB REQUIRED)
@@ -181,7 +181,7 @@ set(ASTRAL_LANGUAGES "x86;AARCH64;ARM;MIPS;PowerPC;RISCV;JVM;Sparc;68000;Z80;PIC
     CACHE STRING "Processor directories whose SLEIGH specs get compiled (ALL for every one)")
 
 set(SPEC_STAGE ${CMAKE_BINARY_DIR}/specs)
-set(PROC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ghidra/processors)
+set(PROC_SRC ${CMAKE_CURRENT_SOURCE_DIR}/sleigh)
 
 if(ASTRAL_LANGUAGES STREQUAL "ALL")
     file(GLOB _proc_dirs RELATIVE ${PROC_SRC} ${PROC_SRC}/*)
@@ -243,5 +243,5 @@ install(DIRECTORY include/astral DESTINATION include)
 install(DIRECTORY ${SPEC_STAGE}/ DESTINATION share/astral/specs
         PATTERN ".*" EXCLUDE)
 install(DIRECTORY bindings/rust/ DESTINATION share/astral/rust)
-install(FILES third_party/ghidra/LICENSE third_party/ghidra/NOTICE
+install(FILES engine/LICENSE engine/NOTICE
         DESTINATION share/astral)

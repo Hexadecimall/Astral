@@ -203,8 +203,9 @@ of the machine code is wrong, the C is faithfully wrong in the same way.
 
 ## What is in here
 
-The decompiler core is Ghidra's own C++ implementation, vendored unmodified
-under `third_party/ghidra`. Everything Ghidra normally supplies from its Java
+The decompiler engine in `engine/` is derived from Ghidra's C++ decompiler
+(Apache-2.0) and maintained as first-party source, modified in place to fit
+Astral. Everything Ghidra normally supplies from its Java
 side, plus the parts it has no answer for, live in `src/`:
 
 | Piece | Where | Replaces |
@@ -403,6 +404,7 @@ decompilation to confirm it still prints what it printed before.
 
 ## Licensing
 
-The vendored decompiler and language specifications are Ghidra, Apache-2.0; that
-license travels with them in `third_party/ghidra`. The code in `src/`,
+The decompiler engine in `engine/` and the SLEIGH specifications in `sleigh/`
+derive from Ghidra (Apache-2.0); the licence and notices travel with them in
+`engine/LICENSE` and `engine/NOTICE`. The rest of `src/`,
 `include/`, `tools/`, `bindings/` and `tests/` is new work in this repository.

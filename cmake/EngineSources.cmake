@@ -1,7 +1,8 @@
-# Source partition of the vendored Ghidra decompiler.
-# Mirrors the groupings in the upstream Makefile so the vendored tree stays unmodified.
+# Source partition of Astral's decompiler engine, derived from Ghidra's
+# decompiler (Apache-2.0, see engine/NOTICE) and modified in tree.
 
-set(ASTRAL_DECOMP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ghidra/decompile)
+
+set(ASTRAL_DECOMP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/engine)
 
 set(ASTRAL_CORE
     xml marshal space float address pcoderaw translate opcodes globalcontext)

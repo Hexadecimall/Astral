@@ -47,3 +47,12 @@ under the GPL directory that has the GPL license files.
 Consistent with the inbound=outbound model, contributions to any module must be
 made available, by the contributor, under the applicable license(s). Please read
 the Legal section of the CONTRIBUTING.md guide.
+
+---
+
+Astral modifications
+--------------------
+Astral's decompiler engine in engine/ is derived from Ghidra's decompiler
+(the files above, Apache-2.0) and is modified in place: the engine is
+maintained as first-party source and changed to fit Astral's goals. The
+original notices and licence are retained above and in engine/LICENSE.
