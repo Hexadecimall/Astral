@@ -703,6 +703,10 @@ impl App {
                 // The centre pane may still need a second, different call.
                 if !self.view_ready(address) {
                     self.pending = Some(Pending::RenderView);
+                } else if !self.xrefs_built && self.pending.is_none() {
+                    // Build the caller index on its own, once, so the details
+                    // pane fills in without the reader having to ask for it.
+                    self.pending = Some(Pending::BuildXrefs(address));
                 }
             }
             Pending::RenderView => {

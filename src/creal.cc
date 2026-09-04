@@ -84,6 +84,47 @@ std::string header_for(const std::string &name)
     return std::string();
 }
 
+// Rewrites the decompiler's byte-width type names to the standard fixed-width
+// names, so the output reads in terms a C programmer already knows: int4
+// becomes int32_t, uint8 becomes uint64_t, xunknown8 (an undetermined 8-byte
+// value) becomes uint64_t. Whole-token matching leaves identifiers like
+// xStack_10 and the already-standard uint8_t untouched. `changed` is set when
+// any replacement was made, so the caller knows stdint.h is now needed.
+std::string standardize_types(const std::string &text, bool &changed)
+{
+    static const std::map<std::string, std::string> MAP = {
+        {"int1", "int8_t"},   {"int2", "int16_t"},  {"int4", "int32_t"},  {"int8", "int64_t"},
+        {"uint1", "uint8_t"}, {"uint2", "uint16_t"},{"uint4", "uint32_t"},{"uint8", "uint64_t"},
+        {"xunknown1", "uint8_t"}, {"xunknown2", "uint16_t"},
+        {"xunknown4", "uint32_t"}, {"xunknown8", "uint64_t"},
+        {"byte", "uint8_t"},  {"word", "uint16_t"}, {"dword", "uint32_t"},{"qword", "uint64_t"},
+        {"undefined", "uint8_t"},  {"undefined1", "uint8_t"},  {"undefined2", "uint16_t"},
+        {"undefined3", "uint32_t"},{"undefined4", "uint32_t"}, {"undefined5", "uint64_t"},
+        {"undefined6", "uint64_t"},{"undefined7", "uint64_t"}, {"undefined8", "uint64_t"},
+        {"float4", "float"},  {"float8", "double"}, {"float10", "long double"},
+        {"float16", "long double"}, {"wchar2", "int16_t"}, {"wchar4", "int32_t"},
+    };
+    static const std::regex id(R"([A-Za-z_][A-Za-z0-9_]*)");
+    std::string out;
+    out.reserve(text.size());
+    size_t last = 0;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), id);
+         it != std::sregex_iterator(); ++it) {
+        const std::smatch &m = *it;
+        out.append(text, last, static_cast<size_t>(m.position()) - last);
+        auto found = MAP.find(m.str());
+        if (found != MAP.end()) {
+            out += found->second;
+            changed = true;
+        } else {
+            out += m.str();
+        }
+        last = static_cast<size_t>(m.position()) + static_cast<size_t>(m.length());
+    }
+    out.append(text, last, std::string::npos);
+    return out;
+}
+
 bool in_list(const char *const *list, size_t count, const std::string &name)
 {
     for (size_t i = 0; i < count; ++i)
@@ -713,10 +754,15 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
 {
     std::vector<FunctionResult> functions;
     functions.reserve(raw_functions.size());
+    bool used_stdint = false;
     for (const FunctionResult &function : raw_functions) {
         FunctionResult copy = function;
         if (copy.c_code_real.empty())
             realize_c(copy);
+        // Present the recovered code in standard fixed-width type names rather
+        // than the decompiler's byte-width spellings.
+        copy.c_code_real = standardize_types(copy.c_code_real, used_stdint);
+        copy.signature_real = standardize_types(copy.signature_real, used_stdint);
         functions.push_back(std::move(copy));
     }
 
@@ -768,11 +814,13 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             if (declaration.is_function) {
                 std::string proto = Knowledge::instance().prototype_for(declaration.name);
                 if (!proto.empty()) {
-                    externals.emplace(declaration.name, size_types_for(proto));
+                    externals.emplace(declaration.name,
+                                      standardize_types(size_types_for(proto), used_stdint));
                     continue;
                 }
             }
-            externals.emplace(declaration.name, declaration.text);
+            externals.emplace(declaration.name,
+                              standardize_types(declaration.text, used_stdint));
         }
     }
 
@@ -827,6 +875,8 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
         }
     }
 
+    if (used_stdint)
+        headers.insert("stdint.h");
     if (!headers.empty()) {
         out << '\n';
         for (const std::string &header : headers)

@@ -342,7 +342,7 @@ pub fn draw_details(frame: &mut Frame, app: &App, area: Rect) {
     let callers = app.current.map(|a| app.callers_of(a).len()).unwrap_or(0);
     lines.push(heading(&format!("Callers ({callers})")));
     if !app.xrefs_built {
-        lines.push(muted("  press x to build index".to_string()));
+        lines.push(muted("  building index ...".to_string()));
     } else if callers == 0 {
         lines.push(muted("  none found".to_string()));
     }
@@ -565,7 +565,7 @@ pub fn draw_graph(frame: &mut Frame, app: &mut App, area: Rect) {
         let callers = app.callers_of(address);
         lines.push(heading(&format!("Calls in ({})", callers.len())));
         if !app.xrefs_built {
-            lines.push(muted("  press x to build the caller index".to_string()));
+            lines.push(muted("  building index ...".to_string()));
         } else if callers.is_empty() {
             lines.push(muted("  none found".to_string()));
         }

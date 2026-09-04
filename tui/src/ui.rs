@@ -47,10 +47,13 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let field = |label: &'static str, value: String| {
         vec![Span::styled(label, theme.muted()), Span::raw(value)]
     };
-    let mut spans = vec![Span::styled(
-        file.name.clone(),
-        theme.accent().add_modifier(Modifier::BOLD),
-    )];
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            file.name.clone(),
+            theme.accent().add_modifier(Modifier::BOLD),
+        ),
+    ];
     spans.push(separator());
     spans.extend(field(
         "",
@@ -90,8 +93,8 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
     let theme = app.theme;
     app.tab_row = area.y;
     app.tab_spans.clear();
-    let mut spans: Vec<Span> = Vec::new();
-    let mut x = area.x;
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    let mut x = area.x + 1;
     for (index, ws) in Workspace::ALL.iter().enumerate() {
         let active = *ws == app.workspace;
         let label = format!("  {} {}  ", index + 1, ws.title());
@@ -180,7 +183,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(app.input.clone()),
             Span::styled("_", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ]),
-        Mode::Normal => Line::from(Span::styled(app.status.clone(), theme.secondary())),
+        Mode::Normal => Line::from(vec![
+            Span::raw(" "),
+            Span::styled(app.status.clone(), theme.secondary()),
+        ]),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
