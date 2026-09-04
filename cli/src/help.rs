@@ -51,7 +51,6 @@ pub fn usage(stream: Stream) -> i32 {
         "├─ knowledge  What it knows, and where it writes what it learns\n",
         "│  └─ --path                 print the database path and nothing else\n",
         "├─ contribute database  Offer your database to the project (also: ctb)\n",
-        "│  ├─ --repo <owner/name>    where to send it\n",
         "│  └─ --dry-run              check and report, send nothing\n",
         "├─ sleigh <in.slaspec> <out.sla>  Compile a processor specification\n",
         "├─ update  Rebuild and reinstall Astral\n",

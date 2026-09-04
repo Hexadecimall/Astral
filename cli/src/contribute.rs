@@ -15,7 +15,6 @@ const HELP: &str = concat!(
     "\n",
     "Offers what you have taught Astral back to the project.\n",
     "\n",
-    "  --repo <owner/name>  where to send it (default: the project itself)\n",
     "  --dry-run            check and report, send nothing\n",
     "\n",
     "Only what a name means travels: a fingerprint and the word you chose.\n",
@@ -31,7 +30,9 @@ pub fn usage(stream: Stream) -> i32 {
 }
 
 pub fn run(arguments: &[String]) -> i32 {
-    let mut repo = PROJECT.to_string();
+    // A contribution always goes to the Astral project itself; there is nowhere
+    // else to send it.
+    let repo = PROJECT.to_string();
     let mut dry_run = false;
     let mut asked_for_database = false;
 
@@ -42,10 +43,6 @@ pub fn run(arguments: &[String]) -> i32 {
             "--dry-run" | "-n" => dry_run = true,
             // Accepted for scripts; running the command is the consent.
             "--yes" | "-y" => {}
-            "--repo" if index + 1 < arguments.len() => {
-                index += 1;
-                repo = arguments[index].clone();
-            }
             "--help" | "-h" => return usage(Stream::Out),
             other => {
                 error(&format!("unknown option {other}"));
