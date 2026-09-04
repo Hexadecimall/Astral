@@ -314,6 +314,164 @@ std::map<std::string, int> collect_calls(const std::string &source)
     return calls;
 }
 
+// The name a value earns from the library call that produced it. `x = read(..)`
+// is a read count; `x = open(..)` is a file descriptor. This is the strongest
+// evidence a value carries, short of the program printing a label for it.
+const char *result_role(const std::string &call)
+{
+    static const std::map<std::string, const char *> kProducers = {
+        {"read", "bytesRead"},   {"recv", "bytesReceived"}, {"pread", "bytesRead"},
+        {"recvfrom", "bytesReceived"}, {"write", "bytesWritten"}, {"send", "bytesSent"},
+        {"fread", "itemsRead"},  {"fwrite", "itemsWritten"},
+        {"open", "fileDescriptor"}, {"openat", "fileDescriptor"}, {"creat", "fileDescriptor"},
+        {"socket", "socketFd"},  {"dup", "fileDescriptor"}, {"dup2", "fileDescriptor"},
+        {"accept", "clientFd"},  {"fileno", "fileDescriptor"}, {"epoll_create", "epollFd"},
+        {"strlen", "length"},    {"strnlen", "length"},   {"wcslen", "length"},
+        {"malloc", "buffer"},    {"calloc", "buffer"},    {"realloc", "buffer"},
+        {"reallocf", "buffer"},  {"malloc_type_malloc", "buffer"},
+        {"fopen", "stream"},     {"fdopen", "stream"},    {"freopen", "stream"},
+        {"tmpfile", "stream"},   {"popen", "stream"},     {"opendir", "directory"},
+        {"readdir", "entry"},    {"getenv", "value"},     {"fork", "childPid"},
+        {"vfork", "childPid"},   {"getpid", "processId"}, {"getppid", "parentPid"},
+        {"time", "now"},         {"strdup", "copy"},      {"strndup", "copy"},
+        {"strchr", "match"},     {"strrchr", "match"},    {"strstr", "match"},
+        {"memchr", "match"},     {"strpbrk", "match"},    {"getopt", "option"},
+        {"signal", "handler"},   {"mmap", "mapping"},     {"pthread_self", "thread"},
+        {"getpwnam", "user"},    {"getpwuid", "user"},    {"getaddrinfo", "addressInfo"},
+        {"realpath", "resolvedPath"}, {"basename", "baseName"}, {"dirname", "dirName"},
+    };
+    auto found = kProducers.find(call);
+    return found == kProducers.end() ? nullptr : found->second;
+}
+
+// Splits a camelCase or snake_case identifier into lowercase words.
+std::vector<std::string> split_words(const std::string &name)
+{
+    std::vector<std::string> words;
+    std::string current;
+    for (size_t i = 0; i < name.size(); ++i) {
+        char c = name[i];
+        if (c == '_') {
+            if (!current.empty()) { words.push_back(current); current.clear(); }
+            continue;
+        }
+        if (std::isupper((unsigned char)c) && !current.empty()) {
+            words.push_back(current);
+            current.clear();
+        }
+        current.push_back((char)std::tolower((unsigned char)c));
+    }
+    if (!current.empty())
+        words.push_back(current);
+    return words;
+}
+
+// A descriptive name for a value produced by a call whose own name says what it
+// makes: openFile -> file, getUserName -> userName, allocBuffer -> buffer. The
+// value is named after the thing, never abbreviated to a placeholder. Empty
+// when the call name carries no such noun.
+std::string noun_from_call(const std::string &call);
+
+// The function name a value's right-hand side comes from, when the value is
+// exactly that call (possibly behind casts): the leading identifier of
+// `[casts] name(...)`. Empty when the right-hand side is anything else.
+std::string leading_call(const std::string &rhs)
+{
+    size_t i = 0;
+    auto skip_spaces = [&]() { while (i < rhs.size() && rhs[i] == ' ') ++i; };
+    skip_spaces();
+    // Step over cast groups and unary operators: (int *), *, &, -, !, ~.
+    for (;;) {
+        skip_spaces();
+        if (i < rhs.size() && rhs[i] == '(') {
+            // A cast only if the group is followed by more expression, which it
+            // always is here since a bare parenthesised call would not assign.
+            int depth = 0;
+            size_t j = i;
+            for (; j < rhs.size(); ++j) {
+                if (rhs[j] == '(') ++depth;
+                else if (rhs[j] == ')') { if (--depth == 0) { ++j; break; } }
+            }
+            // Peek: a cast is `(...)` NOT immediately followed by the call's own
+            // args, i.e. the token after it is an identifier. If the char after
+            // is not an identifier start, this paren was the call itself.
+            size_t k = j;
+            while (k < rhs.size() && rhs[k] == ' ') ++k;
+            if (k < rhs.size() && (std::isalpha((unsigned char)rhs[k]) || rhs[k] == '_')) {
+                i = j; // it was a cast, keep going
+                continue;
+            }
+            break; // it was the call's parentheses, not a cast
+        }
+        if (i < rhs.size() && (rhs[i] == '*' || rhs[i] == '&' || rhs[i] == '-' ||
+                               rhs[i] == '!' || rhs[i] == '~')) {
+            ++i;
+            continue;
+        }
+        break;
+    }
+    skip_spaces();
+    size_t start = i;
+    while (i < rhs.size() && is_identifier_char(rhs[i]))
+        ++i;
+    if (i == start)
+        return std::string();
+    std::string name = rhs.substr(start, i - start);
+    skip_spaces();
+    if (i >= rhs.size() || rhs[i] != '(')
+        return std::string();
+    return name;
+}
+
+// The name an argument earns from the parameter it fills: the first argument to
+// open is a path, the first to read is a descriptor, the second a buffer. Only
+// high-confidence positions are listed; a generic comparand is left unnamed.
+const char *arg_role(const std::string &call, size_t index)
+{
+    struct Roles { const char *fn; const char *names[4]; };
+    static const Roles kRoles[] = {
+        {"open",     {"path", nullptr, nullptr, nullptr}},
+        {"openat",   {nullptr, "path", nullptr, nullptr}},
+        {"creat",    {"path", nullptr, nullptr, nullptr}},
+        {"stat",     {"path", nullptr, nullptr, nullptr}},
+        {"lstat",    {"path", nullptr, nullptr, nullptr}},
+        {"access",   {"path", nullptr, nullptr, nullptr}},
+        {"unlink",   {"path", nullptr, nullptr, nullptr}},
+        {"opendir",  {"path", nullptr, nullptr, nullptr}},
+        {"realpath", {"path", "resolved", nullptr, nullptr}},
+        {"fopen",    {"path", "mode", nullptr, nullptr}},
+        {"read",     {"fd", "buf", "n", nullptr}},
+        {"write",    {"fd", "buf", "n", nullptr}},
+        {"pread",    {"fd", "buf", "n", nullptr}},
+        {"close",    {"fd", nullptr, nullptr, nullptr}},
+        {"fstat",    {"fd", nullptr, nullptr, nullptr}},
+        {"fsync",    {"fd", nullptr, nullptr, nullptr}},
+        {"lseek",    {"fd", "offset", "whence", nullptr}},
+        {"dup2",     {"oldFd", "newFd", nullptr, nullptr}},
+        {"fgets",    {"buf", "n", "stream", nullptr}},
+        {"fputs",    {"str", "stream", nullptr, nullptr}},
+        {"fwrite",   {"buf", "size", "n", nullptr}},
+        {"fread",    {"buf", "size", "n", nullptr}},
+        {"strcpy",   {"dst", "src", nullptr, nullptr}},
+        {"strncpy",  {"dst", "src", "n", nullptr}},
+        {"strcat",   {"dst", "src", nullptr, nullptr}},
+        {"memcpy",   {"dst", "src", "n", nullptr}},
+        {"memmove",  {"dst", "src", "n", nullptr}},
+        {"memset",   {"buf", nullptr, "n", nullptr}},
+        {"connect",  {"fd", "addr", "len", nullptr}},
+        {"bind",     {"fd", "addr", "len", nullptr}},
+        {"accept",   {"fd", "addr", "len", nullptr}},
+        {"send",     {"fd", "buf", "n", nullptr}},
+        {"recv",     {"fd", "buf", "n", nullptr}},
+    };
+    if (index >= 4)
+        return nullptr;
+    for (const Roles &r : kRoles)
+        if (call == r.fn)
+            return r.names[index];
+    return nullptr;
+}
+
 std::string camel_join(const std::vector<std::string> &words)
 {
     std::string name;
@@ -326,6 +484,23 @@ std::string camel_join(const std::vector<std::string> &words)
         name += word;
     }
     return name;
+}
+
+std::string noun_from_call(const std::string &call)
+{
+    std::vector<std::string> words = split_words(call);
+    if (words.size() < 2)
+        return std::string(); // a single word is not descriptive enough
+    static const std::set<std::string> producing = {
+        "get", "create", "make", "open", "alloc", "allocate", "new", "build",
+        "load", "parse", "read", "find", "lookup", "fetch", "init", "compute",
+        "calc", "calculate", "acquire", "obtain", "map", "copy", "clone",
+        "duplicate", "generate", "produce", "decode", "resolve", "select",
+    };
+    if (producing.count(words[0]) == 0)
+        return std::string();
+    std::vector<std::string> rest(words.begin() + 1, words.end());
+    return camel_join(rest); // File -> file, UserName -> userName
 }
 
 } // namespace
@@ -450,6 +625,90 @@ NamingResult analyse(const std::string &c_code, const std::string &current_name,
             if (!knowledge.is_placeholder(variable) || proposed.count(variable) != 0)
                 continue;
             proposed[variable] = claim(label);
+        }
+    }
+
+    // A value assigned straight from a library call takes that call's meaning:
+    // the count from read, the descriptor from open, the length from strlen.
+    for (size_t i = 0; i + 1 < c_code.size(); ++i) {
+        if (mask[i] || c_code[i] != '=')
+            continue;
+        // A real assignment, not ==, <=, >=, != .
+        if (c_code[i + 1] == '=')
+            continue;
+        if (i > 0 && (c_code[i - 1] == '=' || c_code[i - 1] == '<' || c_code[i - 1] == '>' ||
+                      c_code[i - 1] == '!'))
+            continue;
+        // The left-hand side is the identifier just before the '='.
+        size_t l = i;
+        while (l > 0 && c_code[l - 1] == ' ')
+            --l;
+        size_t lend = l;
+        while (l > 0 && is_identifier_char(c_code[l - 1]))
+            --l;
+        if (l == lend)
+            continue;
+        const std::string lhs = c_code.substr(l, lend - l);
+        if (locals.count(lhs) == 0 || proposed.count(lhs) != 0 ||
+            !knowledge.is_placeholder(lhs))
+            continue;
+        // The right-hand side runs to the statement's ';' at depth zero.
+        size_t r = i + 1;
+        int depth = 0;
+        size_t end = r;
+        for (; end < c_code.size(); ++end) {
+            if (mask[end])
+                continue;
+            const char c = c_code[end];
+            if (c == '(' || c == '[')
+                ++depth;
+            else if (c == ')' || c == ']')
+                --depth;
+            else if (c == ';' && depth == 0)
+                break;
+        }
+        const std::string rhs = c_code.substr(r, end - r);
+        const std::string producer = leading_call(rhs);
+        const char *role = result_role(producer);
+        if (role != nullptr) {
+            proposed[lhs] = claim(role);
+        } else {
+            // A descriptive call names its own result: openFile -> file.
+            const std::string noun = noun_from_call(producer);
+            if (!noun.empty())
+                proposed[lhs] = claim(noun);
+        }
+    }
+
+    // What a value is passed as says what it is: the first argument to open is a
+    // path, the second to read a buffer.
+    for (size_t i = 0; i < c_code.size();) {
+        if (mask[i] || !is_identifier_start(c_code[i])) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        while (i < c_code.size() && is_identifier_char(c_code[i]))
+            ++i;
+        const std::string call = c_code.substr(start, i - start);
+        size_t after = i;
+        while (after < c_code.size() && c_code[after] == ' ')
+            ++after;
+        if (after >= c_code.size() || c_code[after] != '(')
+            continue;
+        std::string inside;
+        if (!call_arguments(c_code, after, inside))
+            continue;
+        const std::vector<std::string> arguments = split_arguments(inside);
+        for (size_t a = 0; a < arguments.size(); ++a) {
+            const char *role = arg_role(call, a);
+            if (role == nullptr)
+                continue;
+            const std::string variable = bare_identifier(arguments[a]);
+            if (variable.empty() || locals.count(variable) == 0 ||
+                proposed.count(variable) != 0 || !knowledge.is_placeholder(variable))
+                continue;
+            proposed[variable] = claim(role);
         }
     }
 
