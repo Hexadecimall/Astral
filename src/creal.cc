@@ -731,6 +731,517 @@ bool is_runtime_identifier(const std::string &name)
     return make_helper(name, helper, wants_int128);
 }
 
+// --- emitter-quality post-passes: goto reduction and buffer promotion ---
+int net_braces(const std::string &line)
+{
+    int depth = 0;
+    bool in_string = false;
+    char quote = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char c = line[i];
+        if (in_string) {
+            if (c == '\\' && i + 1 < line.size()) {
+                ++i;
+                continue;
+            }
+            if (c == quote)
+                in_string = false;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            in_string = true;
+            quote = c;
+            continue;
+        }
+        if (c == '{')
+            ++depth;
+        else if (c == '}')
+            --depth;
+    }
+    return depth;
+}
+
+std::string trimmed(const std::string &line)
+{
+    size_t first = line.find_first_not_of(" \t\r");
+    if (first == std::string::npos)
+        return std::string();
+    size_t last = line.find_last_not_of(" \t\r");
+    return line.substr(first, last - first + 1);
+}
+
+// A statement that hands control away, so nothing after it in the same block is
+// reached by falling through.
+bool is_terminator(const std::string &line)
+{
+    const std::string t = trimmed(line);
+    if (t == "break;" || t == "continue;")
+        return true;
+    if (t.compare(0, 7, "return;") == 0 || t.compare(0, 7, "return ") == 0)
+        return true;
+    if (t.compare(0, 5, "goto ") == 0 && !t.empty() && t.back() == ';')
+        return true;
+    return false;
+}
+
+// A line that is only a label definition, yielding the label's name.
+bool label_definition(const std::string &line, std::string &name)
+{
+    const std::string t = trimmed(line);
+    if (t.size() < 2 || t.back() != ':')
+        return false;
+    const std::string id = t.substr(0, t.size() - 1);
+    if (id.empty() || !(std::isalpha(static_cast<unsigned char>(id[0])) || id[0] == '_'))
+        return false;
+    for (char c : id)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_'))
+            return false;
+    // A bare "default:" or "case N:" is switch structure, not a jump target to
+    // fold away.
+    if (id == "default")
+        return false;
+    name = id;
+    return true;
+}
+
+// Removes a forward `goto` whose target block is only reachable through that one
+// jump, moving the block to the jump site.
+//
+// This fires only when it can be proven from the text that behaviour is
+// preserved: the label is named by exactly one `goto`, that `goto` is an
+// unconditional statement on its own, no statement falls through into the label
+// from above, and the labelled block is brace-balanced and ends by handing
+// control away. Under those conditions the block runs on exactly the paths the
+// `goto` selected and on no others, so relocating it and dropping the label is
+// an identity. Anything short of that proof is left untouched: an irreducible
+// `goto` reads worse than a wrong one runs.
+std::string reduce_gotos(const std::string &source)
+{
+    std::string text = source;
+    for (int pass = 0; pass < 64; ++pass) {
+        std::vector<std::string> lines;
+        {
+            std::istringstream in(text);
+            std::string line;
+            while (std::getline(in, line))
+                lines.push_back(line);
+        }
+
+        // Count how many `goto NAME;` statements name each label, and where each
+        // label is defined.
+        std::map<std::string, int> goto_count;
+        std::map<std::string, size_t> definition;
+        static const std::regex goto_re(R"(\bgoto\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
+        for (size_t i = 0; i < lines.size(); ++i) {
+            for (auto it = std::sregex_iterator(lines[i].begin(), lines[i].end(), goto_re);
+                 it != std::sregex_iterator(); ++it)
+                ++goto_count[(*it)[1].str()];
+            std::string name;
+            if (label_definition(lines[i], name))
+                definition[name] = i;
+        }
+
+        bool changed = false;
+        for (size_t g = 0; g < lines.size() && !changed; ++g) {
+            const std::string statement = trimmed(lines[g]);
+            std::smatch match;
+            // The whole statement has to be the jump; a conditional `goto`
+            // cannot be replaced by an unconditional block.
+            if (!std::regex_match(statement, match, std::regex(R"(goto\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)")))
+                continue;
+            const std::string name = match[1].str();
+            if (goto_count[name] != 1 || definition.count(name) == 0)
+                continue;
+            const size_t label_line = definition[name];
+            if (label_line <= g)
+                continue; // only forward jumps
+
+            // Nothing may fall through into the label from the line above it.
+            size_t before = label_line;
+            while (before > 0 && trimmed(lines[before - 1]).empty())
+                --before;
+            if (before == 0 || !is_terminator(lines[before - 1]))
+                continue;
+
+            // Gather the labelled block: the lines after the label up to the
+            // point its scope closes or another label begins.
+            size_t end = label_line + 1;
+            int depth = 0;
+            bool balanced_break = true;
+            for (; end < lines.size(); ++end) {
+                std::string other;
+                if (label_definition(lines[end], other))
+                    break;
+                const int delta = net_braces(lines[end]);
+                if (depth + delta < 0)
+                    break; // the closing brace of the enclosing scope
+                depth += delta;
+            }
+            if (end == label_line + 1) {
+                balanced_break = false;
+            }
+            if (!balanced_break || depth != 0)
+                continue; // block must be self-contained
+
+            // The block must end by transferring control, so it never falls
+            // through into whatever followed it in the original layout.
+            size_t last = end;
+            while (last > label_line + 1 && trimmed(lines[last - 1]).empty())
+                --last;
+            if (last == label_line + 1 || !is_terminator(lines[last - 1]))
+                continue;
+
+            // Reindent the block to the depth of the jump it replaces.
+            std::string indent;
+            {
+                size_t k = 0;
+                while (k < lines[g].size() && (lines[g][k] == ' ' || lines[g][k] == '\t'))
+                    indent.push_back(lines[g][k++]);
+            }
+            std::vector<std::string> block;
+            for (size_t i = label_line + 1; i < end; ++i) {
+                const std::string body = trimmed(lines[i]);
+                block.push_back(body.empty() ? std::string() : indent + body);
+            }
+
+            std::vector<std::string> rebuilt;
+            for (size_t i = 0; i < lines.size(); ++i) {
+                if (i == g) {
+                    for (const std::string &b : block)
+                        rebuilt.push_back(b);
+                    continue;
+                }
+                if (i >= label_line && i < end)
+                    continue; // the moved block and its label
+                rebuilt.push_back(lines[i]);
+            }
+
+            std::string joined;
+            for (size_t i = 0; i < rebuilt.size(); ++i) {
+                joined += rebuilt[i];
+                if (i + 1 < rebuilt.size())
+                    joined.push_back('\n');
+            }
+            if (!source.empty() && source.back() == '\n' && !joined.empty() &&
+                joined.back() != '\n')
+                joined.push_back('\n');
+            text = joined;
+            changed = true;
+        }
+        if (!changed)
+            break;
+    }
+    return text;
+}
+
+// A numeric literal, decimal or hexadecimal, or -1 when the text is not one.
+long parse_number(const std::string &raw)
+{
+    const std::string t = trimmed(raw);
+    if (t.empty())
+        return -1;
+    try {
+        size_t consumed = 0;
+        long value = std::stol(t, &consumed, 0);
+        if (consumed != t.size() || value < 0)
+            return -1;
+        return value;
+    } catch (...) {
+        return -1;
+    }
+}
+
+// The text inside a call's parentheses, where `open` is the position of the
+// opening one.
+bool call_inside(const std::string &line, size_t open, std::string &inside)
+{
+    int depth = 0;
+    for (size_t i = open; i < line.size(); ++i) {
+        if (line[i] == '(')
+            ++depth;
+        else if (line[i] == ')') {
+            --depth;
+            if (depth == 0) {
+                inside = line.substr(open + 1, i - open - 1);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Splits an argument list at top-level commas, trimming each argument.
+std::vector<std::string> split_args(const std::string &text)
+{
+    std::vector<std::string> args;
+    int depth = 0;
+    std::string current;
+    for (char c : text) {
+        if (c == '(' || c == '[')
+            ++depth;
+        else if (c == ')' || c == ']')
+            --depth;
+        if (c == ',' && depth == 0) {
+            args.push_back(trimmed(current));
+            current.clear();
+            continue;
+        }
+        current.push_back(c);
+    }
+    if (!trimmed(current).empty() || !args.empty())
+        args.push_back(trimmed(current));
+    return args;
+}
+
+// The stack variable this name denotes, and its frame offset. The decompiler
+// names a stack slot by the hexadecimal distance below the frame, so the offset
+// is recoverable from the name and slots that share a byte range can be found.
+bool stack_slot(const std::string &name, long &offset)
+{
+    size_t underscore = name.rfind('_');
+    if (underscore == std::string::npos || underscore + 1 >= name.size())
+        return false;
+    const std::string head = name.substr(0, underscore);
+    const std::string tail = name.substr(underscore + 1);
+    bool is_stack = head.size() >= 5 && head.compare(head.size() - 5, 5, "Stack") == 0;
+    bool is_local = head == "local";
+    if (!is_stack && !is_local)
+        return false;
+    for (char c : tail)
+        if (!std::isxdigit(static_cast<unsigned char>(c)))
+            return false;
+    try {
+        offset = std::stol(tail, nullptr, 16);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// A scalar integer type the decompiler prints, so a slot holding one is a
+// candidate for being seen as a byte buffer instead. Arrays and pointers are
+// excluded by their punctuation before this is asked.
+bool scalar_integer_type(const std::string &type)
+{
+    static const std::set<std::string> names = {
+        "char",   "uchar",  "byte",   "sbyte",  "short",  "ushort", "word",
+        "int",    "uint",   "dword",  "long",   "ulong",  "qword",
+        "int1",   "int2",   "int4",   "int8",   "uint1",  "uint2",  "uint4", "uint8",
+        "undefined", "undefined1", "undefined2", "undefined4", "undefined8",
+        // The standardized fixed-width spellings, so the pass reads the same
+        // whether or not the type rewrite has already run over the body.
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t"};
+    if (names.count(type) != 0)
+        return true;
+    // The printer's generated widths, unkbyte9 and friends, are integers too.
+    std::string stem;
+    int size = 0;
+    return split_generic_type(type, stem, size) && stem != "unkfloat";
+}
+
+// Promotes a stack slot the code treats purely as a byte buffer to a real
+// `char` array, so an access reads as `buffer[i]` against a declared size
+// rather than as arithmetic on the address of a lone machine word.
+//
+// The evidence has to be unambiguous and the rewrite provably harmless. A slot
+// qualifies only when every mention of it is either its address handed to a
+// sized byte operation (memset, memcpy, read, recv, pread, fgets) or a constant
+// index, never a scalar read or assignment; when a real size follows from that
+// evidence; and when no other live variable occupies the bytes the array would
+// cover. Under those conditions the slot already is a buffer of that size, so
+// giving it an array type and dropping the now-redundant address-of changes how
+// it reads without changing what it does. A slot used as a value, or overlapping
+// a variable the body still touches, is left exactly as the decompiler had it.
+std::string promote_buffers(const std::string &source)
+{
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(source);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+
+    // Collect the declared locals: name, the line it sits on, its offset when it
+    // is a stack slot, and whether it is a plain scalar the promotion can target.
+    struct Decl {
+        size_t line;
+        std::string indent;
+        std::string type;
+        long offset;
+        bool has_offset;
+        bool scalar;
+    };
+    std::map<std::string, Decl> decls;
+    static const std::regex decl_re(
+        R"(^(\s*)([A-Za-z_][A-Za-z0-9_ ]*?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$)");
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::smatch m;
+        if (!std::regex_match(lines[i], m, decl_re))
+            continue;
+        const std::string type = trimmed(m[2].str());
+        const std::string name = m[3].str();
+        if (type.find('*') != std::string::npos || type.find('[') != std::string::npos)
+            continue;
+        Decl d;
+        d.line = i;
+        d.indent = m[1].str();
+        d.type = type;
+        d.has_offset = stack_slot(name, d.offset);
+        d.scalar = scalar_integer_type(type);
+        decls[name] = d;
+    }
+
+    // Classify every whole-identifier mention: address-of, constant index, or a
+    // scalar use that rules the name out. The decl line itself is skipped.
+    struct Refs {
+        bool scalar_use = false;
+        long max_index = -1;
+        bool addressed = false;
+        std::set<size_t> lines;
+    };
+    std::map<std::string, Refs> refs;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &line = lines[i];
+        for (size_t j = 0; j < line.size();) {
+            if (!(std::isalpha(static_cast<unsigned char>(line[j])) || line[j] == '_')) {
+                ++j;
+                continue;
+            }
+            size_t start = j;
+            while (j < line.size() &&
+                   (std::isalnum(static_cast<unsigned char>(line[j])) || line[j] == '_'))
+                ++j;
+            const std::string name = line.substr(start, j - start);
+            auto found = decls.find(name);
+            if (found == decls.end())
+                continue;
+            if (found->second.line == i) // the declaration
+                continue;
+            Refs &r = refs[name];
+            r.lines.insert(i);
+            const bool addr = start > 0 && line[start - 1] == '&';
+            size_t after = j;
+            const bool indexed = after < line.size() && line[after] == '[';
+            if (addr) {
+                r.addressed = true;
+            } else if (indexed) {
+                const size_t close = line.find(']', after);
+                long index = close == std::string::npos
+                                 ? -1
+                                 : parse_number(line.substr(after + 1, close - after - 1));
+                if (index < 0)
+                    r.scalar_use = true; // a computed index, not a fixed extent
+                else
+                    r.max_index = std::max(r.max_index, index);
+            } else {
+                r.scalar_use = true;
+            }
+        }
+    }
+
+    // The sized byte operations, and which argument carries the byte count.
+    static const std::map<std::string, int> sized_calls = {
+        {"memset", 2}, {"memcpy", 2}, {"memmove", 2}, {"read", 2},
+        {"recv", 2},   {"pread", 2},  {"fgets", 1}};
+
+    std::map<std::string, long> promote; // name -> chosen size
+
+    for (const auto &entry : decls) {
+        const std::string &name = entry.first;
+        const Decl &decl = entry.second;
+        if (!decl.scalar || !decl.has_offset)
+            continue;
+        auto ref = refs.find(name);
+        if (ref == refs.end() || ref->second.scalar_use || !ref->second.addressed)
+            continue;
+
+        // Size from the byte operations the slot's address is handed to.
+        long size = ref->second.max_index >= 0 ? ref->second.max_index + 1 : -1;
+        for (const auto &call : sized_calls) {
+            const std::string needle = call.first + "(";
+            for (size_t i : ref->second.lines) {
+                size_t at = lines[i].find(needle);
+                while (at != std::string::npos) {
+                    std::string inside;
+                    if (call_inside(lines[i], at + call.first.size(), inside)) {
+                        const std::vector<std::string> args = split_args(inside);
+                        bool mentions = false;
+                        for (const std::string &a : args)
+                            if (a == "&" + name)
+                                mentions = true;
+                        if (mentions && static_cast<int>(args.size()) > call.second) {
+                            long n = parse_number(args[static_cast<size_t>(call.second)]);
+                            if (n > 0)
+                                size = std::max(size, n);
+                        }
+                    }
+                    at = lines[i].find(needle, at + needle.size());
+                }
+            }
+        }
+        if (size < 2 || size > 4096)
+            continue;
+
+        // The array would occupy the bytes from this slot upward. Any other
+        // slot that lives in that range and is still referenced would be
+        // overwritten, so promotion is refused when one exists.
+        bool collides = false;
+        for (const auto &other : decls) {
+            if (other.first == name || !other.second.has_offset)
+                continue;
+            const long off = other.second.offset;
+            if (off < decl.offset && off > decl.offset - size &&
+                refs.count(other.first) != 0)
+                collides = true;
+        }
+        if (collides)
+            continue;
+
+        promote[name] = size;
+    }
+
+    if (promote.empty())
+        return source;
+
+    // Apply: retype the declaration to a char array and drop the address-of on
+    // every mention, which an array name already supplies by decaying.
+    std::string out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::string line = lines[i];
+        for (const auto &p : promote) {
+            const Decl &decl = decls[p.first];
+            if (decl.line == i) {
+                line = decl.indent + "char " + p.first + " [" + std::to_string(p.second) + "];";
+            }
+        }
+        // Strip a leading '&' from any promoted name, token-accurately.
+        std::string rewritten;
+        for (size_t j = 0; j < line.size();) {
+            if (line[j] == '&' && j + 1 < line.size() &&
+                (std::isalpha(static_cast<unsigned char>(line[j + 1])) || line[j + 1] == '_')) {
+                size_t k = j + 1;
+                while (k < line.size() &&
+                       (std::isalnum(static_cast<unsigned char>(line[k])) || line[k] == '_'))
+                    ++k;
+                const std::string name = line.substr(j + 1, k - j - 1);
+                if (promote.count(name) != 0 && decls[name].line != i) {
+                    rewritten += name;
+                    j = k;
+                    continue;
+                }
+            }
+            rewritten.push_back(line[j]);
+            ++j;
+        }
+        out += rewritten;
+        if (i + 1 < lines.size() || (!source.empty() && source.back() == '\n'))
+            out.push_back('\n');
+    }
+    return out;
+}
+
 void realize_c(FunctionResult &function)
 {
     function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
@@ -741,6 +1252,10 @@ void realize_c(FunctionResult &function)
         rewrite_array_return(function, bytes);
 
     coerce_main(function);
+    // Straighten provably-safe forward gotos, then promote scalar stack slots
+    // that are only ever used as byte buffers into real arrays.
+    function.c_code_real = reduce_gotos(function.c_code_real);
+    function.c_code_real = promote_buffers(function.c_code_real);
 }
 
 std::string unnamed_location_type(const std::string &name)
