@@ -11,6 +11,9 @@ namespace astral_internal {
 // The text of include/astral/decompiled.h, embedded at build time.
 extern const char *const RUNTIME_HEADER_TEXT;
 
+#include <cstdint>
+#include <map>
+
 struct CEmitOptions {
     // Inline the runtime instead of emitting an #include for it, so the result
     // is one self-contained file.
@@ -20,6 +23,10 @@ struct CEmitOptions {
     // Say which names Astral chose and why. Off, because most of the time the
     // answer is code, not commentary.
     bool explain = false;
+    // Address -> initial value (little-endian, truncated to the global's width)
+    // for each referenced data global, so the emitter can turn an undefined
+    // extern into a real definition and the recovered program links.
+    std::map<uint64_t, uint64_t> data_init;
 };
 
 // Fills in c_code_real and signature_real: the same function written in C that

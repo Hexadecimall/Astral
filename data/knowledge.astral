@@ -559,3 +559,14 @@ proto warnx     extern void warnx(char *fmt, ...);
 proto access    extern int4 access(char *path, int4 mode);
 proto strtoll   extern SWORD strtoll(char *str, char **end, int4 base);
 proto strtoull  extern uint8 strtoull(char *str, char **end, int4 base);
+hdr realpath stdlib.h
+proto realpath extern char *realpath(char *path, char *resolved);
+hdr getaddrinfo netdb.h
+hdr freeaddrinfo netdb.h
+hdr gai_strerror netdb.h
+hdr socket sys/socket.h
+hdr connect sys/socket.h
+hdr shutdown sys/socket.h
+hdr setlocale locale.h
+proto gai_strerror extern char *gai_strerror(int4 ecode);
+hdr malloc_type_malloc malloc/malloc.h

@@ -106,6 +106,12 @@ ASTRAL_NORETURN ASTRAL_INLINE void halt_baddata(void)
 /* ASTRAL: swi ; ; ASTRAL_INLINE */
 ASTRAL_INLINE void swi(int number) { (void)number; }
 
+/* A trap/breakpoint instruction the disassembler could not attach meaning to.
+ * The recovered code sometimes calls through its result, so it returns a null
+ * address rather than nothing. */
+/* ASTRAL: SoftwareBreakpoint ; ; ASTRAL_INLINE */
+ASTRAL_INLINE long long SoftwareBreakpoint() { return 0; }
+
 /* NAN is a macro in math.h; the decompiler means the predicate. */
 /* ASTRAL: NAN ; ; ASTRAL_INLINE */
 #ifdef NAN

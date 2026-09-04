@@ -36,7 +36,8 @@ const char *const RUNTIME_NAMES[] = {
     "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
     "halt_baddata", "swi", "NAN", "ABS", "SQRT", "CEIL", "FLOOR", "ROUND", "TRUNC",
     "INT2FLOAT", "FLOAT2FLOAT", "POPCOUNT", "LZCOUNT", "INSERT", "ZPULL", "SPULL",
-    "ASTRAL_STORE", "ASTRAL_INLINE", "ASTRAL_NORETURN", "memcpy", "memset"};
+    "ASTRAL_STORE", "ASTRAL_INLINE", "ASTRAL_NORETURN", "memcpy", "memset",
+    "SoftwareBreakpoint"};
 
 // Library functions whose real declaration lives in a standard header. Naming
 // the header beats restating the prototype: the compiler then has the true
@@ -454,11 +455,28 @@ void coerce_main(FunctionResult &function)
     if (function.name != "main")
         return;
 
+    // main's return type is int, and its first parameter (argc) must be int
+    // too; the decompiler often recovers a wider type for it.
     auto retype = [&](const std::string &line) {
-        const size_t at = line.find("main");
+        size_t at = line.find("main");
         if (at == std::string::npos || at == 0)
             return line;
-        return "int " + line.substr(at);
+        std::string out = "int " + line.substr(at);
+        size_t open = out.find('(');
+        size_t close = out.find(')', open);
+        if (open != std::string::npos && close != std::string::npos && close > open + 1) {
+            std::string first = out.substr(open + 1, close - open - 1);
+            size_t comma = first.find(',');
+            std::string head = comma == std::string::npos ? first : first.substr(0, comma);
+            std::string rest = comma == std::string::npos ? std::string() : first.substr(comma);
+            // Keep the parameter's name, force its type to int, unless (void).
+            size_t name = head.find_last_of(" *");
+            if (head.find("void") == std::string::npos && name != std::string::npos) {
+                head = "int " + head.substr(name + 1);
+                out = out.substr(0, open + 1) + head + rest + out.substr(close);
+            }
+        }
+        return out;
     };
 
     function.signature_real = retype(function.signature_real);
@@ -844,6 +862,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     // Merge the declarations the sessions recorded, dropping anything this unit
     // defines itself.
     std::map<std::string, std::string> externals;
+    std::map<std::string, std::string> definitions; // data globals given a value
     std::set<std::string> headers;
     for (const FunctionResult &function : functions) {
         for (const Declaration &declaration : function.externals) {
@@ -852,6 +871,46 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             // A goto label is not an external; the body carries its definition.
             if (is_control_label(declaration.name))
                 continue;
+            // The runtime header and the generated helpers define these; an
+            // extern for one would clash with its definition.
+            if (is_runtime_identifier(declaration.name))
+                continue;
+            // A data global the code refers to: define it from the bytes at its
+            // address instead of leaving an undefined extern, so the recovered
+            // program links. Little-endian truncation to the declared width
+            // makes reading eight bytes correct for any narrower type.
+            // A stack-frame pseudo-symbol the decompiler leaked has no address
+            // and no real storage, but still needs a definition to link.
+            if (!declaration.is_function && declaration.name.rfind("stack", 0) == 0 &&
+                definitions.find(declaration.name) == definitions.end()) {
+                std::string decl = declaration.text;
+                const std::string kw = "extern ";
+                if (decl.compare(0, kw.size(), kw) == 0)
+                    decl.erase(0, kw.size());
+                if (!decl.empty() && decl.back() == ';')
+                    decl.pop_back();
+                definitions.emplace(declaration.name,
+                                    standardize_types(decl, used_stdint) + " = 0;");
+                continue;
+            }
+            if (!declaration.is_function) {
+                auto init = options.data_init.find(declaration.address);
+                if (init != options.data_init.end() &&
+                    definitions.find(declaration.name) == definitions.end()) {
+                    std::string decl = declaration.text; // "extern <type-and-name>;"
+                    const std::string kw = "extern ";
+                    if (decl.compare(0, kw.size(), kw) == 0)
+                        decl.erase(0, kw.size());
+                    if (!decl.empty() && decl.back() == ';')
+                        decl.pop_back();
+                    char value[32];
+                    std::snprintf(value, sizeof value, "0x%llxULL",
+                                  static_cast<unsigned long long>(init->second));
+                    decl = standardize_types(decl, used_stdint);
+                    definitions.emplace(declaration.name, decl + " = " + value + ";");
+                    continue;
+                }
+            }
             // A function a standard header declares should come from that
             // header, not from a guessed extern that would clash with it.
             std::string header =
@@ -877,6 +936,19 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
 
     std::ostringstream out;
     out << "/* Decompiled by Astral. Reverse engineer only what you have the right to. */\n";
+    // Decompiled code models pointers as integers; recent compilers reject that
+    // as an error. Demote it so the recovered source builds with a bare
+    // `cc file.c`, the same way every decompiler's output has to be built.
+    out << "#if defined(__clang__)\n"
+           "#  pragma clang diagnostic ignored \"-Wint-conversion\"\n"
+           "#  pragma clang diagnostic ignored \"-Wincompatible-pointer-types\"\n"
+           "#  pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+           "#  pragma clang diagnostic ignored \"-Wpointer-to-int-cast\"\n"
+           "#elif defined(__GNUC__)\n"
+           "#  pragma GCC diagnostic ignored \"-Wint-conversion\"\n"
+           "#  pragma GCC diagnostic ignored \"-Wincompatible-pointer-types\"\n"
+           "#  pragma GCC diagnostic ignored \"-Wimplicit-function-declaration\"\n"
+           "#endif\n";
 
     // Only the runtime pieces this code refers to. Most functions need none,
     // and a reader should not have to scroll past a hundred lines of
@@ -968,6 +1040,14 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     if (!externals.empty()) {
         out << '\n';
         for (const auto &entry : externals)
+            out << entry.second << '\n';
+    }
+
+    // Definitions for the data globals the code refers to, initialised from the
+    // bytes found at their addresses. These make the recovered program link.
+    if (!definitions.empty()) {
+        out << '\n';
+        for (const auto &entry : definitions)
             out << entry.second << '\n';
     }
 

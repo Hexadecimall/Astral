@@ -24,6 +24,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -878,6 +879,14 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
         // Following flow can create function symbols for call targets.
         globals_valid_ = false;
 
+        // A function named on an earlier pass carries no fresh reason on this
+        // one; hand back the reason recorded when the name was chosen.
+        if (out.naming_reason.empty()) {
+            auto cached = naming_reasons_.find(address);
+            if (cached != naming_reasons_.end())
+                out.naming_reason = cached->second;
+        }
+
         if (auto_naming_) {
             const std::string chosen = apply_naming(fd, out);
             if (!chosen.empty()) {
@@ -1177,6 +1186,7 @@ std::string Session::apply_naming(void *funcdata, FunctionResult &out)
              ++suffix)
             proposed_name = naming.function_name + std::to_string(suffix);
         out.naming_reason = proposed_name + ": " + naming.function_reason;
+        naming_reasons_[out.address] = out.naming_reason;
         renamed_function = true;
     }
 
@@ -1371,17 +1381,65 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         error = "no functions to emit";
         return false;
     }
-    std::vector<FunctionResult> results;
+    // Addresses that name a library import, so a call to one is left as an
+    // external declaration rather than decompiled into a stub body.
+    std::set<uint64_t> imports;
+    for (const Symbol &sym : image_.symbols)
+        if (sym.is_import)
+            imports.insert(sym.address);
+    std::set<uint64_t> entries(image_.entry_points.begin(), image_.entry_points.end());
+    auto name_for = [&](uint64_t addr) { return entries.count(addr) ? std::string("main")
+                                                                    : std::string(); };
+    auto in_code = [&](uint64_t addr) {
+        for (const Segment &seg : image_.segments)
+            if (seg.executable && addr >= seg.address && addr < seg.address + seg.size)
+                return true;
+        return false;
+    };
+
+    // Emit the whole reachable call graph, not just the requested functions, so
+    // the result has no calls to bodies it never defined - otherwise a
+    // decompiled program compiles but cannot link: every internal helper it
+    // calls is an undefined symbol.
+    //
+    // Two passes. The first walks the graph and lets the decompiler name each
+    // function; the second re-decompiles every one it found, so a call site
+    // prints the name its target settled on rather than the placeholder it had
+    // when the caller was first seen. Without the second pass a named callee
+    // and its callers disagree, and the disagreement is another link failure.
+    const size_t kFunctionLimit = 4000;
     std::string first_error;
-    for (uint64_t address : addresses) {
-        FunctionResult result;
+    std::set<uint64_t> discovered;
+    std::vector<uint64_t> worklist(addresses.begin(), addresses.end());
+    while (!worklist.empty() && discovered.size() < kFunctionLimit) {
+        uint64_t address = worklist.back();
+        worklist.pop_back();
+        if (!discovered.insert(address).second)
+            continue;
+        FunctionResult probe;
         std::string one_error;
-        if (!decompile(address, std::string(), result, one_error)) {
+        if (!decompile(address, name_for(address), probe, one_error)) {
             if (first_error.empty())
                 first_error = one_error;
+            discovered.erase(address);
             continue;
         }
-        results.push_back(std::move(result));
+        for (uint64_t callee : probe.callees)
+            if (callee != 0 && !discovered.count(callee) && !imports.count(callee) && in_code(callee))
+                worklist.push_back(callee);
+    }
+    if (discovered.empty()) {
+        error = first_error.empty() ? "nothing could be decompiled" : first_error;
+        return false;
+    }
+    std::vector<uint64_t> ordered(discovered.begin(), discovered.end());
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<FunctionResult> results;
+    for (uint64_t address : ordered) {
+        FunctionResult result;
+        std::string one_error;
+        if (decompile(address, name_for(address), result, one_error))
+            results.push_back(std::move(result));
     }
     if (results.empty()) {
         error = first_error.empty() ? "nothing could be decompiled" : first_error;
@@ -1391,6 +1449,27 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     options.self_contained = self_contained;
     options.comments = comments;
     options.explain = explain;
+    // Read the initial value of every data global the code refers to, so the
+    // emitter can define it rather than leave an undefined extern.
+    for (const FunctionResult &result : results) {
+        for (const Declaration &decl : result.externals) {
+            if (decl.is_function || decl.address == 0)
+                continue;
+            if (options.data_init.count(decl.address))
+                continue;
+            uint8_t bytes[8] = {0};
+            size_t got = image_.read(decl.address, bytes, sizeof bytes);
+            // A stack-frame pseudo-symbol the decompiler leaked is not real
+            // memory, but it still has to be defined for the unit to link.
+            bool artifact = decl.name.compare(0, 5, "stack") == 0;
+            if (got == 0 && !artifact)
+                continue; // genuinely unmapped: leave it as an extern
+            uint64_t value = 0;
+            for (int i = 7; i >= 0; --i)
+                value = (value << 8) | bytes[i];
+            options.data_init.emplace(decl.address, value);
+        }
+    }
     out = emit_c_unit(results, options);
     return true;
 }

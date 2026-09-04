@@ -168,6 +168,10 @@ private:
 
     BinaryImage image_;
     PatchSet patches_;
+    // Why each function got its name, kept so a later re-decompile (the second
+    // pass of whole-program emission) can still explain a name that an earlier
+    // pass already applied.
+    std::map<uint64_t, std::string> naming_reasons_;
     std::string archid_;
     // The architecture holds a pointer to this for its whole life, so it has to
     // outlive every use of the architecture rather than being a local.
