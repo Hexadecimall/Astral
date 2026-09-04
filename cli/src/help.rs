@@ -56,7 +56,7 @@ pub fn usage(stream: Stream) -> i32 {
         "├─ sleigh <in.slaspec> <out.sla>  Compile a processor specification\n",
         "├─ update  Rebuild and reinstall Astral\n",
         "│  ├─ install                build and install into the system location\n",
-        "│  ├─ --check                installed against the latest Ghidra\n",
+        "│  ├─ --check                installed against the latest release\n",
         "│  ├─ --ghidra <version>     vendor that release, then rebuild\n",
         "│  ├─ --languages <list>     processors to compile specs for, or ALL\n",
         "│  └─ --prefix <dir>         install somewhere else\n",
@@ -144,7 +144,7 @@ pub fn version(stream: Stream) -> i32 {
     Sink::new(stream).write(concat!(
         "usage: astral version\n",
         "\n",
-        "Astral's version, and the Ghidra release its decompiler came from.\n",
+        "Astral's version.\n",
     ));
     stream.code()
 }

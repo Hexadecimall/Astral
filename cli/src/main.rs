@@ -44,9 +44,8 @@ fn dispatch(arguments: &[String]) -> i32 {
                 return help::version(Stream::Out);
             }
             print(&format!(
-                "astral {} (Ghidra {})\n",
-                astral::version(),
-                astral::upstream_version()
+                "astral {} (Astral engine)\n",
+                astral::version()
             ));
             0
         }

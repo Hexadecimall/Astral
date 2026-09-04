@@ -1,4 +1,4 @@
-//! Ghidra's decompiler as a Rust library.
+//! Astral: a decompiler engine as a Rust library.
 //!
 //! No JVM, no Ghidra installation: the decompiler core is linked in, and the
 //! binary loading Ghidra normally does in Java happens in native code.

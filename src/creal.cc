@@ -479,7 +479,16 @@ void coerce_main(FunctionResult &function)
         return out;
     };
 
-    function.signature_real = retype(function.signature_real);
+    // Present argv the way it is written, as an array, and space the comma.
+    auto argv_form = [](std::string s) {
+        for (size_t at = s.find("char **argv"); at != std::string::npos;
+             at = s.find("char **argv", at + 1))
+            s.replace(at, 11, "char *argv[]");
+        for (size_t at = s.find(",char"); at != std::string::npos; at = s.find(",char", at + 1))
+            s.replace(at, 5, ", char");
+        return s;
+    };
+    function.signature_real = argv_form(retype(function.signature_real));
 
     std::istringstream lines(function.c_code_real);
     std::ostringstream body;
@@ -488,7 +497,7 @@ void coerce_main(FunctionResult &function)
     while (std::getline(lines, line)) {
         if (!header_done && line.find("main") != std::string::npos &&
             line.find('(') != std::string::npos && line.find(';') == std::string::npos) {
-            line = retype(line);
+            line = argv_form(retype(line));
             header_done = true;
         }
         const size_t at = line.find("return;");
