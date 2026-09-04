@@ -1408,20 +1408,23 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
     // the segment's end, capped so an over-read stays bounded.
     std::vector<uint64_t> sorted(addrs.begin(), addrs.end());
     std::sort(sorted.begin(), sorted.end());
-    const uint64_t kCap = 65536;
+    // A fixed window rather than the distance to the next referenced address:
+    // the decompiler often reaches one array through several bases a few bytes
+    // apart (opcodes at N, operands at N+1), and truncating the first at the
+    // second would leave it a byte long. Overlapping windows are harmless -
+    // each holds the real bytes at its own base - and reading past the segment
+    // just zero-fills.
+    const uint64_t kWindow = 8192;
     std::ostringstream defs;
     for (size_t i = 0; i < sorted.size(); ++i) {
         uint64_t a = sorted[i];
-        // The end of the segment holding this address.
         uint64_t seg_end = a;
         for (const Segment &s : image.segments)
             if (a >= s.address && a < s.address + s.size)
                 seg_end = s.address + s.size;
         uint64_t size = seg_end - a;
-        if (i + 1 < sorted.size() && sorted[i + 1] > a && sorted[i + 1] < seg_end)
-            size = sorted[i + 1] - a;
-        if (size > kCap)
-            size = kCap;
+        if (size > kWindow)
+            size = kWindow;
         if (size == 0)
             size = 1;
         std::vector<uint8_t> bytes(size, 0);
