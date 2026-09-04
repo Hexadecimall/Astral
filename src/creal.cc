@@ -1340,6 +1340,95 @@ std::string merge_string_terminators(const std::string &source)
     return out;
 }
 
+// Moves a local's declaration down to the statement that first assigns it, so
+// the body reads like written source - int32_t result = 0; - rather than a
+// block of bare declarations up top. Only a scalar whose first mention is a
+// plain assignment is moved; arrays, and anything read or address-taken before
+// it is assigned, stay declared at the top where that is still correct.
+std::string scope_declarations(const std::string &source)
+{
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(source);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+    // The declaration block: the run of `  <type> <name>;` lines after the
+    // opening brace, up to the first blank line.
+    size_t open = 0;
+    while (open < lines.size() && lines[open].find('{') == std::string::npos)
+        ++open;
+    if (open >= lines.size())
+        return source;
+    static const std::regex decl(R"(^(\s+)([A-Za-z_][A-Za-z0-9_ ]*[ ]\*{0,3})([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$)");
+    // Whole-word count of a name across the body lines [from..).
+    auto first_use_line = [&](const std::string &name, size_t from) -> size_t {
+        std::regex word("\\b" + name + "\\b");
+        for (size_t i = from; i < lines.size(); ++i)
+            if (std::regex_search(lines[i], word))
+                return i;
+        return lines.size();
+    };
+    // The body starts at the first statement past the declaration block: skip
+    // the declaration lines and any blank lines among them.
+    auto trimmed_empty = [](const std::string &s) {
+        return s.find_first_not_of(" \t") == std::string::npos;
+    };
+    // A declaration line ends in ';' with no '=' and no call - covers scalars
+    // and arrays alike.
+    static const std::regex any_decl(R"(^\s+[A-Za-z_][A-Za-z0-9_ *]*[A-Za-z0-9_](\s*\[\s*\d+\s*\])?\s*;\s*$)");
+    size_t body_start = open + 1;
+    while (body_start < lines.size() &&
+           (trimmed_empty(lines[body_start]) || std::regex_match(lines[body_start], any_decl)))
+        ++body_start;
+
+    std::set<size_t> removed;
+    for (size_t d = open + 1; d < body_start; ++d) {
+        std::smatch m;
+        if (!std::regex_match(lines[d], m, decl))
+            continue;
+        const std::string type = m[2].str();
+        const std::string name = m[3].str();
+        size_t use = first_use_line(name, body_start);
+        if (use >= lines.size())
+            continue;
+        // The first use must be at the function's top scope, not inside an if or
+        // loop - moving the declaration into a nested block would put it out of
+        // scope for later uses. Count the net braces before the use line.
+        int depth = 0;
+        for (size_t i = body_start; i < use; ++i)
+            for (char c : lines[i]) {
+                if (c == '{') ++depth;
+                else if (c == '}') --depth;
+            }
+        if (depth != 0)
+            continue;
+        // The first mention must be exactly `<indent><name> = <expr>;` - a plain
+        // assignment, not == or a read - and the name must not appear elsewhere
+        // on that line (no `name = name + ...`).
+        std::smatch am;
+        std::regex assign("^(\\s*)" + name + " = ([^;]*);\\s*$");
+        if (!std::regex_match(lines[use], am, assign))
+            continue;
+        if (std::regex_search(am[2].str(), std::regex("\\b" + name + "\\b")))
+            continue;
+        std::string t = type;
+        while (!t.empty() && t.back() == ' ')
+            t.pop_back();
+        lines[use] = am[1].str() + t + (t.back() == '*' ? "" : " ") + name + " = " +
+                     am[2].str() + ";";
+        removed.insert(d);
+    }
+    std::string out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (removed.count(i))
+            continue; // the declaration moved to its first assignment
+        out += lines[i] + "\n";
+    }
+    return out;
+}
+
 void realize_c(FunctionResult &function)
 {
     function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
@@ -1355,6 +1444,7 @@ void realize_c(FunctionResult &function)
     function.c_code_real = reduce_gotos(function.c_code_real);
     function.c_code_real = promote_buffers(function.c_code_real);
     function.c_code_real = merge_string_terminators(function.c_code_real);
+    function.c_code_real = scope_declarations(function.c_code_real);
 }
 
 std::string unnamed_location_type(const std::string &name)
