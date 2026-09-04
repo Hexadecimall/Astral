@@ -1446,6 +1446,41 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
         functions.push_back(std::move(copy));
     }
 
+    // A function recovered as returning void, whose result a caller uses, needs
+    // a value type or the unit will not compile.
+    {
+        std::string all;
+        for (const FunctionResult &f : functions)
+            all += f.c_code_real + "\n";
+        for (FunctionResult &f : functions) {
+            if (f.signature_real.compare(0, 5, "void ") != 0)
+                continue;
+            const std::string call = f.name + "(";
+            bool used = false;
+            for (size_t at = all.find(call); at != std::string::npos; at = all.find(call, at + 1)) {
+                size_t b = at;
+                while (b > 0 && all[b - 1] == ' ')
+                    --b;
+                if (b > 0 && (all[b - 1] == '=' || all[b - 1] == ')' || all[b - 1] == '+' ||
+                              all[b - 1] == '-' || all[b - 1] == '(')) {
+                    used = true;
+                    break;
+                }
+            }
+            if (!used)
+                continue;
+            f.signature_real = "int64_t" + f.signature_real.substr(4);
+            const std::string header = "void " + f.name + "(";
+            size_t h = f.c_code_real.find(header);
+            if (h != std::string::npos)
+                f.c_code_real.replace(h, 4, "int64_t");
+            for (size_t r = f.c_code_real.find("return;"); r != std::string::npos;
+                 r = f.c_code_real.find("return;", r + 1))
+                f.c_code_real.replace(r, 7, "return 0;");
+            used_stdint = true;
+        }
+    }
+
     std::set<std::string> defined;
     for (const FunctionResult &function : functions)
         defined.insert(function.name);

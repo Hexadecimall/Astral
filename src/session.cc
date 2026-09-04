@@ -984,6 +984,28 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
         if (fd->isProcStarted())
             arch_->clearAnalysis(fd);
 
+        // main gets its real signature before flow analysis, so argc and argv
+        // are recovered as parameters rather than left as raw input registers.
+        if (fd->getName() == "main") {
+            try {
+                ghidra::TypeFactory *tf = arch_->types;
+                int psz = arch_->getDefaultCodeSpace()->getAddrSize();
+                int wsz = arch_->getDefaultCodeSpace()->getWordSize();
+                ghidra::Datatype *tInt = tf->getBase(4, ghidra::TYPE_INT);
+                ghidra::Datatype *cptr = tf->getTypePointer(psz, tf->getTypeChar(1), wsz);
+                ghidra::Datatype *ccptr = tf->getTypePointer(psz, cptr, wsz);
+                ghidra::PrototypePieces pieces;
+                pieces.model = arch_->defaultfp;
+                pieces.name = "main";
+                pieces.outtype = tInt;
+                pieces.intypes.push_back(tInt);  pieces.innames.push_back("argc");
+                pieces.intypes.push_back(ccptr); pieces.innames.push_back("argv");
+                pieces.firstVarArgSlot = -1;
+                fd->getFuncProto().setPieces(pieces);
+            } catch (ghidra::LowlevelError &) {
+            }
+        }
+
         ghidra::AddrSpace *space = addr.getSpace();
         fd->followFlow(ghidra::Address(space, 0), ghidra::Address(space, space->getHighest()));
 

@@ -832,3 +832,4 @@ hdr malloc_type_malloc malloc/malloc.h
 proto __stack_chk_fail extern void __stack_chk_fail(void);
 proto __stack_chk_guard extern int8 __stack_chk_guard;
 proto abort extern void abort(void);
+proto main extern int4 main(int4 argc, char **argv);
