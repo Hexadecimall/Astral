@@ -430,6 +430,8 @@ std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &l
 
     std::unique_ptr<Session> session(new Session());
     session->image_ = std::move(image);
+    // Give C++ symbols readable names before anything else uses them.
+    demangle_symbols(session->image_);
 
     if (!language_override.empty())
         session->archid_ = complete_architecture(language_override, session->image_.arch.abi, error);

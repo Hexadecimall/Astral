@@ -93,6 +93,9 @@ bool load_any(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &
 // Builds a single-segment image covering the whole buffer.
 BinaryImage make_raw_image(const std::vector<uint8_t> &bytes, uint64_t base_address);
 
+// Renames C++ mangled symbols (_Z...) to readable, valid C identifiers.
+void demangle_symbols(BinaryImage &image);
+
 // Reads a whole file. Returns false and sets `error` on failure.
 bool read_file(const std::string &path, std::vector<uint8_t> &out, std::string &error);
 

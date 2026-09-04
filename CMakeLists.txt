@@ -78,6 +78,7 @@ set(ASTRAL_LIB_SRC
     src/cpp_api.cc
     src/error.cc
     src/image.cc
+    src/demangle.cc
     src/patch.cc
     src/sha256.cc
     src/macho_sign.cc
