@@ -27,6 +27,10 @@ struct CEmitOptions {
     // for each referenced data global, so the emitter can turn an undefined
     // extern into a real definition and the recovered program links.
     std::map<uint64_t, uint64_t> data_init;
+    // Address -> the name the loader gave a data global, so an import slot for a
+    // real libc global (__stdoutp) can be pointed at the true symbol rather than
+    // zeroed backing - which is what a rebuilt program needs to actually run.
+    std::map<uint64_t, std::string> data_names;
 };
 
 // Fills in c_code_real and signature_real: the same function written in C that

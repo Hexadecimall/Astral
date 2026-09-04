@@ -1562,6 +1562,11 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
             options.data_init.emplace(decl.address, value);
         }
     }
+    // The loader's name for each referenced data address, so an import slot for
+    // a real libc global can be pointed at the true symbol.
+    for (const Symbol &sym : image_.symbols)
+        if (!sym.is_function && !sym.name.empty())
+            options.data_names.emplace(sym.address, sym.name);
     out = emit_c_unit(results, options);
     // Define and re-point the absolute data addresses the code reads, so the
     // rebuilt program touches real arrays instead of stale image addresses.

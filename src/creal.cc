@@ -1526,7 +1526,25 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                     // consistent (the guard compares equal, buffers read zero).
                     bool data_pointer = decl.find('*') != std::string::npos &&
                                         decl.find("(*") == std::string::npos;
-                    if (data_pointer) {
+                    // An import slot for a real libc global is pointed at the
+                    // true symbol, so *(slot) is the actual stream and the
+                    // rebuilt program behaves rather than reading zeros.
+                    static const std::map<std::string, const char *> kGlobals = {
+                        {"__stdinp", "stdio.h"}, {"__stdoutp", "stdio.h"},
+                        {"__stderrp", "stdio.h"}, {"optarg", "unistd.h"},
+                        {"optind", "unistd.h"}, {"opterr", "unistd.h"},
+                        {"optopt", "unistd.h"}, {"__mb_cur_max", "stdlib.h"},
+                    };
+                    std::string real_global;
+                    if (auto nm = options.data_names.find(declaration.address);
+                        nm != options.data_names.end() && kGlobals.count(nm->second)) {
+                        real_global = nm->second;
+                        headers.insert(kGlobals.at(real_global));
+                    }
+                    if (!real_global.empty()) {
+                        definitions.emplace(declaration.name,
+                                            decl + " = (void *)&" + real_global + ";");
+                    } else if (data_pointer) {
                         std::string backing = "BACK_" + declaration.name;
                         definitions.emplace(
                             declaration.name,
