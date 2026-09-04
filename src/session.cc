@@ -841,6 +841,112 @@ bool Session::write_patched(const std::string &out_path, std::string &error) con
     return true;
 }
 
+std::vector<std::pair<ghidra::Address, ghidra::FuncProto *>>
+Session::collect_vararg_overrides(void *funcdata)
+{
+    ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
+    struct Formatter { int fixed; int format_index; };
+    // Only the output family: scanf takes pointers and the err/warn family is
+    // void/noreturn, both of which need different handling.
+    static const std::map<std::string, Formatter> kFormatters = {
+        {"printf", {1, 0}},   {"fprintf", {2, 1}},  {"sprintf", {2, 1}},
+        {"snprintf", {3, 2}}, {"dprintf", {2, 1}},
+    };
+    const int ptr = arch_->getDefaultCodeSpace()->getAddrSize();
+    const int word = arch_->getDefaultCodeSpace()->getWordSize();
+    ghidra::TypeFactory *tf = arch_->types;
+    ghidra::Datatype *tInt = tf->getBase(4, ghidra::TYPE_INT);
+    ghidra::Datatype *tLong = tf->getBase(8, ghidra::TYPE_INT);
+    ghidra::Datatype *tUint = tf->getBase(4, ghidra::TYPE_UINT);
+    ghidra::Datatype *tDouble = tf->getBase(8, ghidra::TYPE_FLOAT);
+    ghidra::Datatype *tCharPtr = tf->getTypePointer(ptr, tf->getTypeChar(1), word);
+    ghidra::Datatype *tVoid = tf->getTypeVoid();
+    ghidra::Datatype *tVoidPtr = tf->getTypePointer(ptr, tVoid, word);
+
+    std::vector<std::pair<ghidra::Address, ghidra::FuncProto *>> overrides;
+    for (int ci = 0; ci < fd->numCalls(); ++ci) {
+        ghidra::FuncCallSpecs *spec = fd->getCallSpecs(ci);
+        if (spec == nullptr)
+            continue;
+        ghidra::PcodeOp *op = spec->getOp();
+        if (op == nullptr)
+            continue;
+        auto entry = kFormatters.find(spec->getName());
+        if (entry == kFormatters.end())
+            continue;
+        const int fixed = entry->second.fixed;
+        const int format_index = entry->second.format_index;
+        const int format_slot = 1 + format_index; // getIn(0) is the call target
+        if (op->numInput() <= format_slot)
+            continue;
+        const ghidra::Varnode *fmtvn = op->getIn(format_slot);
+        if (!fmtvn->isConstant())
+            continue;
+        uint64_t fmtaddr = fmtvn->getOffset();
+        std::string fmt;
+        for (int k = 0; k < 4096; ++k) {
+            uint8_t c = 0;
+            if (image_.read(fmtaddr + k, &c, 1) == 0 || c == 0)
+                break;
+            fmt.push_back(static_cast<char>(c));
+        }
+        if (fmt.empty())
+            continue;
+
+        std::vector<ghidra::Datatype *> varargs;
+        for (size_t k = 0; k + 1 < fmt.size(); ++k) {
+            if (fmt[k] != '%')
+                continue;
+            if (fmt[k + 1] == '%') { ++k; continue; }
+            size_t j = k + 1;
+            bool wide = false;
+            while (j < fmt.size() && std::strchr("-+ #0123456789.*hljztL", fmt[j])) {
+                if (std::strchr("lLjzt", fmt[j])) wide = true;
+                ++j;
+            }
+            if (j >= fmt.size())
+                break;
+            switch (fmt[j]) {
+            case 'd': case 'i': varargs.push_back(wide ? tLong : tInt); break;
+            case 'u': case 'x': case 'X': case 'o': varargs.push_back(wide ? tLong : tUint); break;
+            case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A':
+                varargs.push_back(tDouble); break;
+            case 'c': varargs.push_back(tInt); break;
+            case 's': varargs.push_back(tCharPtr); break;
+            case 'p': case 'n': varargs.push_back(tVoidPtr); break;
+            default: break;
+            }
+            k = j;
+        }
+        if (varargs.empty())
+            continue;
+
+        ghidra::PrototypePieces pieces;
+        pieces.model = arch_->defaultfp;
+        pieces.name = spec->getName();
+        pieces.outtype = tInt;
+        for (int a = 0; a < fixed; ++a) {
+            pieces.intypes.push_back(a == format_index ? tCharPtr : tVoidPtr);
+            pieces.innames.emplace_back();
+        }
+        for (ghidra::Datatype *t : varargs) {
+            pieces.intypes.push_back(t);
+            pieces.innames.emplace_back();
+        }
+        pieces.firstVarArgSlot = -1;
+        try {
+            // Exactly as Ghidra's own prototype override: internal storage, no
+            // input lock, so the surrounding register analysis is not disturbed.
+            ghidra::FuncProto *proto = new ghidra::FuncProto();
+            proto->setInternal(pieces.model, tVoid);
+            proto->setPieces(pieces);
+            overrides.emplace_back(op->getAddr(), proto);
+        } catch (ghidra::LowlevelError &) {
+        }
+    }
+    return overrides;
+}
+
 bool Session::decompile(uint64_t address, const std::string &name, FunctionResult &out,
                         std::string &error)
 {
@@ -874,6 +980,20 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
 
         arch_->allacts.getCurrent()->reset(*fd);
         arch_->allacts.getCurrent()->perform(*fd);
+
+        // Recover the arguments after a printf-style format string. Overrides
+        // are inserted and the function re-analysed with fd->clear(), which
+        // keeps overrides but resets analysis - the way the engine's own
+        // override does it, so nothing else in the function is disturbed.
+        auto vararg_overrides = collect_vararg_overrides(fd);
+        if (!vararg_overrides.empty()) {
+            for (const auto &ov : vararg_overrides)
+                fd->getOverride().insertProtoOverride(ov.first, ov.second);
+            fd->clear();
+            fd->followFlow(ghidra::Address(space, 0), ghidra::Address(space, space->getHighest()));
+            arch_->allacts.getCurrent()->reset(*fd);
+            arch_->allacts.getCurrent()->perform(*fd);
+        }
 
         analyse_function(fd, out);
 

@@ -13,6 +13,8 @@
 
 namespace ghidra {
 class Architecture;
+class Address;
+class FuncProto;
 }
 
 namespace astral_internal {
@@ -163,6 +165,12 @@ private:
     void analyse_function(void *funcdata, FunctionResult &out);
     void apply_learned_names();
     void apply_known_prototype(const std::string &name);
+    // Collects prototype overrides that give each printf-style call a concrete
+    // signature recovered from its format string, applied to the current
+    // function so its arguments come back. Built the way Ghidra's own override
+    // does: internal storage, no input lock.
+    std::vector<std::pair<ghidra::Address, ghidra::FuncProto *>>
+    collect_vararg_overrides(void *funcdata);
     std::string learned_name_for(uint64_t address, uint64_t size) const;
     void collect_externals(FunctionResult &result, const void *funcdata) const;
 
