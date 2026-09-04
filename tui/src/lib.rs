@@ -59,6 +59,7 @@ pub fn run(arguments: Vec<String>) -> i32 {
     let mut rename = false;
     let mut dump = false;
     let mut view: Option<app::View> = None;
+    let mut workspace: Option<app::Workspace> = None;
     let mut at: Option<u64> = None;
     let mut path: Option<PathBuf> = None;
 
@@ -75,6 +76,16 @@ pub fn run(arguments: Vec<String>) -> i32 {
                 Some(parsed) => size = parsed,
                 None => {
                     eprintln!("--size wants WIDTHxHEIGHT, for example 80x24");
+                    std::process::exit(2);
+                }
+            },
+            "--workspace" => match args.next().as_deref() {
+                Some("code") => workspace = Some(app::Workspace::Code),
+                Some("disasm") => workspace = Some(app::Workspace::Disasm),
+                Some("graph") => workspace = Some(app::Workspace::Graph),
+                Some("patches") => workspace = Some(app::Workspace::Patches),
+                _ => {
+                    eprintln!("--workspace wants code, disasm, graph or patches");
                     std::process::exit(2);
                 }
             },
@@ -110,7 +121,7 @@ pub fn run(arguments: Vec<String>) -> i32 {
     };
 
     let result = if selftest {
-        run_selftest(&path, size, exercise, rename, dump, view, at)
+        run_selftest(&path, size, exercise, rename, dump, view, workspace, at)
     } else {
         run_interactive(&path)
     };
@@ -334,6 +345,7 @@ fn run_selftest(
     rename: bool,
     dump: bool,
     view: Option<app::View>,
+    workspace: Option<app::Workspace>,
     at: Option<u64>,
 ) -> Result<(), String> {
     let mut app = App::new(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -380,6 +392,9 @@ fn run_selftest(
         ));
     }
     app.set_view(view.unwrap_or(app::View::Compilable));
+    if let Some(ws) = workspace {
+        app.set_workspace(ws);
+    }
     // Twice: the second pass picks up anything the first frame asked for, such
     // as the companion listing under a short function.
     for _ in 0..2 {

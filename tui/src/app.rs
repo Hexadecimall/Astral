@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ratatui::layout::Rect;
+
 use astral::{COptions, Call, Library, Program, Symbol, Variable};
 
 use crate::highlight::Syntax;
@@ -71,6 +73,53 @@ impl View {
     }
 }
 
+/// The top-level workspace: what the whole screen is for right now. Distinct
+/// from `View`, which only chooses the flavour of code inside the Code
+/// workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Workspace {
+    Code,
+    Disasm,
+    Graph,
+    Patches,
+}
+
+impl Workspace {
+    pub const ALL: [Workspace; 4] = [
+        Workspace::Code,
+        Workspace::Disasm,
+        Workspace::Graph,
+        Workspace::Patches,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Workspace::Code => "Code",
+            Workspace::Disasm => "Disasm",
+            Workspace::Graph => "Graph",
+            Workspace::Patches => "Patches",
+        }
+    }
+}
+
+/// One decoded instruction, kept structured so the Disasm workspace can put a
+/// cursor on it and hand its address to the patch engine.
+#[derive(Debug, Clone)]
+pub struct Insn {
+    pub address: u64,
+    pub text: String,
+}
+
+/// One queued edit, parsed back from the library's patch listing for display.
+#[derive(Debug, Clone)]
+pub struct PatchRow {
+    pub address: u64,
+    pub tier: String,
+    pub note: String,
+    pub from: String,
+    pub to: String,
+}
+
 /// Input modes for the bottom line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -124,6 +173,13 @@ pub struct FileInfo {
     pub segments: usize,
 }
 
+/// The address a listing line starts with, e.g. "0x100004abc: ...".
+fn parse_listing_address(line: &str) -> Option<u64> {
+    let rest = line.trim_start().strip_prefix("0x")?;
+    let digits = rest.split(':').next()?;
+    u64::from_str_radix(digits, 16).ok()
+}
+
 pub struct App {
     // `library` must outlive `program`; declaration order gives that on drop.
     pub program: Program,
@@ -140,6 +196,7 @@ pub struct App {
     pub selected: usize,
 
     pub view: View,
+    pub workspace: Workspace,
     pub focus: Pane,
     pub mode: Mode,
     pub input: String,
@@ -158,6 +215,24 @@ pub struct App {
     /// out which pane the mouse pointer is over.
     pub layout_left_end: u16,
     pub layout_center_end: u16,
+
+    /// Pane rectangles from the last frame, for mouse hit-testing against the
+    /// live layout rather than two boundary columns.
+    pub rect_symbols: Rect,
+    pub rect_center: Rect,
+    pub rect_details: Rect,
+    /// The tab row and each tab's column span, so a click selects a workspace.
+    pub tab_spans: Vec<(Workspace, u16, u16)>,
+    pub tab_row: u16,
+
+    /// Top visible index of the symbol list, tracked so a click maps to a row.
+    pub sym_offset: usize,
+    /// Disasm workspace: the instruction cursor and the top visible line.
+    pub disasm_cursor: usize,
+    pub disasm_offset: usize,
+    pub disasm_count: usize,
+    /// Patches workspace cursor.
+    pub patch_cursor: usize,
 
     pub current: Option<u64>,
     pub history: Vec<u64>,
@@ -224,6 +299,7 @@ impl App {
             // The rest of the tool emits compilable C unless asked for the
             // listing, and the interface opens on the same thing.
             view: View::Compilable,
+            workspace: Workspace::Code,
             focus: Pane::Symbols,
             mode: Mode::Normal,
             input: String::new(),
@@ -236,6 +312,16 @@ impl App {
             detail_selected: 0,
             layout_left_end: 0,
             layout_center_end: 0,
+            rect_symbols: Rect::default(),
+            rect_center: Rect::default(),
+            rect_details: Rect::default(),
+            tab_spans: Vec::new(),
+            tab_row: 0,
+            sym_offset: 0,
+            disasm_cursor: 0,
+            disasm_offset: 0,
+            disasm_count: 0,
+            patch_cursor: 0,
             current: None,
             history: Vec::new(),
             pending: None,
@@ -395,6 +481,205 @@ impl App {
                 self.status = String::new();
             }
         }
+    }
+
+    // ---- workspaces ------------------------------------------------------
+
+    pub fn set_workspace(&mut self, workspace: Workspace) {
+        self.workspace = workspace;
+        self.center_scroll = 0;
+        match workspace {
+            // The Disasm workspace draws the current function's instructions, so
+            // make sure that listing is on its way.
+            Workspace::Disasm => {
+                if let Some(address) = self.current {
+                    self.focus = Pane::Center;
+                    self.disasm_cursor = 0;
+                    self.disasm_offset = 0;
+                    if !self.text_cache.contains_key(&(address, View::Disassembly)) {
+                        self.status = "disassembling ...".to_string();
+                        self.pending = Some(Pending::RenderCompanion(address));
+                    }
+                }
+            }
+            Workspace::Patches => {
+                self.focus = Pane::Center;
+                self.patch_cursor = 0;
+            }
+            Workspace::Graph => self.focus = Pane::Center,
+            Workspace::Code => {
+                self.focus = Pane::Symbols;
+                if let Some(address) = self.current {
+                    if !self.view_ready(address) {
+                        self.pending = Some(Pending::RenderView);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The current function's instructions, parsed from the cached listing.
+    pub fn disasm_instructions(&self) -> Vec<Insn> {
+        let Some(address) = self.current else {
+            return Vec::new();
+        };
+        let end = self
+            .current_function()
+            .map(|f| f.address + f.size)
+            .unwrap_or(u64::MAX);
+        self.text_cache
+            .get(&(address, View::Disassembly))
+            .and_then(|entry| entry.as_ref().ok())
+            .map(|text| {
+                text.lines()
+                    .filter_map(|line| {
+                        let addr = parse_listing_address(line)?;
+                        if addr >= end {
+                            return None;
+                        }
+                        Some(Insn {
+                            address: addr,
+                            text: line.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // ---- patching --------------------------------------------------------
+
+    /// Drops every cached derivation of the current function so the next paint
+    /// re-decompiles and re-disassembles it from the (now patched) image.
+    fn invalidate_current(&mut self) {
+        if let Some(address) = self.current {
+            self.cache.remove(&address);
+            self.text_cache.remove(&(address, View::Decompiled));
+            self.text_cache.remove(&(address, View::Compilable));
+            self.text_cache.remove(&(address, View::Disassembly));
+            self.text_cache.remove(&(address, View::Pcode));
+            self.pending = Some(Pending::Decompile(address));
+        }
+    }
+
+    /// The address the Disasm cursor sits on, if any.
+    pub fn disasm_cursor_address(&self) -> Option<u64> {
+        self.disasm_instructions()
+            .get(self.disasm_cursor)
+            .map(|insn| insn.address)
+    }
+
+    pub fn patch_nop_cursor(&mut self) {
+        let Some(address) = self.disasm_cursor_address() else {
+            self.status = "no instruction under the cursor".to_string();
+            return;
+        };
+        match self.program.patch_nop(address, 1) {
+            Ok(()) => {
+                self.status = format!("no-op at {address:#x} ({} queued)", self.program.patch_count());
+                self.invalidate_current();
+            }
+            Err(error) => self.status = format!("patch failed: {error}"),
+        }
+    }
+
+    pub fn patch_invert_cursor(&mut self) {
+        let Some(address) = self.disasm_cursor_address() else {
+            self.status = "no instruction under the cursor".to_string();
+            return;
+        };
+        match self.program.patch_invert(address) {
+            Ok(()) => {
+                self.status = format!("inverted branch at {address:#x} ({} queued)", self.program.patch_count());
+                self.invalidate_current();
+            }
+            Err(error) => self.status = format!("patch failed: {error}"),
+        }
+    }
+
+    pub fn patch_return_current(&mut self, value: u64) {
+        let Some(address) = self.current else {
+            self.status = "no function selected".to_string();
+            return;
+        };
+        match self.program.patch_return(address, value) {
+            Ok(()) => {
+                self.status = format!("{:#x} now returns {value} ({} queued)", address, self.program.patch_count());
+                self.invalidate_current();
+            }
+            Err(error) => self.status = format!("patch failed: {error}"),
+        }
+    }
+
+    pub fn patch_undo(&mut self) {
+        if self.program.patch_count() == 0 {
+            self.status = "no patches to undo".to_string();
+            return;
+        }
+        self.program.patch_undo();
+        self.status = format!("undid last patch ({} left)", self.program.patch_count());
+        self.invalidate_current();
+        let count = self.patch_rows().len();
+        if self.patch_cursor >= count {
+            self.patch_cursor = count.saturating_sub(1);
+        }
+    }
+
+    /// Writes the patched binary next to the original and reports where.
+    pub fn write_patched(&mut self) {
+        if self.program.patch_count() == 0 {
+            self.status = "no patches to write".to_string();
+            return;
+        }
+        let out = format!("{}.patched", self.file.path.display());
+        match self.program.write_patched(&out) {
+            Ok(()) => self.status = format!("wrote {out}"),
+            Err(error) => self.status = format!("write failed: {error}"),
+        }
+    }
+
+    /// The queued patches, parsed from the library's listing for display.
+    pub fn patch_rows(&self) -> Vec<PatchRow> {
+        let text = self.program.patch_serialize();
+        let mut rows = Vec::new();
+        let mut cur: Option<PatchRow> = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line == "patch" {
+                if let Some(row) = cur.take() {
+                    rows.push(row);
+                }
+                cur = Some(PatchRow {
+                    address: 0,
+                    tier: String::new(),
+                    note: String::new(),
+                    from: String::new(),
+                    to: String::new(),
+                });
+                continue;
+            }
+            let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let value = value.trim();
+            if let Some(row) = cur.as_mut() {
+                match key {
+                    "address" => row.address = u64::from_str_radix(value, 16).unwrap_or(0),
+                    "tier" => row.tier = value.to_string(),
+                    "note" => row.note = value.to_string(),
+                    "from" => row.from = value.to_string(),
+                    "to" => row.to = value.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(row) = cur.take() {
+            rows.push(row);
+        }
+        rows
     }
 
     // ---- deferred work ---------------------------------------------------

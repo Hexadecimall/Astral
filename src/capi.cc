@@ -430,7 +430,7 @@ size_t astral_program_patch_count(astral_program *program)
 void astral_program_patch_undo(astral_program *program)
 {
     if (program != nullptr)
-        program->session->patches().undo_last();
+        program->session->undo_patch();
 }
 
 void astral_program_patch_clear(astral_program *program)

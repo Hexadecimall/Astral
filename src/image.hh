@@ -72,6 +72,12 @@ struct BinaryImage {
     // in no segment at all: nothing there can be patched onto disk.
     bool file_offset_for(uint64_t address, uint64_t &out) const;
 
+    // Overwrites up to `size` bytes at `address` in the in-memory segment data,
+    // so a later read reflects the change. Returns bytes actually written; a
+    // short count means the range ran off the mapped data. Used to make a
+    // queued patch visible to disassembly and decompilation right away.
+    size_t write(uint64_t address, const uint8_t *data, size_t size);
+
     void sort_and_dedup_symbols();
 };
 

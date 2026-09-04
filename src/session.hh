@@ -141,6 +141,11 @@ public:
     // disk at image().path.
     bool write_patched(const std::string &out_path, std::string &error) const;
 
+    // Removes the most recent patch, restoring the bytes it replaced in the
+    // in-memory image so disassembly and decompilation revert with it. Returns
+    // false when there is nothing to undo.
+    bool undo_patch();
+
     // Warnings the decompiler produced while working on this program.
     std::string messages() const { return messages_.str(); }
 

@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Mode, View};
+use crate::app::{App, Mode, Workspace};
 use crate::layout as columns;
 use crate::panes;
 use crate::theme::Theme;
@@ -22,6 +22,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(3),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -29,9 +30,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .split(area);
 
     draw_header(frame, app, chunks[0]);
-    draw_body(frame, app, chunks[1]);
-    draw_status(frame, app, chunks[2]);
-    draw_keys(frame, app, chunks[3]);
+    draw_tabs(frame, app, chunks[1]);
+    draw_body(frame, app, chunks[2]);
+    draw_status(frame, app, chunks[3]);
+    draw_keys(frame, app, chunks[4]);
 
     if app.show_help {
         draw_help(frame, app.theme, area);
@@ -84,7 +86,62 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
+fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect) {
+    let theme = app.theme;
+    app.tab_row = area.y;
+    app.tab_spans.clear();
+    let mut spans: Vec<Span> = Vec::new();
+    let mut x = area.x;
+    for (index, ws) in Workspace::ALL.iter().enumerate() {
+        let active = *ws == app.workspace;
+        let label = format!("  {} {}  ", index + 1, ws.title());
+        let width = label.chars().count() as u16;
+        app.tab_spans.push((*ws, x, x + width));
+        x += width;
+        let style = if active {
+            theme.accent().add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            theme.muted()
+        };
+        spans.push(Span::styled(label, style));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
 fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.workspace {
+        Workspace::Code => draw_code_body(frame, app, area),
+        Workspace::Disasm => draw_single_body(frame, app, area, panes::draw_disasm),
+        Workspace::Graph => draw_single_body(frame, app, area, panes::draw_graph),
+        Workspace::Patches => draw_single_body(frame, app, area, panes::draw_patches),
+    }
+}
+
+/// The workspaces that are a symbol list beside one wide pane share this split.
+fn draw_single_body(
+    frame: &mut Frame,
+    app: &mut App,
+    area: Rect,
+    draw_main: fn(&mut Frame, &mut App, Rect),
+) {
+    let widths = columns::body(area.width, false);
+    let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(widths.symbols),
+            Constraint::Min(10),
+        ])
+        .split(area);
+    app.rect_symbols = split[0];
+    app.rect_center = split[1];
+    app.rect_details = Rect::default();
+    app.layout_left_end = split[0].right();
+    app.layout_center_end = split[1].right();
+    panes::draw_symbols(frame, app, split[0]);
+    draw_main(frame, app, split[1]);
+}
+
+fn draw_code_body(frame: &mut Frame, app: &mut App, area: Rect) {
     let widths = columns::body(area.width, app.show_details);
     let mut constraints = vec![
         Constraint::Length(widths.symbols),
@@ -129,46 +186,33 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_keys(frame: &mut Frame, app: &App, area: Rect) {
+    use crate::app::Workspace;
     let theme = app.theme;
-    let view_marks: Vec<Span> = View::ALL
-        .iter()
-        .enumerate()
-        .flat_map(|(index, view)| {
-            let active = *view == app.view;
-            // The active view is bold as well as accented, so which one is on
-            // screen survives a monochrome terminal.
-            let style = if active {
-                theme.accent().add_modifier(Modifier::BOLD)
+    // The key bar follows the workspace: each has its own verbs.
+    let hint = match app.workspace {
+        Workspace::Code => {
+            if area.width >= 150 {
+                "1-4 workspace  v C/pseudo  p p-code  Tab focus  /filter  Enter go  r rename  x xrefs  s save  ? help  q quit"
+            } else if area.width >= 100 {
+                "1-4  v  p  Tab  /filter  Enter  r  x  s  ? help  q quit"
             } else {
-                theme.muted()
-            };
-            vec![
-                Span::styled(format!("{}", index + 1), style),
-                Span::styled(format!(":{} ", view.title()), style),
-            ]
-        })
-        .collect();
-
-    // The view marks are about 50 columns; only offer the long hint when the
-    // rest of it will actually fit.
-    let hint = if area.width >= 150 {
-        "| Tab focus  /filter  Enter go  r rename  x xrefs  s save  b details  h back  ? help  q quit"
-    } else if area.width >= 110 {
-        "| Tab  /filter  Enter  r  x  s  b  h back  ? help  q quit"
-    } else {
-        "| ? help  q quit"
+                "1-4  ? help  q quit"
+            }
+        }
+        Workspace::Disasm => {
+            if area.width >= 120 {
+                "1-4 workspace  j/k move  n no-op  i invert  R return 1  u undo  w write patched  ? help  q quit"
+            } else {
+                "n no-op  i invert  R return  u undo  w write  ? help  q quit"
+            }
+        }
+        Workspace::Patches => "1-4 workspace  j/k move  u undo  w write patched  ? help  q quit",
+        Workspace::Graph => "1-4 workspace  x build callers  ? help  q quit",
     };
-    let mut spans = if area.width >= 80 {
-        view_marks
-    } else {
-        // Too narrow for the full view list: show just the active one.
-        vec![Span::styled(
-            format!("{} ", app.view.title()),
-            theme.accent().add_modifier(Modifier::BOLD),
-        )]
-    };
-    spans.push(Span::styled(hint, theme.muted()));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme.muted()))),
+        area,
+    );
 }
 
 fn draw_help(frame: &mut Frame, theme: Theme, area: Rect) {
@@ -178,8 +222,11 @@ fn draw_help(frame: &mut Frame, theme: Theme, area: Rect) {
         ("up/down, j/k", "move in the focused pane"),
         ("PgUp / PgDn", "page in the focused pane"),
         ("g / G", "top / bottom"),
-        ("Tab", "cycle focus: symbols -> code -> details"),
-        ("1 2 3 4 / v", "pseudo-C, compilable C, disassembly, p-code"),
+        ("1 2 3 4", "workspace: Code, Disasm, Graph, Patches"),
+        ("Tab", "cycle focus within the workspace"),
+        ("v / p", "in Code: C vs pseudo-C / p-code"),
+        ("n / i / R", "in Disasm: no-op, invert branch, return 1"),
+        ("u / w", "undo last patch / write patched binary"),
         ("/", "filter symbols (Esc clears)"),
         ("Enter", "decompile selection, or jump to a callee"),
         ("r", "rename the selected symbol"),

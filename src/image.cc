@@ -30,6 +30,27 @@ size_t BinaryImage::read(uint64_t address, uint8_t *out, size_t size) const
     return std::min(covered, size);
 }
 
+size_t BinaryImage::write(uint64_t address, const uint8_t *data, size_t size)
+{
+    size_t written = 0;
+    for (Segment &seg : segments) {
+        if (address + size <= seg.address || address >= seg.address + seg.size)
+            continue;
+        uint64_t start = std::max(address, seg.address);
+        uint64_t end = std::min(address + size, seg.address + seg.size);
+        if (end <= start)
+            continue;
+        uint64_t seg_off = start - seg.address;
+        if (seg_off >= seg.data.size())
+            continue; // the range is in the segment's uninitialized tail
+        size_t avail = std::min<size_t>(static_cast<size_t>(end - start),
+                                        seg.data.size() - seg_off);
+        std::memcpy(seg.data.data() + seg_off, data + (start - address), avail);
+        written += avail;
+    }
+    return written;
+}
+
 bool BinaryImage::contains(uint64_t address) const
 {
     for (const Segment &seg : segments)

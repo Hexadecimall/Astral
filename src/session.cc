@@ -682,6 +682,19 @@ bool Session::patch_bytes(uint64_t address, const std::vector<uint8_t> &bytes, P
     p.tier = tier;
     p.note = note;
     patches_.add(std::move(p));
+    // Reflect the edit in the in-memory image so a re-decompile or a fresh
+    // disassembly shows the patched bytes at once, not only after write-back.
+    image_.write(address, bytes.data(), bytes.size());
+    return true;
+}
+
+bool Session::undo_patch()
+{
+    if (patches_.empty())
+        return false;
+    const Patch &last = patches_.patches().back();
+    image_.write(last.address, last.original.data(), last.original.size());
+    patches_.undo_last();
     return true;
 }
 
