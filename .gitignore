@@ -1,5 +1,6 @@
 # Build output
 build/
+testing/build/
 build-*/
 cli/target/
 tui/target/

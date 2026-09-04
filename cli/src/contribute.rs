@@ -7,7 +7,7 @@
 
 use astral::{Contribution, ContributionPolicy, Delivery, Library};
 
-use crate::out::{error, library_error, print, Sink, Stream};
+use crate::out::{error, library_error, paint, print, tint, Sink, Stream};
 
 const HELP: &str = concat!(
     "usage: astral contribute database [options]\n",
@@ -92,7 +92,7 @@ pub fn run(arguments: &[String]) -> i32 {
 
     let withheld = contribution.withheld_kind() + contribution.withheld_private();
     if withheld == 0 {
-        print("None.\n");
+        print(&format!("{}\n", tint(paint::GREEN, "None.")));
     } else {
         print(&format!("{withheld} withheld.\n"));
     }
@@ -113,7 +113,7 @@ pub fn run(arguments: &[String]) -> i32 {
     let url = match contribution.send(&repo, None) {
         Ok(url) => url,
         Err(failure) => {
-            print("failed.\n");
+            print(&format!("{}\n", tint(paint::BOLD_RED, "failed.")));
             library_error(&failure);
             return 1;
         }
@@ -127,7 +127,7 @@ pub fn run(arguments: &[String]) -> i32 {
         print(&format!("{url}\n"));
         print(&format!("Upload: {}\n", contribution.file()));
     } else {
-        print("Success.\n");
+        print(&format!("{}\n", tint(paint::GREEN, "Success.")));
         print(&format!("{url}\n"));
     }
     0

@@ -35,6 +35,9 @@
 /* The decompiler names integer types by byte width. An `undefined` width is a
  * value whose signedness was never established; it behaves as unsigned. */
 
+/* ASTRAL: bool true false ; stdbool.h ; */
+/* bool is a keyword only from C23; everywhere earlier it is a header. */
+
 /* ASTRAL: int1 int2 int4 int8 ; stdint.h ; */
 typedef int8_t   int1;
 typedef int16_t  int2;
@@ -80,7 +83,9 @@ typedef long double float16;
 typedef int16_t  wchar2;
 typedef int32_t  wchar4;
 
-/* An address holding code. Calls through it are cast at the call site. */
+/* An address holding code, of a shape the decompiler could not determine. A
+ * `code *` is assigned from anything, so it stays an incomplete object type;
+ * calls through one are cast at the call site instead. */
 /* ASTRAL: code ; ; */
 typedef void code;
 

@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 use astral::{COptions, Call, Library, Program, Symbol, Variable};
 
+use crate::highlight::Syntax;
+use crate::theme::Theme;
+
 /// Which pane has the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
@@ -33,10 +36,19 @@ impl View {
 
     pub fn title(self) -> &'static str {
         match self {
-            View::Decompiled => "Decompiled C",
+            View::Decompiled => "Pseudo-C",
             View::Compilable => "Compilable C",
             View::Disassembly => "Disassembly",
             View::Pcode => "P-code",
+        }
+    }
+
+    /// Which tokeniser colours this view's text.
+    pub fn syntax(self) -> Syntax {
+        match self {
+            View::Decompiled | View::Compilable => Syntax::C,
+            View::Disassembly => Syntax::Assembly,
+            View::Pcode => Syntax::Pcode,
         }
     }
 
@@ -92,6 +104,10 @@ pub enum Pending {
     Decompile(u64),
     /// Fill the centre pane for the current view (disassembly / p-code / emit_c).
     RenderView,
+    /// Fill the disassembly cache for the companion listing a short function
+    /// shows under its C. Never touches the status line: it is not something
+    /// the reader asked for.
+    RenderCompanion(u64),
     BuildXrefs(u64),
 }
 
@@ -115,6 +131,8 @@ pub struct App {
     library: Library,
 
     pub file: FileInfo,
+    /// Whether to emit colour, decided once at start-up.
+    pub theme: Theme,
     pub symbols: Vec<Symbol>,
     /// Indices into `symbols` matching the current filter.
     pub visible: Vec<usize>,
@@ -198,11 +216,14 @@ impl App {
             program,
             library,
             file,
+            theme: Theme::detect(),
             symbols,
             visible: Vec::new(),
             filter: String::new(),
             selected: 0,
-            view: View::Decompiled,
+            // The rest of the tool emits compilable C unless asked for the
+            // listing, and the interface opens on the same thing.
+            view: View::Compilable,
             focus: Pane::Symbols,
             mode: Mode::Normal,
             input: String::new(),
@@ -405,6 +426,9 @@ impl App {
                     self.status = String::new();
                 }
             }
+            Pending::RenderCompanion(address) => {
+                self.render_text(address, View::Disassembly);
+            }
             Pending::BuildXrefs(address) => {
                 self.build_xrefs();
                 let count = self.xrefs.get(&address).map(|v| v.len()).unwrap_or(0);
@@ -445,7 +469,13 @@ impl App {
     }
 
     fn render_view_into_cache(&mut self, address: u64) {
-        let view = self.view;
+        self.render_text(address, self.view);
+    }
+
+    /// Produces the text for one (address, view) pair and caches it. Calling
+    /// this is what actually costs time, so every caller runs it from
+    /// `run_pending`, after a frame is already on screen.
+    fn render_text(&mut self, address: u64, view: View) {
         if view == View::Decompiled || self.text_cache.contains_key(&(address, view)) {
             return;
         }
@@ -482,6 +512,27 @@ impl App {
                 .map_err(|e| e.to_string()),
         };
         self.text_cache.insert((address, view), result);
+    }
+
+    // ---- companion listing -----------------------------------------------
+
+    /// The disassembly of `address`, if it happens to be in hand already.
+    pub fn companion_text(&self, address: u64) -> Option<&str> {
+        self.text_cache
+            .get(&(address, View::Disassembly))
+            .and_then(|entry| entry.as_ref().ok())
+            .map(String::as_str)
+    }
+
+    /// Asks for that disassembly, once, without disturbing anything the reader
+    /// is waiting on. The centre pane only calls this for a function whose C
+    /// leaves half the pane empty, so the work is bounded by the fact that such
+    /// a function is small.
+    pub fn request_companion(&mut self, address: u64) {
+        if self.pending.is_some() || self.text_cache.contains_key(&(address, View::Disassembly)) {
+            return;
+        }
+        self.pending = Some(Pending::RenderCompanion(address));
     }
 
     // ---- cross references ------------------------------------------------
@@ -654,7 +705,7 @@ impl App {
             self.file.name,
             safe,
             match self.view {
-                View::Decompiled => "decompiled",
+                View::Decompiled => "pseudo",
                 View::Compilable => "compilable",
                 View::Disassembly => "disasm",
                 View::Pcode => "pcode",

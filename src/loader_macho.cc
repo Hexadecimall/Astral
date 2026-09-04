@@ -132,6 +132,9 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
     uint32_t symbol_offset = 0, symbol_count = 0, string_offset = 0;
     uint32_t indirect_offset = 0, indirect_count = 0;
     std::vector<IndirectSection> indirect_sections;
+    // Whether each section holds instructions, in load order, so a symbol's
+    // section number says whether it names code or data.
+    std::vector<bool> section_is_code;
 
     for (uint32_t i = 0; i < ncmds; ++i) {
         uint32_t cmd = r.u32(cmd_off);
@@ -181,6 +184,12 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
             size_t sect_off = cmd_off + (seg64 ? 72 : 56);
             for (uint32_t k = 0; k < nsects; ++k, sect_off += sect_size) {
                 const size_t base_off = sect_off + 32;
+                const size_t flags_probe = sect_off + (seg64 ? 64 : 56);
+                const uint32_t section_flags = r.u32(flags_probe);
+                // S_ATTR_PURE_INSTRUCTIONS, or the section carrying some.
+                section_is_code.push_back((section_flags & 0x80000000u) != 0 ||
+                                          (section_flags & 0x00000400u) != 0);
+
                 IndirectSection section;
                 section.address = seg64 ? r.u64(base_off) : r.u32(base_off);
                 section.size = seg64 ? r.u64(base_off + 8) : r.u32(base_off + 4);
@@ -227,6 +236,7 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
                 break;
             const uint32_t n_strx = r.u32(off);
             const uint8_t n_type = r.b[off + 4];
+            const uint8_t n_sect = r.b[off + 5];
             const uint64_t n_value = is64 ? r.u64(off + 8) : r.u32(off + 8);
             std::string name = n_strx != 0 ? r.cstr(static_cast<size_t>(string_offset) + n_strx)
                                            : std::string();
@@ -250,7 +260,12 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
             const bool is_header_symbol =
                 name.size() > 10 && name.compare(name.size() - 7, 7, "_header") == 0 &&
                 (name.compare(0, 3, "mh_") == 0 || name.compare(0, 4, "_mh_") == 0);
-            sym.is_function = !is_header_symbol;
+            // A symbol names code only if its section holds instructions. A
+            // static array declared inside a function lands in the symbol table
+            // too, and decompiling it produces nonsense.
+            const bool in_code =
+                n_sect >= 1 && n_sect <= section_is_code.size() && section_is_code[n_sect - 1];
+            sym.is_function = !is_header_symbol && in_code;
             out.symbols.push_back(std::move(sym));
         }
     }

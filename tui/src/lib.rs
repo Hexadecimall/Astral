@@ -2,6 +2,10 @@
 
 mod app;
 mod events;
+mod highlight;
+mod layout;
+mod panes;
+mod theme;
 mod ui;
 
 use std::io::{self, Stdout, Write};
@@ -35,7 +39,12 @@ usage:
                                    also drive rename (see the note in app.rs:
                                    add_symbol currently faults in libAstral)
   astral-tui --selftest --dump <binary>
-                                   also print the off-screen frame as plain text
+                                   also print the off-screen frame (with colour
+                                   when the theme wants it)
+  astral-tui --selftest --view <1-4|pseudo|c|asm|pcode> <binary>
+                                   leave that view on screen for the dump
+  astral-tui --selftest --at <hex> <binary>
+                                   start at that address rather than the entry
   astral-tui --help                this message
 ";
 
@@ -49,6 +58,8 @@ pub fn run(arguments: Vec<String>) -> i32 {
     let mut exercise = false;
     let mut rename = false;
     let mut dump = false;
+    let mut view: Option<app::View> = None;
+    let mut at: Option<u64> = None;
     let mut path: Option<PathBuf> = None;
 
     while let Some(argument) = args.next() {
@@ -65,6 +76,20 @@ pub fn run(arguments: Vec<String>) -> i32 {
                 None => {
                     eprintln!("--size wants WIDTHxHEIGHT, for example 80x24");
                     std::process::exit(2);
+                }
+            },
+            "--view" => match args.next().as_deref().and_then(parse_view) {
+                Some(parsed) => view = Some(parsed),
+                None => {
+                    eprintln!("--view wants one of 1-4, pseudo, c, asm, pcode");
+                    return 2;
+                }
+            },
+            "--at" => match args.next().and_then(|value| parse_address(&value)) {
+                Some(parsed) => at = Some(parsed),
+                None => {
+                    eprintln!("--at wants a hexadecimal address");
+                    return 2;
                 }
             },
             "-h" | "--help" => {
@@ -85,7 +110,7 @@ pub fn run(arguments: Vec<String>) -> i32 {
     };
 
     let result = if selftest {
-        run_selftest(&path, size, exercise, rename, dump)
+        run_selftest(&path, size, exercise, rename, dump, view, at)
     } else {
         run_interactive(&path)
     };
@@ -223,11 +248,83 @@ fn event_loop<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> io::Resu
 
 // ---- selftest ------------------------------------------------------------
 
+/// One row of a rendered buffer as text, with SGR sequences when `color`.
+fn dump_row(buffer: &ratatui::buffer::Buffer, y: u16, color: bool) -> String {
+    let mut row = String::new();
+    let mut current: Option<ratatui::style::Style> = None;
+    for x in 0..buffer.area.width {
+        let Some(cell) = buffer.cell((x, y)) else {
+            continue;
+        };
+        if color {
+            let style = cell.style();
+            if current != Some(style) {
+                row.push_str(&sgr(style));
+                current = Some(style);
+            }
+        }
+        row.push_str(cell.symbol());
+    }
+    // Trailing blanks carry no style worth keeping.
+    let trimmed = row.trim_end();
+    match (color, trimmed.len() == row.len()) {
+        // Without colour this is exactly the plain text it always was.
+        (false, _) => trimmed.to_string(),
+        (true, true) => format!("{row}\x1b[0m"),
+        (true, false) => format!("{trimmed}\x1b[0m"),
+    }
+}
+
+/// The escape sequence for one cell style, using the terminal's own palette.
+fn sgr(style: ratatui::style::Style) -> String {
+    use ratatui::style::{Color, Modifier};
+    let mut codes = vec!["0".to_string()];
+    if style.add_modifier.contains(Modifier::BOLD) {
+        codes.push("1".to_string());
+    }
+    if style.add_modifier.contains(Modifier::DIM) {
+        codes.push("2".to_string());
+    }
+    if style.add_modifier.contains(Modifier::REVERSED) {
+        codes.push("7".to_string());
+    }
+    let foreground = match style.fg {
+        Some(Color::Black) => Some(30),
+        Some(Color::Red) => Some(31),
+        Some(Color::Green) => Some(32),
+        Some(Color::Yellow) => Some(33),
+        Some(Color::Blue) => Some(34),
+        Some(Color::Magenta) => Some(35),
+        Some(Color::Cyan) => Some(36),
+        Some(Color::Gray) => Some(37),
+        Some(Color::DarkGray) => Some(90),
+        _ => None,
+    };
+    if let Some(code) = foreground {
+        codes.push(code.to_string());
+    }
+    format!("\x1b[{}m", codes.join(";"))
+}
+
 /// Exercises load, decompile and one render against an in-memory backend so the
 /// binary can be verified in CI without a tty.
 fn parse_size(value: &str) -> Option<(u16, u16)> {
     let (width, height) = value.split_once(['x', 'X'])?;
     Some((width.parse().ok()?, height.parse().ok()?))
+}
+
+fn parse_address(value: &str) -> Option<u64> {
+    u64::from_str_radix(value.trim_start_matches("0x"), 16).ok()
+}
+
+fn parse_view(value: &str) -> Option<app::View> {
+    match value {
+        "1" | "pseudo" => Some(app::View::Decompiled),
+        "2" | "c" | "compilable" => Some(app::View::Compilable),
+        "3" | "asm" | "disassembly" => Some(app::View::Disassembly),
+        "4" | "pcode" => Some(app::View::Pcode),
+        _ => None,
+    }
 }
 
 fn run_selftest(
@@ -236,8 +333,13 @@ fn run_selftest(
     exercise: bool,
     rename: bool,
     dump: bool,
+    view: Option<app::View>,
+    at: Option<u64>,
 ) -> Result<(), String> {
     let mut app = App::new(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some(address) = at {
+        app.navigate(address);
+    }
     let backend = TestBackend::new(size.0, size.1);
     let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
@@ -277,13 +379,17 @@ fn run_selftest(
             if is_error { " (error)" } else { "" }
         ));
     }
-    app.set_view(app::View::Decompiled);
-    while app.pending.is_some() {
-        app.run_pending();
+    app.set_view(view.unwrap_or(app::View::Compilable));
+    // Twice: the second pass picks up anything the first frame asked for, such
+    // as the companion listing under a short function.
+    for _ in 0..2 {
+        while app.pending.is_some() {
+            app.run_pending();
+        }
+        terminal
+            .draw(|frame| ui::draw(frame, &mut app))
+            .map_err(|e| e.to_string())?;
     }
-    terminal
-        .draw(|frame| ui::draw(frame, &mut app))
-        .map_err(|e| e.to_string())?;
 
     let buffer = terminal.backend().buffer().clone();
     let rendered: String = buffer
@@ -347,15 +453,18 @@ fn run_selftest(
         if size.0 >= ui::DETAILS_MIN_WIDTH { "shown" } else { "hidden (narrow)" }
     );
     println!("  status        {}", app.status);
+    println!(
+        "  colour        {}",
+        if app.theme.color { "on" } else { "off" }
+    );
     if dump {
-        // Plain-text rendering of the off-screen buffer, for eyeballing layout.
+        // Rendering of the off-screen buffer, for eyeballing layout. Styles
+        // become real escape sequences when the theme decided on colour, so
+        // `ASTRAL_TUI_COLOR=always ... --dump` shows exactly what a terminal
+        // would; otherwise this is plain text and stays diffable.
         println!("--- frame ---");
         for y in 0..buffer.area.height {
-            let row: String = (0..buffer.area.width)
-                .map(|x| buffer.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
-                .collect::<Vec<_>>()
-                .concat();
-            println!("{}", row.trim_end());
+            println!("{}", dump_row(&buffer, y, app.theme.color));
         }
         println!("--- end frame ---");
     }

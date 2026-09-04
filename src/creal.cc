@@ -276,6 +276,30 @@ const char *piece_type(int bytes)
 // four bytes at offset eight. C has no such syntax. A read becomes a load
 // through the variable's address; a write becomes ASTRAL_STORE, which copies
 // bytes rather than converting the value.
+// `code *` is a pointer to something the decompiler could not describe, so a
+// call through one is cast to a function type at the point of the call. That
+// keeps assignment permissive, which matters because such a pointer is assigned
+// from every shape of function there is.
+std::string rewrite_code_calls(const std::string &source)
+{
+    static const std::regex declared(R"(\bcode\s*\*+\s*([A-Za-z_][A-Za-z0-9_]*)\s*[;,)])");
+    std::set<std::string> pointers;
+    for (auto it = std::sregex_iterator(source.begin(), source.end(), declared);
+         it != std::sregex_iterator(); ++it)
+        pointers.insert((*it)[1].str());
+    if (pointers.empty())
+        return source;
+
+    std::string out = source;
+    for (const std::string &name : pointers) {
+        const std::string call = "(*" + name + ")(";
+        const std::string cast = "((long long (*)())" + name + ")(";
+        for (size_t at = out.find(call); at != std::string::npos; at = out.find(call, at))
+            out.replace(at, call.size(), cast);
+    }
+    return out;
+}
+
 std::string rewrite_pieces(const std::string &source)
 {
     static const std::regex piece(R"(([A-Za-z_][A-Za-z0-9_]*)\._(\d+)_(\d+)_)");
@@ -321,8 +345,9 @@ std::string rewrite_pieces(const std::string &source)
 }
 
 // C functions cannot return arrays. The decompiler produces one when a value
-// comes back in more than one register, so the array becomes a struct of the
-// same size: that is returnable, assignable, and still addressable byte-wise.
+// comes back in more than one register, so the array becomes an integer of the
+// same width. A struct would read better but only works when every return in
+// the function hands back that same array, and often one of them does not.
 bool array_bytes(const std::string &type_text, int &bytes)
 {
     static const std::regex bounds(R"(\[\s*(\d+)\s*\])");
@@ -330,55 +355,46 @@ bool array_bytes(const std::string &type_text, int &bytes)
     if (!std::regex_search(type_text, match, bounds))
         return false;
     bytes = std::stoi(match[1].str());
-    return true;
+    return bytes > 0 && bytes <= 16;
 }
 
-std::string aggregate_name(int bytes) { return "astral_bytes" + std::to_string(bytes); }
-
-// Rewrites a function whose return type is an array so that it returns the
-// equivalent struct instead, including the local it hands back.
 void rewrite_array_return(FunctionResult &function, int bytes)
 {
-    const std::string aggregate = aggregate_name(bytes);
+    const std::string wide = int_type(bytes, false);
 
-    // The prototype and the body's header line both start with the return type,
-    // which runs up to the function's own name.
     auto retype_header = [&](const std::string &line) {
         const size_t at = line.find(function.name);
         if (at == std::string::npos)
             return line;
-        return aggregate + " " + line.substr(at);
+        return wide + " " + line.substr(at);
     };
     function.signature_real = retype_header(function.signature_real);
-
-    // Which local is returned decides which declaration has to change with it.
-    static const std::regex returns(R"(return\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
-    std::smatch match;
-    std::string returned;
-    if (std::regex_search(function.c_code_real, match, returns))
-        returned = match[1].str();
 
     std::istringstream lines(function.c_code_real);
     std::ostringstream body;
     std::string line;
     bool header_done = false;
+    static const std::regex returns(R"(^(\s*)return\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$)");
     while (std::getline(lines, line)) {
         if (!header_done && line.find(function.name) != std::string::npos &&
             line.find('(') != std::string::npos && line.find(';') == std::string::npos) {
             line = retype_header(line);
             header_done = true;
-        } else if (!returned.empty()) {
-            // "xunknown1 axVar3 [16];" becomes "astral_bytes16 axVar3;"
-            const std::regex declaration("^(\\s*)[A-Za-z_][A-Za-z0-9_ ]*\\b" + returned +
-                                         "\\s*\\[\\s*\\d+\\s*\\]\\s*;\\s*$");
-            std::smatch declaration_match;
-            if (std::regex_match(line, declaration_match, declaration))
-                line = declaration_match[1].str() + aggregate + " " + returned + ";";
+            body << line << '\n';
+            continue;
+        }
+        // Returning the array itself becomes a load of the whole width.
+        std::smatch match;
+        if (std::regex_match(line, match, returns)) {
+            const std::string name = match[2].str();
+            const std::regex declared("\\b" + name + "\\s*\\[");
+            if (std::regex_search(function.c_code_real, declared))
+                line = match[1].str() + "return *(" + wide + " *)" + name + ";";
         }
         body << line << '\n';
     }
     function.c_code_real = body.str();
-    function.return_type = aggregate;
+    function.return_type = wide;
 }
 
 // C requires main to return int. The decompiler often cannot recover that, so
@@ -485,7 +501,9 @@ const std::vector<RuntimePiece> &runtime_pieces()
             piece.text = first == std::string::npos
                              ? std::string()
                              : text.substr(first, last - first + 1);
-            if (!piece.provides.empty() && !piece.text.empty())
+            // A piece may supply nothing but a header, which is how bool
+            // arrives, so an empty body is not a reason to drop it.
+            if (!piece.provides.empty() && (!piece.text.empty() || !piece.headers.empty()))
                 parsed.push_back(std::move(piece));
             at = next;
         }
@@ -589,6 +607,9 @@ bool is_runtime_identifier(const std::string &name)
     int size = 0;
     if (split_generic_type(name, stem, size))
         return true;
+    // Types the emitter introduces are its own to declare.
+    if (name.rfind("astral_", 0) == 0)
+        return true;
     // Aggregates the realization pass introduces are defined by the emitter.
     if (name.rfind("astral_bytes", 0) == 0 && all_digits(name.substr(12)))
         return true;
@@ -599,7 +620,7 @@ bool is_runtime_identifier(const std::string &name)
 
 void realize_c(FunctionResult &function)
 {
-    function.c_code_real = rewrite_pieces(function.c_code);
+    function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
     function.signature_real = function.signature;
 
     int bytes = 0;
@@ -742,6 +763,12 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     // Only the runtime pieces this code refers to. Most functions need none,
     // and a reader should not have to scroll past a hundred lines of
     // definitions to reach the six they came for.
+    for (const FunctionResult &function : functions)
+        if (function.c_code_real.find("astral_uint128") != std::string::npos ||
+            function.signature_real.find("astral_uint128") != std::string::npos ||
+            function.c_code_real.find("astral_int128") != std::string::npos)
+            wants_int128 = true;
+
     std::set<std::string> wanted;
     if (options.self_contained) {
         std::set<std::string> mentioned;
@@ -754,6 +781,11 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
         for (const FunctionResult &function : functions)
             for (const Identifier &identifier : scan_identifiers(function.signature_real))
                 mentioned.insert(identifier.name);
+
+        // The generated width-specific helpers are written with ASTRAL_INLINE,
+        // so asking for one asks for that too.
+        if (!helpers.empty())
+            mentioned.insert("ASTRAL_INLINE");
 
         // A piece may pull in others, so keep going until nothing new appears.
         bool grew = true;
@@ -787,7 +819,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     } else if (!wanted.empty()) {
         out << '\n';
         for (const RuntimePiece &piece : runtime_pieces())
-            if (wanted.count(piece.provides.front()) != 0)
+            if (wanted.count(piece.provides.front()) != 0 && !piece.text.empty())
                 out << piece.text << "\n\n";
     }
 
@@ -799,21 +831,6 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             << "typedef int64_t astral_int128;\n"
             << "typedef uint64_t astral_uint128;\n"
             << "#endif\n";
-    }
-
-    std::set<int> aggregates;
-    for (const FunctionResult &function : functions) {
-        static const std::regex aggregate(R"(astral_bytes(\d+))");
-        auto begin = std::sregex_iterator(function.c_code_real.begin(),
-                                          function.c_code_real.end(), aggregate);
-        for (auto it = begin; it != std::sregex_iterator(); ++it)
-            aggregates.insert(std::stoi((*it)[1].str()));
-    }
-    if (!aggregates.empty()) {
-        out << '\n';
-        for (int bytes : aggregates)
-            out << "typedef struct { unsigned char b[" << bytes << "]; } astral_bytes" << bytes
-                << ";\n";
     }
 
     if (!typedefs.empty()) {

@@ -5,8 +5,52 @@
 //! end, and it should not look like a crash.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
+
+/// Whether to colour a stream.
+///
+/// Colour is decoration, never information: everything it says is also said by
+/// the words. So it is dropped whenever it might not land — piped output, a
+/// terminal that says it is dumb, or NO_COLOR set to anything at all.
+fn colour_wanted(stream: Stream) -> bool {
+    if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        return false;
+    }
+    if std::env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+        return false;
+    }
+    match stream {
+        Stream::Out => io::stdout().is_terminal(),
+        Stream::Err => io::stderr().is_terminal(),
+    }
+}
+
+/// The terminal's own palette rather than fixed colours, so output sits in
+/// whatever theme the reader chose.
+pub mod paint {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD_RED: &str = "\x1b[1;31m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const DIM: &str = "\x1b[2m";
+    pub const CYAN: &str = "\x1b[36m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const GREEN: &str = "\x1b[32m";
+}
+
+/// Wraps text in a colour, or leaves it alone when colour is not wanted.
+pub fn colour(stream: Stream, code: &str, text: &str) -> String {
+    if colour_wanted(stream) {
+        format!("{code}{text}{}", paint::RESET)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Colours for standard output.
+pub fn tint(code: &str, text: &str) -> String {
+    colour(Stream::Out, code, text)
+}
 
 /// Which of the two standard streams a message belongs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,12 +115,19 @@ impl Destination {
 
 /// A message on the command's own behalf, in the shape every other one takes.
 pub fn error(message: &str) {
-    Sink::new(Stream::Err).write(&format!("astral: {message}\n"));
+    let label = colour(Stream::Err, paint::BOLD_RED, "astral:");
+    Sink::new(Stream::Err).write(&format!("{label} {message}\n"));
 }
 
 /// Prints what the library said went wrong.
 pub fn library_error(error: &astral::Error) {
-    Sink::new(Stream::Err).write(&format!("astral: {}\n", error.message));
+    let label = colour(Stream::Err, paint::BOLD_RED, "astral:");
+    Sink::new(Stream::Err).write(&format!("{label} {}\n", error.message));
+}
+
+/// A note that something is being done, or has been. Never an error.
+pub fn note(message: &str) {
+    Sink::new(Stream::Err).write(&format!("{}\n", colour(Stream::Err, paint::DIM, message)));
 }
 
 /// Writes to standard output, ignoring a reader that has gone away.

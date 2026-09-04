@@ -3,7 +3,7 @@
 use astral::{Function, Library, Program};
 
 use crate::options::Options;
-use crate::out::{error, library_error, print, Destination};
+use crate::out::{error, library_error, paint, print, tint, Destination};
 
 /// A program and the specification tree it was read with.
 ///
@@ -84,9 +84,9 @@ pub fn info(options: &Options) -> i32 {
         "file       {}\n",
         options.path.as_deref().unwrap_or_default()
     ));
-    print(&format!("format     {}\n", program.format_name()));
-    print(&format!("language   {}\n", program.language_id()));
-    print(&format!("compiler   {}\n", program.compiler_spec()));
+    print(&format!("{}     {}\n", tint(paint::DIM, "format"), program.format_name()));
+    print(&format!("{}   {}\n", tint(paint::DIM, "language"), program.language_id()));
+    print(&format!("{}   {}\n", tint(paint::DIM, "compiler"), program.compiler_spec()));
     print(&format!(
         "endian     {}\n",
         if program.is_big_endian() {

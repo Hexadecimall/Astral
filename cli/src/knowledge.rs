@@ -1,6 +1,6 @@
 //! What Astral knows, and where it writes what it learns.
 
-use crate::out::print;
+use crate::out::{paint, print, tint};
 
 pub fn usage() -> i32 {
     print(concat!(
@@ -26,9 +26,9 @@ pub fn run(arguments: &[String]) -> i32 {
         print(&format!("{}\n", knowledge.path));
         return 0;
     }
-    print(&format!("records   {}\n", knowledge.records));
-    print(&format!("learned   {}\n", knowledge.learned));
-    print(&format!("database  {}\n", knowledge.path));
+    print(&format!("{}   {}\n", tint(paint::DIM, "records"), knowledge.records));
+    print(&format!("{}   {}\n", tint(paint::DIM, "learned"), knowledge.learned));
+    print(&format!("{}  {}\n", tint(paint::DIM, "database"), knowledge.path));
     print(concat!(
         "\nAstral names what a binary cannot: it reads the text a program prints,\n",
         "the library functions it calls, and the shape each value is used in.\n",

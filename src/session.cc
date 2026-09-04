@@ -18,6 +18,7 @@
 #include "slgh_compile.hh"
 #include "types.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <set>
@@ -721,7 +722,17 @@ void Session::collect_externals(FunctionResult &result, const void *funcdata) co
         for (const std::string &name : names) {
             if (name.empty() || name == result.name)
                 continue;
-            call_prototypes.emplace(name, prototype_text(*call, name, call->getOp()));
+            const std::string prototype = prototype_text(*call, name, call->getOp());
+            auto existing = call_prototypes.find(name);
+            if (existing == call_prototypes.end()) {
+                call_prototypes.emplace(name, prototype);
+            } else if (existing->second != prototype) {
+                // Two call sites disagree about the same function, which
+                // happens where the decompiler recovered different argument
+                // counts. A prototype that contradicts a call site is worse
+                // than none, so neither is stated.
+                existing->second = "extern long long " + name + "();";
+            }
         }
     }
 
@@ -758,7 +769,7 @@ void Session::collect_externals(FunctionResult &result, const void *funcdata) co
                     arch_->symboltab->getGlobalScope()->queryFunction(name);
                 declaration.text = callee != nullptr
                     ? prototype_text(callee->getFuncProto(), name, nullptr)
-                    : "extern void " + name + "();";
+                    : "extern long long " + name + "();";
             } else {
                 declaration.text =
                     "extern " + format_declaration(known_entry->second.type_text, name) + ";";
@@ -771,7 +782,7 @@ void Session::collect_externals(FunctionResult &result, const void *funcdata) co
         // address, such as iRam000000010000c068 or a call target.
         declaration.is_function = identifier.called;
         if (identifier.called) {
-            declaration.text = "extern void " + name + "();";
+            declaration.text = "extern long long " + name + "();";
         } else {
             declaration.text = "extern " + unnamed_location_type(name) + " " + name + ";";
         }
@@ -1145,9 +1156,18 @@ std::vector<uint64_t> Session::function_addresses() const
     std::vector<uint64_t> addresses;
     // Imported stubs are named so calls read well, but their bodies belong to
     // another image and are not this program's code.
-    for (const Symbol &symbol : image_.symbols)
-        if (symbol.is_function && !symbol.is_import)
+    for (const Symbol &symbol : image_.symbols) {
+        if (!symbol.is_function || symbol.is_import)
+            continue;
+        // A name that is not a C identifier cannot be emitted as one, and a
+        // symbol carrying such a name is not a function this program defines.
+        bool usable = !symbol.name.empty();
+        for (char c : symbol.name)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+                usable = false;
+        if (usable)
             addresses.push_back(symbol.address);
+    }
     return addresses;
 }
 
