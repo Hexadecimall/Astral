@@ -245,6 +245,11 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
             // Mach-O prefixes C symbols with an underscore.
             if (!name.empty() && name[0] == '_')
                 name.erase(0, 1);
+            // macOS records ABI variants as `name$SUFFIX` (realpath$DARWIN_EXTSN).
+            // The base name is the real function, and the suffix's `$` is not a
+            // C identifier character, so keep only the base.
+            if (auto dollar = name.find('$'); dollar != std::string::npos)
+                name.erase(dollar);
             symbol_names[k] = name;
 
             if ((n_type & N_STAB) != 0 || name.empty())

@@ -467,3 +467,95 @@ hdr tolower ctype.h
 hdr isalpha ctype.h
 hdr isdigit ctype.h
 hdr isspace ctype.h
+hdr feof stdio.h
+hdr ferror stdio.h
+hdr clearerr stdio.h
+hdr fileno stdio.h
+hdr fdopen stdio.h
+hdr freopen stdio.h
+hdr setbuf stdio.h
+hdr setvbuf stdio.h
+hdr getc stdio.h
+hdr putc stdio.h
+hdr ungetc stdio.h
+hdr fgetc stdio.h
+hdr fputc stdio.h
+hdr rewind stdio.h
+hdr remove stdio.h
+hdr rename stdio.h
+hdr tmpfile stdio.h
+hdr vfprintf stdio.h
+hdr vsnprintf stdio.h
+hdr fcntl fcntl.h
+hdr creat fcntl.h
+hdr sysconf unistd.h
+hdr isatty unistd.h
+hdr dup unistd.h
+hdr dup2 unistd.h
+hdr lseek unistd.h
+hdr ftruncate unistd.h
+hdr getopt unistd.h
+hdr access unistd.h
+hdr getpid unistd.h
+hdr getcwd unistd.h
+hdr pipe unistd.h
+hdr fork unistd.h
+hdr execvp unistd.h
+hdr err err.h
+hdr errx err.h
+hdr warn err.h
+hdr warnx err.h
+hdr fstat sys/stat.h
+hdr lstat sys/stat.h
+hdr chmod sys/stat.h
+hdr mkdir sys/stat.h
+hdr isalnum ctype.h
+hdr isupper ctype.h
+hdr islower ctype.h
+hdr ispunct ctype.h
+hdr isprint ctype.h
+hdr iscntrl ctype.h
+hdr isgraph ctype.h
+hdr isxdigit ctype.h
+hdr labs stdlib.h
+hdr abs stdlib.h
+hdr bsearch stdlib.h
+hdr strtoll stdlib.h
+hdr strtoull stdlib.h
+hdr strtod stdlib.h
+hdr strcasecmp strings.h
+hdr strncasecmp strings.h
+hdr memchr string.h
+hdr strspn string.h
+hdr strcspn string.h
+hdr strpbrk string.h
+hdr strtok string.h
+hdr strsep string.h
+proto feof      extern int4 feof(void *stream);
+proto ferror    extern int4 ferror(void *stream);
+proto clearerr  extern void clearerr(void *stream);
+proto fileno    extern int4 fileno(void *stream);
+proto fdopen    extern void *fdopen(int4 fd, char *mode);
+proto freopen   extern void *freopen(char *path, char *mode, void *stream);
+proto getc      extern int4 getc(void *stream);
+proto putc      extern int4 putc(int4 c, void *stream);
+proto ungetc    extern int4 ungetc(int4 c, void *stream);
+proto fgetc     extern int4 fgetc(void *stream);
+proto fputc     extern int4 fputc(int4 c, void *stream);
+proto setbuf    extern void setbuf(void *stream, char *buffer);
+proto setvbuf   extern int4 setvbuf(void *stream, char *buffer, int4 mode, WORD size);
+proto rewind    extern void rewind(void *stream);
+proto fcntl     extern int4 fcntl(int4 fd, int4 cmd, ...);
+proto sysconf   extern SWORD sysconf(int4 name);
+proto isatty    extern int4 isatty(int4 fd);
+proto dup       extern int4 dup(int4 fd);
+proto dup2      extern int4 dup2(int4 from, int4 to);
+proto lseek     extern SWORD lseek(int4 fd, SWORD offset, int4 whence);
+proto getopt    extern int4 getopt(int4 argc, char **argv, char *opts);
+proto err       extern void err(int4 eval, char *fmt, ...);
+proto errx      extern void errx(int4 eval, char *fmt, ...);
+proto warn      extern void warn(char *fmt, ...);
+proto warnx     extern void warnx(char *fmt, ...);
+proto access    extern int4 access(char *path, int4 mode);
+proto strtoll   extern SWORD strtoll(char *str, char **end, int4 base);
+proto strtoull  extern uint8 strtoull(char *str, char **end, int4 base);

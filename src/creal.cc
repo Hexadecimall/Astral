@@ -6,6 +6,8 @@
 // arity-free operations, generated definitions for the width-specific ones, and
 // declarations for everything a function references but does not define.
 #include "creal.hh"
+#include "knowledge.hh"
+#include "libc_protos.hh"
 
 #include <algorithm>
 #include <cctype>
@@ -68,12 +70,18 @@ const StandardFunction STANDARD_FUNCTIONS[] = {
     {"open", "fcntl.h"},      {"stat", "sys/stat.h"},
 };
 
-const char *standard_header_for(const std::string &name)
+// The standard header that declares `name`, or empty. The knowledge base is
+// consulted first, so the set grows with the `hdr` records rather than with
+// this file; the built-in table is the fallback for a bare install.
+std::string header_for(const std::string &name)
 {
+    std::string known = Knowledge::instance().header_for(name);
+    if (!known.empty())
+        return known;
     for (const StandardFunction &entry : STANDARD_FUNCTIONS)
         if (name == entry.name)
             return entry.header;
-    return nullptr;
+    return std::string();
 }
 
 bool in_list(const char *const *list, size_t count, const std::string &name)
@@ -747,13 +755,24 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
         for (const Declaration &declaration : function.externals) {
             if (defined.find(declaration.name) != defined.end())
                 continue;
-            const char *header = declaration.is_function
-                ? standard_header_for(declaration.name)
-                : nullptr;
-            if (header != nullptr)
+            // A function a standard header declares should come from that
+            // header, not from a guessed extern that would clash with it.
+            std::string header =
+                declaration.is_function ? header_for(declaration.name) : std::string();
+            if (!header.empty()) {
                 headers.insert(header);
-            else
-                externals.emplace(declaration.name, declaration.text);
+                continue;
+            }
+            // No header, but the knowledge base may still hold the real
+            // prototype; the true declaration beats the recovered guess.
+            if (declaration.is_function) {
+                std::string proto = Knowledge::instance().prototype_for(declaration.name);
+                if (!proto.empty()) {
+                    externals.emplace(declaration.name, size_types_for(proto));
+                    continue;
+                }
+            }
+            externals.emplace(declaration.name, declaration.text);
         }
     }
 
