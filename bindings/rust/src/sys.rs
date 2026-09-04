@@ -168,6 +168,28 @@ extern "C" {
     pub fn astral_learn_source(paths: *const *const c_char, count: c_int) -> c_int;
     pub fn astral_program_learn_symbols(program: *mut astral_program) -> c_int;
 
+    pub fn astral_program_instruction_length(program: *mut astral_program, address: u64) -> c_int;
+    pub fn astral_program_patch_bytes(
+        program: *mut astral_program,
+        address: u64,
+        bytes: *const c_void,
+        size: usize,
+        note: *const c_char,
+    ) -> c_int;
+    pub fn astral_program_patch_nop(
+        program: *mut astral_program,
+        address: u64,
+        count: c_int,
+    ) -> c_int;
+    pub fn astral_program_patch_count(program: *mut astral_program) -> usize;
+    pub fn astral_program_patch_undo(program: *mut astral_program);
+    pub fn astral_program_patch_clear(program: *mut astral_program);
+    pub fn astral_program_patch_serialize(program: *mut astral_program) -> *mut c_char;
+    pub fn astral_program_write_patched(
+        program: *mut astral_program,
+        out_path: *const c_char,
+    ) -> c_int;
+
     pub fn astral_contribution_ask(
         repo: *const c_char,
         policy: *mut astral_contribution_policy,

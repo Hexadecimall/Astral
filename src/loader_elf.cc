@@ -170,11 +170,13 @@ bool load_elf(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &
         seg.readable = (p_flags & 4) != 0;
         seg.writable = (p_flags & 2) != 0;
         seg.executable = (p_flags & 1) != 0;
-        if (p_offset < bytes.size()) {
+        if (p_offset < bytes.size() && p_filesz != 0) {
             size_t avail = std::min<size_t>(static_cast<size_t>(p_filesz),
                                             bytes.size() - static_cast<size_t>(p_offset));
             seg.data.assign(bytes.begin() + static_cast<long>(p_offset),
                             bytes.begin() + static_cast<long>(p_offset) + static_cast<long>(avail));
+            seg.file_offset = p_offset;
+            seg.has_file_offset = true;
         }
         lowest = std::min(lowest, p_vaddr);
         out.segments.push_back(std::move(seg));
@@ -240,6 +242,8 @@ bool load_elf(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &
                                                 bytes.size() - static_cast<size_t>(s.offset));
                 seg.data.assign(bytes.begin() + static_cast<long>(s.offset),
                                 bytes.begin() + static_cast<long>(s.offset) + static_cast<long>(avail));
+                seg.file_offset = s.offset;
+                seg.has_file_offset = true;
             }
             out.segments.push_back(std::move(seg));
         }

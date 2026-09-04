@@ -18,6 +18,11 @@ struct Segment {
     bool readable = true;
     bool writable = false;
     bool executable = false;
+    // Byte position in the source file where `data` begins. Meaningful only when
+    // `has_file_offset` is set; a .bss-style region maps to no file bytes and a
+    // patch there cannot be written back.
+    uint64_t file_offset = 0;
+    bool has_file_offset = false;
     std::vector<uint8_t> data;
 };
 
@@ -61,6 +66,11 @@ struct BinaryImage {
 
     // True when any segment covers the address.
     bool contains(uint64_t address) const;
+
+    // Maps a virtual address to a byte position in the source file. Returns
+    // false when the address lands in a segment with no file backing (.bss) or
+    // in no segment at all: nothing there can be patched onto disk.
+    bool file_offset_for(uint64_t address, uint64_t &out) const;
 
     void sort_and_dedup_symbols();
 };

@@ -13,6 +13,7 @@ mod knowledge;
 mod learn;
 mod options;
 mod out;
+mod patch;
 mod paths;
 mod program;
 mod sleigh;
@@ -53,6 +54,7 @@ fn dispatch(arguments: &[String]) -> i32 {
         "sleigh" => sleigh::run(rest),
         "knowledge" => knowledge::run(rest),
         "learn" => learn::run(rest),
+        "patch" => patch::run(rest),
         // Con-Tri-Bute, for anyone who types it often.
         "contribute" | "ctb" => contribute::run(rest),
         "info" => with_binary(Command::Info, rest),
@@ -75,6 +77,7 @@ fn topic(wanted: &str) -> i32 {
         "version" => help::version(Stream::Out),
         "knowledge" => knowledge::usage(),
         "learn" => learn::usage(Stream::Out),
+        "patch" => patch::usage(Stream::Out),
         "contribute" | "ctb" => contribute::usage(Stream::Out),
         "update" => update::usage(Stream::Out),
         "sleigh" => sleigh::usage(Stream::Out),

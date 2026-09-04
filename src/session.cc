@@ -1,6 +1,9 @@
 // Binds a loaded BinaryImage to Ghidra's decompiler core: a LoadImage over the
 // image, a SleighArchitecture that uses it, and the analysis entry points.
 #include "session.hh"
+#include "macho_sign.hh"
+
+#include <sys/stat.h>
 
 #include "creal.hh"
 #include "langmap.hh"
@@ -592,6 +595,158 @@ bool Session::pcode(uint64_t address, int count, std::string &out, std::string &
         }
     }
     out = s.str();
+    return true;
+}
+
+namespace {
+
+// The no-op encoding for an architecture, repeated to fill `total` bytes. Only
+// the encodings whose patch tier is exact live here; anything else asks the
+// caller to supply bytes rather than guessing.
+bool arch_nop_fill(const std::string &archid, bool big_endian, int total,
+                   std::vector<uint8_t> &out, std::string &error)
+{
+    auto has = [&](const char *needle) { return archid.find(needle) != std::string::npos; };
+    if (has("x86")) {
+        // 0x90 is a one-byte no-op, so any run of them fills exactly.
+        out.assign(static_cast<size_t>(total), 0x90);
+        return true;
+    }
+    if (has("AARCH64")) {
+        if (total % 4 != 0) {
+            error = "arm64 no-op must cover whole 4-byte instructions";
+            return false;
+        }
+        uint8_t nop[4] = {0x1f, 0x20, 0x03, 0xd5}; // little-endian D503201F
+        if (big_endian)
+            std::swap(nop[0], nop[3]), std::swap(nop[1], nop[2]);
+        out.clear();
+        for (int i = 0; i < total; i += 4)
+            out.insert(out.end(), nop, nop + 4);
+        return true;
+    }
+    error = "no built-in no-op for this architecture yet; supply raw bytes instead";
+    return false;
+}
+
+} // namespace
+
+int Session::instruction_length(uint64_t address) const
+{
+    if (arch_ == nullptr || arch_->translate == nullptr)
+        return 0;
+    try {
+        ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+        return arch_->translate->instructionLength(addr);
+    } catch (ghidra::LowlevelError &) {
+        return 0;
+    }
+}
+
+bool Session::patch_bytes(uint64_t address, const std::vector<uint8_t> &bytes, PatchTier tier,
+                          const std::string &note, std::string &error)
+{
+    if (bytes.empty()) {
+        error = "nothing to write";
+        return false;
+    }
+    uint64_t file_off = 0;
+    if (!image_.file_offset_for(address, file_off)) {
+        error = "address 0x" + [&] {
+            char b[24];
+            std::snprintf(b, sizeof b, "%llx", static_cast<unsigned long long>(address));
+            return std::string(b);
+        }() + " has no file bytes to patch";
+        return false;
+    }
+    // Read the bytes there now, both to record the original and to confirm the
+    // whole span is file-backed.
+    std::vector<uint8_t> original(bytes.size());
+    size_t covered = image_.read(address, original.data(), original.size());
+    if (covered < original.size()) {
+        error = "patch runs past mapped file bytes";
+        return false;
+    }
+    for (size_t i = 1; i < bytes.size(); ++i) {
+        uint64_t probe = 0;
+        if (!image_.file_offset_for(address + i, probe) || probe != file_off + i) {
+            error = "patch would cross a segment boundary";
+            return false;
+        }
+    }
+    Patch p;
+    p.address = address;
+    p.file_offset = file_off;
+    p.original = std::move(original);
+    p.replacement = bytes;
+    p.tier = tier;
+    p.note = note;
+    patches_.add(std::move(p));
+    return true;
+}
+
+bool Session::patch_nop(uint64_t address, int instruction_count, std::string &error)
+{
+    if (instruction_count <= 0) {
+        error = "instruction count must be positive";
+        return false;
+    }
+    uint64_t at = address;
+    int total = 0;
+    for (int i = 0; i < instruction_count; ++i) {
+        int len = instruction_length(at);
+        if (len <= 0) {
+            error = "cannot decode the instruction to replace";
+            return false;
+        }
+        total += len;
+        at += static_cast<uint64_t>(len);
+    }
+    std::vector<uint8_t> fill;
+    if (!arch_nop_fill(archid_, big_endian(), total, fill, error))
+        return false;
+    return patch_bytes(address, fill, PatchTier::ByteRewrite,
+                       instruction_count == 1 ? "no-op one instruction"
+                                              : "no-op instructions", error);
+}
+
+bool Session::write_patched(const std::string &out_path, std::string &error) const
+{
+    if (image_.path.empty()) {
+        error = "no source file on disk to patch";
+        return false;
+    }
+    std::vector<uint8_t> bytes;
+    if (!read_file(image_.path, bytes, error))
+        return false;
+    if (!patches_.apply_to(bytes, error))
+        return false;
+    // A patched arm64 Mach-O will not run until it is re-signed: Apple Silicon
+    // refuses a binary whose signature no longer covers its bytes. Re-sign in
+    // memory when possible, and fall back to the platform tool otherwise.
+    bool sign_on_disk = false;
+    if (is_macho(bytes)) {
+        std::string sign_error;
+        if (!macho_adhoc_sign(bytes, sign_error))
+            sign_on_disk = true; // native path declined; try codesign after write
+    }
+    if (!write_file(out_path, bytes, error))
+        return false;
+    // A patched executable should stay executable.
+    {
+        struct stat st;
+        if (stat(image_.path.c_str(), &st) == 0)
+            chmod(out_path.c_str(), st.st_mode);
+    }
+    if (sign_on_disk) {
+        std::string sign_error;
+        if (!codesign_adhoc(out_path, sign_error)) {
+            // The bytes are written; only the signature is missing. Say so
+            // rather than pretend the patch produced a runnable binary.
+            error = "patched, but could not re-sign: " + sign_error;
+            return false;
+        }
+    }
     return true;
 }
 

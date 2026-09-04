@@ -475,6 +475,61 @@ impl Program {
         Self::take_string(text, Status::NoSuchAddress)
     }
 
+    /// Byte length of the instruction at `address`, or 0 if it will not decode.
+    pub fn instruction_length(&self, address: u64) -> usize {
+        let len = unsafe { sys::astral_program_instruction_length(self.handle, address) };
+        if len < 0 { 0 } else { len as usize }
+    }
+
+    /// Queues a raw byte edit at a virtual address. The bytes there now are
+    /// kept as the patch's original, so a patch set only applies to the file it
+    /// was cut from.
+    pub fn patch_bytes(&mut self, address: u64, bytes: &[u8], note: &str) -> Result<()> {
+        let note = to_cstring(note)?;
+        check(unsafe {
+            sys::astral_program_patch_bytes(
+                self.handle,
+                address,
+                bytes.as_ptr() as *const std::os::raw::c_void,
+                bytes.len(),
+                note.as_ptr(),
+            )
+        })
+    }
+
+    /// Queues replacing `count` instructions at `address` with the
+    /// architecture's no-op.
+    pub fn patch_nop(&mut self, address: u64, count: usize) -> Result<()> {
+        check(unsafe { sys::astral_program_patch_nop(self.handle, address, count as c_int) })
+    }
+
+    /// How many patches are queued.
+    pub fn patch_count(&self) -> usize {
+        unsafe { sys::astral_program_patch_count(self.handle) }
+    }
+
+    /// Drops the most recently queued patch.
+    pub fn patch_undo(&mut self) {
+        unsafe { sys::astral_program_patch_undo(self.handle) };
+    }
+
+    /// Discards every queued patch.
+    pub fn patch_clear(&mut self) {
+        unsafe { sys::astral_program_patch_clear(self.handle) };
+    }
+
+    /// The queued patch set as readable patches.astral text.
+    pub fn patch_serialize(&self) -> String {
+        let text = unsafe { sys::astral_program_patch_serialize(self.handle) };
+        Self::take_string(text, Status::Internal).unwrap_or_default()
+    }
+
+    /// Writes the original file with every queued patch applied to `out_path`.
+    pub fn write_patched(&self, out_path: &str) -> Result<()> {
+        let path = to_cstring(out_path)?;
+        check(unsafe { sys::astral_program_write_patched(self.handle, path.as_ptr()) })
+    }
+
     pub fn pcode(&self, address: u64, count: usize) -> Result<String> {
         let text = unsafe { sys::astral_pcode(self.handle, address, count as c_int) };
         Self::take_string(text, Status::NoSuchAddress)

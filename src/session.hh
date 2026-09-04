@@ -2,6 +2,7 @@
 #define ASTRAL_SESSION_HH
 
 #include "image.hh"
+#include "patch.hh"
 
 #include <map>
 #include <memory>
@@ -104,6 +105,32 @@ public:
     // Returns how many were added.
     int learn_symbols(std::string &error);
 
+    // --- Patching ---
+    //
+    // Edits accumulate here and are written back by write_patched(). Astral's
+    // superpower: the C you read can be turned into bytes in the binary.
+
+    PatchSet &patches() { return patches_; }
+    const PatchSet &patches() const { return patches_; }
+
+    // Length in bytes of the instruction at `address`; 0 if it will not decode.
+    int instruction_length(uint64_t address) const;
+
+    // Records a raw byte edit at a virtual address. Reads the bytes currently
+    // there as the patch's original, resolves the file offset, and appends it.
+    // Fails when the address has no file backing (a .bss region, or unmapped).
+    bool patch_bytes(uint64_t address, const std::vector<uint8_t> &bytes, PatchTier tier,
+                     const std::string &note, std::string &error);
+
+    // Replaces `instruction_count` instructions starting at `address` with the
+    // architecture's no-op. A recognised structural edit (tier byte-rewrite).
+    bool patch_nop(uint64_t address, int instruction_count, std::string &error);
+
+    // The original file with every accumulated patch applied, written to
+    // `out_path`. Re-reads the source file, so the original must still be on
+    // disk at image().path.
+    bool write_patched(const std::string &out_path, std::string &error) const;
+
     // Warnings the decompiler produced while working on this program.
     std::string messages() const { return messages_.str(); }
 
@@ -125,6 +152,7 @@ private:
     void collect_externals(FunctionResult &result, const void *funcdata) const;
 
     BinaryImage image_;
+    PatchSet patches_;
     std::string archid_;
     // The architecture holds a pointer to this for its whole life, so it has to
     // outlive every use of the architecture rather than being a local.

@@ -38,6 +38,23 @@ bool BinaryImage::contains(uint64_t address) const
     return false;
 }
 
+bool BinaryImage::file_offset_for(uint64_t address, uint64_t &out) const
+{
+    for (const Segment &seg : segments) {
+        if (address < seg.address || address >= seg.address + seg.size)
+            continue;
+        if (!seg.has_file_offset)
+            return false; // covered, but the bytes exist only at run time
+        uint64_t seg_off = address - seg.address;
+        // The tail of a segment past `data` is zero-fill with no file image.
+        if (seg_off >= seg.data.size())
+            return false;
+        out = seg.file_offset + seg_off;
+        return true;
+    }
+    return false;
+}
+
 void BinaryImage::sort_and_dedup_symbols()
 {
     std::stable_sort(symbols.begin(), symbols.end(), [](const Symbol &a, const Symbol &b) {
@@ -63,6 +80,8 @@ BinaryImage make_raw_image(const std::vector<uint8_t> &bytes, uint64_t base_addr
     seg.size = bytes.size();
     seg.executable = true;
     seg.writable = true;
+    seg.file_offset = 0;
+    seg.has_file_offset = true;
     seg.data = bytes;
     image.segments.push_back(std::move(seg));
     image.entry_points.push_back(base_address);

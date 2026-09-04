@@ -226,6 +226,41 @@ ASTRAL_API astral_status astral_program_rename(astral_program *program, uint64_t
  * Returns how many were added, or a negative astral_status on failure. */
 ASTRAL_API int astral_program_learn_symbols(astral_program *program);
 
+/* --- Patching ---------------------------------------------------------------
+ *
+ * Astral does not only read a binary; it can write the C you edit back into it.
+ * Edits queue on the program and are written out together by
+ * astral_program_write_patched. */
+
+/* Instruction length in bytes at `address`, 0 if it will not decode. */
+ASTRAL_API int astral_program_instruction_length(astral_program *program, uint64_t address);
+
+/* Queue a raw byte edit at a virtual address. The bytes there now are kept as
+ * the patch's original, so a patch set only applies to the file it was cut
+ * from. `note` may be NULL. Fails when the address has no file backing. */
+ASTRAL_API astral_status astral_program_patch_bytes(astral_program *program, uint64_t address,
+                                                    const void *bytes, size_t size,
+                                                    const char *note);
+
+/* Queue replacing `count` instructions at `address` with the architecture's
+ * no-op. */
+ASTRAL_API astral_status astral_program_patch_nop(astral_program *program, uint64_t address,
+                                                  int count);
+
+/* How many patches are queued. */
+ASTRAL_API size_t astral_program_patch_count(astral_program *program);
+/* Drop the most recently queued patch. */
+ASTRAL_API void astral_program_patch_undo(astral_program *program);
+/* Discard every queued patch. */
+ASTRAL_API void astral_program_patch_clear(astral_program *program);
+/* The queued patch set as readable patches.astral text. Caller frees. */
+ASTRAL_API char *astral_program_patch_serialize(astral_program *program);
+
+/* Write the original file with every queued patch applied to `out_path`. The
+ * original must still be on disk where the program was opened. */
+ASTRAL_API astral_status astral_program_write_patched(astral_program *program,
+                                                      const char *out_path);
+
 /* Read C or C++ source, or every source file under a directory, and record the
  * prototypes it declares. A decompiled function whose name matches then gets
  * its real return type, argument types and argument names, which is most of the

@@ -169,10 +169,12 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
             seg.writable = (initprot & 2) != 0;
             seg.executable = (initprot & 4) != 0;
             size_t abs_off = base + static_cast<size_t>(fileoff);
-            if (abs_off < bytes.size()) {
+            if (abs_off < bytes.size() && filesize != 0) {
                 size_t avail = std::min<size_t>(static_cast<size_t>(filesize), bytes.size() - abs_off);
                 seg.data.assign(bytes.begin() + static_cast<long>(abs_off),
                                 bytes.begin() + static_cast<long>(abs_off + avail));
+                seg.file_offset = abs_off;
+                seg.has_file_offset = true;
             }
             lowest = std::min(lowest, vmaddr);
             out.segments.push_back(std::move(seg));

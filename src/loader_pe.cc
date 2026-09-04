@@ -136,6 +136,8 @@ bool load_pe(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &e
         if (s.rawptr < bytes.size() && s.rawsize != 0) {
             size_t avail = std::min<size_t>(s.rawsize, bytes.size() - s.rawptr);
             seg.data.assign(bytes.begin() + s.rawptr, bytes.begin() + s.rawptr + static_cast<long>(avail));
+            seg.file_offset = s.rawptr;
+            seg.has_file_offset = true;
         }
         if (seg.size != 0)
             out.segments.push_back(std::move(seg));

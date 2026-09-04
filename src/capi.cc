@@ -39,6 +39,14 @@ namespace {
 
 const char *cstr(const std::string &s) { return s.c_str(); }
 
+char *copy_string(const std::string &s)
+{
+    char *copy = static_cast<char *>(std::malloc(s.size() + 1));
+    if (copy != nullptr)
+        std::memcpy(copy, s.c_str(), s.size() + 1);
+    return copy;
+}
+
 template <typename T>
 const char *element(const std::vector<T> &v, int index)
 {
@@ -354,6 +362,74 @@ astral_status astral_program_rename(astral_program *program, uint64_t address, c
         return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or name");
     std::string error;
     if (!program->session->rename(address, name, learn != 0, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+int astral_program_instruction_length(astral_program *program, uint64_t address)
+{
+    if (program == nullptr)
+        return 0;
+    return program->session->instruction_length(address);
+}
+
+astral_status astral_program_patch_bytes(astral_program *program, uint64_t address,
+                                         const void *bytes, size_t size, const char *note)
+{
+    if (program == nullptr || bytes == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or bytes");
+    const uint8_t *p = static_cast<const uint8_t *>(bytes);
+    std::vector<uint8_t> data(p, p + size);
+    std::string error;
+    if (!program->session->patch_bytes(address, data, astral_internal::PatchTier::Manual,
+                                        note != nullptr ? note : "", error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_patch_nop(astral_program *program, uint64_t address, int count)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_nop(address, count, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+size_t astral_program_patch_count(astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->patches().size();
+}
+
+void astral_program_patch_undo(astral_program *program)
+{
+    if (program != nullptr)
+        program->session->patches().undo_last();
+}
+
+void astral_program_patch_clear(astral_program *program)
+{
+    if (program != nullptr)
+        program->session->patches().clear();
+}
+
+char *astral_program_patch_serialize(astral_program *program)
+{
+    if (program == nullptr)
+        return nullptr;
+    return copy_string(program->session->patches().serialize());
+}
+
+astral_status astral_program_write_patched(astral_program *program, const char *out_path)
+{
+    if (program == nullptr || out_path == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or path");
+    std::string error;
+    if (!program->session->write_patched(out_path, error))
         return fail(ASTRAL_ERR_INTERNAL, error);
     clear_error();
     return ASTRAL_OK;
