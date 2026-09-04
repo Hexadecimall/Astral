@@ -737,8 +737,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     }
 
     std::ostringstream out;
-    out << "/* Decompiled by Astral. This compiles; whether it is right is the\n"
-           "   decompiler's reading of the machine code. */\n";
+    out << "/* Decompiled by Astral. Reverse engineer only what you have the right to. */\n";
 
     // Only the runtime pieces this code refers to. Most functions need none,
     // and a reader should not have to scroll past a hundred lines of

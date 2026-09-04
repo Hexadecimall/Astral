@@ -68,6 +68,15 @@ fn main() {
     };
 
     println!("cargo:rustc-link-search=native={}", dir.display());
+    // Without this, a rebuilt library does not reach a binary that links it:
+    // cargo has no reason to think anything changed, and quietly relinks
+    // nothing. Watching the file itself is what makes the two stay in step.
+    for name in names {
+        let candidate = dir.join(name);
+        if candidate.exists() {
+            println!("cargo:rerun-if-changed={}", candidate.display());
+        }
+    }
     if shared {
         println!("cargo:rustc-link-lib=dylib=Astral");
     } else {

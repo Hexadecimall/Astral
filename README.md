@@ -176,8 +176,10 @@ is what turns an address into a string:
 
 ```c
 $ astral decompile -f main ./hello
+/* Decompiled by Astral. Reverse engineer only what you have the right to. */
+
 #include <stdio.h>
-...
+
 int main(void)
 {
   printf("Hello, World!\n");
