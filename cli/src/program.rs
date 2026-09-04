@@ -3,7 +3,7 @@
 use astral::{Function, Library, Program};
 
 use crate::options::Options;
-use crate::out::{error, library_error, paint, print, tint, Destination};
+use crate::out::{error, library_error, paint, print, stdout_colour, tint, Destination};
 
 /// A program and the specification tree it was read with.
 ///
@@ -165,6 +165,11 @@ pub fn disassemble(options: &Options) -> i32 {
     };
     match text {
         Ok(text) => {
+            let text = match (stdout_colour(options.color), as_pcode) {
+                (false, _) => text,
+                (true, true) => astral_tui::ansi_pcode(&text),
+                (true, false) => astral_tui::ansi_assembly(&text),
+            };
             print(&text);
             0
         }
@@ -206,6 +211,10 @@ pub fn decompile(options: &Options) -> i32 {
         }
     };
 
+    // Colour only on the way to a terminal: a file or a pipe gets the plain C.
+    let colour = options.output.is_none() && stdout_colour(options.color);
+    let paint_c = |text: String| if colour { astral_tui::ansi_c(&text) } else { text };
+
     let wanted = wanted_addresses(program, options);
     let mut code = 0;
     if wanted.is_empty() {
@@ -219,7 +228,7 @@ pub fn decompile(options: &Options) -> i32 {
                     if options.why {
                         report_naming(&mut out, &function);
                     }
-                    out.write(&function.c_code());
+                    out.write(&paint_c(function.c_code()));
                 }
                 Err(failure) => {
                     error(&format!("0x{address:x}: {}", failure.message));
@@ -232,7 +241,7 @@ pub fn decompile(options: &Options) -> i32 {
         // The explanations are off in emitted C unless they were asked for.
         emit.explain = options.why;
         match program.emit_c(&wanted, emit) {
-            Ok(text) => out.write(&text),
+            Ok(text) => out.write(&paint_c(text)),
             Err(failure) => {
                 library_error(&failure);
                 code = 1;

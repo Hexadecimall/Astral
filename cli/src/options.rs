@@ -27,7 +27,16 @@ impl Command {
     }
 }
 
+/// When to colour output that goes to standard output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
 pub struct Options {
+    pub color: ColorMode,
     pub path: Option<String>,
     pub language: Option<String>,
     pub specs: Option<String>,
@@ -50,6 +59,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
+            color: ColorMode::Auto,
             path: None,
             language: None,
             specs: None,
@@ -133,6 +143,18 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
             "-e" | "--entry" => options.addresses.clear(),
             "-o" | "--output" => options.output = Some(value("--output", &mut index)?),
             "--tui" => options.tui = true,
+            "--color" | "--colour" => {
+                options.color = match value("--color", &mut index)?.as_str() {
+                    "auto" => ColorMode::Auto,
+                    "always" | "yes" | "force" => ColorMode::Always,
+                    "never" | "no" | "none" => ColorMode::Never,
+                    other => {
+                        error(&format!("--color wants auto, always or never, not {other}"));
+                        return Err(2);
+                    }
+                };
+            }
+            "--no-color" | "--no-colour" => options.color = ColorMode::Never,
             "--why" => options.why = true,
             "--raw-names" => options.raw_names = true,
             "--runtime-include" => options.c_options.self_contained = false,

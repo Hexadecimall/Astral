@@ -13,7 +13,7 @@ use std::path::Path;
 /// Colour is decoration, never information: everything it says is also said by
 /// the words. So it is dropped whenever it might not land — piped output, a
 /// terminal that says it is dumb, or NO_COLOR set to anything at all.
-fn colour_wanted(stream: Stream) -> bool {
+pub fn colour_wanted(stream: Stream) -> bool {
     if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
         return false;
     }
@@ -138,4 +138,16 @@ pub fn print(text: &str) {
     let mut out = io::stdout();
     let _ = out.write_all(text.as_bytes());
     let _ = out.flush();
+}
+
+/// Whether standard output should carry colour under a `--color` mode.
+/// `always` overrides a pipe and NO_COLOR alike, because it was asked for by
+/// name; `auto` is the usual terminal test.
+pub fn stdout_colour(mode: crate::options::ColorMode) -> bool {
+    use crate::options::ColorMode;
+    match mode {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => colour_wanted(Stream::Out),
+    }
 }
