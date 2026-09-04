@@ -1374,6 +1374,95 @@ void Session::apply_learned_names()
     globals_valid_ = false;
 }
 
+namespace {
+
+// The recovered code sometimes reaches memory by its absolute address in the
+// original image - a lookup table at 0x1000006c8, a .bss buffer it builds at
+// 0x100008000. Those addresses mean nothing in a standalone rebuild, so the
+// program links but faults. This defines each referenced data address as a real
+// C array (the bytes for read-only data, zero for .bss the code fills itself)
+// and rewrites the address to point at that array, so the rebuilt program runs.
+void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t, uint64_t>> &code,
+                        std::string &out)
+{
+    auto in_code = [&](uint64_t a) {
+        for (const auto &r : code)
+            if (a >= r.first && a < r.second)
+                return true;
+        return false;
+    };
+    // Collect the distinct address literals that land in mapped data.
+    std::set<uint64_t> addrs;
+    static const std::regex hex(R"(\b0x[0-9A-Fa-f]{5,16}\b)");
+    for (auto it = std::sregex_iterator(out.begin(), out.end(), hex);
+         it != std::sregex_iterator(); ++it) {
+        uint64_t a = std::strtoull(it->str().c_str() + 2, nullptr, 16);
+        if (!image.contains(a) || in_code(a))
+            continue;
+        addrs.insert(a);
+    }
+    if (addrs.empty())
+        return;
+
+    // Size each array up to the next referenced address in the same segment, or
+    // the segment's end, capped so an over-read stays bounded.
+    std::vector<uint64_t> sorted(addrs.begin(), addrs.end());
+    std::sort(sorted.begin(), sorted.end());
+    const uint64_t kCap = 65536;
+    std::ostringstream defs;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        uint64_t a = sorted[i];
+        // The end of the segment holding this address.
+        uint64_t seg_end = a;
+        for (const Segment &s : image.segments)
+            if (a >= s.address && a < s.address + s.size)
+                seg_end = s.address + s.size;
+        uint64_t size = seg_end - a;
+        if (i + 1 < sorted.size() && sorted[i + 1] > a && sorted[i + 1] < seg_end)
+            size = sorted[i + 1] - a;
+        if (size > kCap)
+            size = kCap;
+        if (size == 0)
+            size = 1;
+        std::vector<uint8_t> bytes(size, 0);
+        image.read(a, bytes.data(), bytes.size());
+        char name[32];
+        std::snprintf(name, sizeof name, "DAT_%llx", static_cast<unsigned long long>(a));
+        defs << "static unsigned char " << name << "[" << size << "] = {";
+        for (size_t b = 0; b < bytes.size(); ++b) {
+            if (b % 16 == 0)
+                defs << "\n  ";
+            char byte[8];
+            std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
+            defs << byte;
+        }
+        defs << "\n};\n";
+        // Rewrite every use of the literal to the array (it decays to a pointer).
+        char literal[24];
+        std::snprintf(literal, sizeof literal, "0x%llx", static_cast<unsigned long long>(a));
+        std::string from = literal, to = name;
+        for (size_t at = out.find(from); at != std::string::npos; at = out.find(from, at)) {
+            // Only a whole token, so 0x100 inside 0x1008 is never touched.
+            bool left = at > 0 && (std::isalnum((unsigned char)out[at - 1]) || out[at - 1] == '_');
+            size_t end = at + from.size();
+            bool right = end < out.size() &&
+                         (std::isalnum((unsigned char)out[end]) || out[end] == '_');
+            if (left || right) {
+                at = end;
+                continue;
+            }
+            out.replace(at, from.size(), to);
+            at += to.size();
+        }
+    }
+    // Place the definitions after the last #include so they precede all code.
+    size_t inc = out.rfind("#include");
+    size_t at = inc == std::string::npos ? 0 : out.find('\n', inc) + 1;
+    out.insert(at, "\n" + defs.str());
+}
+
+} // namespace
+
 bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained, bool comments,
                      bool explain, std::string &out, std::string &error)
 {
@@ -1471,6 +1560,12 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         }
     }
     out = emit_c_unit(results, options);
+    // Define and re-point the absolute data addresses the code reads, so the
+    // rebuilt program touches real arrays instead of stale image addresses.
+    std::vector<std::pair<uint64_t, uint64_t>> code_ranges;
+    for (const FunctionResult &r : results)
+        code_ranges.emplace_back(r.address, r.address + (r.size == 0 ? 1 : r.size));
+    emit_absolute_data(image_, code_ranges, out);
     return true;
 }
 
