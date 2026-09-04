@@ -20,12 +20,21 @@ pub const ASTRAL_ERR_INTERNAL: c_int = -9;
 pub const ASTRAL_C_DEFAULT: c_uint = 0;
 pub const ASTRAL_C_INCLUDE_RUNTIME: c_uint = 1;
 pub const ASTRAL_C_NO_COMMENTS: c_uint = 2;
+/// Include the naming explanations Astral would otherwise keep to itself.
+pub const ASTRAL_C_EXPLAIN: c_uint = 4;
 
 pub const ASTRAL_FORMAT_UNKNOWN: c_int = 0;
 pub const ASTRAL_FORMAT_RAW: c_int = 1;
 pub const ASTRAL_FORMAT_ELF: c_int = 2;
 pub const ASTRAL_FORMAT_PE: c_int = 3;
 pub const ASTRAL_FORMAT_MACHO: c_int = 4;
+
+/// A service that needs no account.
+pub const ASTRAL_DELIVERY_ENDPOINT: c_int = 0;
+/// A token this machine already had.
+pub const ASTRAL_DELIVERY_API: c_int = 1;
+/// Written out, and the browser finishes it.
+pub const ASTRAL_DELIVERY_BROWSER: c_int = 2;
 
 #[repr(C)]
 pub struct astral_program {
@@ -35,6 +44,23 @@ pub struct astral_program {
 #[repr(C)]
 pub struct astral_function {
     _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct astral_contribution {
+    _private: [u8; 0],
+}
+
+/// What a repository publishes about the submissions it takes. The `const char *`
+/// members point at storage the library owns, so the struct is only valid for as
+/// long as the library stays loaded.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct astral_contribution_policy {
+    pub accepted: c_int,
+    pub method: *const c_char,
+    pub message: *const c_char,
+    pub record_limit: c_int,
 }
 
 extern "C" {
@@ -135,6 +161,38 @@ extern "C" {
     pub fn astral_knowledge_size() -> c_int;
     pub fn astral_knowledge_learned() -> c_int;
     pub fn astral_knowledge_path() -> *const c_char;
+    pub fn astral_knowledge_reload(user_path: *const c_char) -> c_int;
+    pub fn astral_knowledge_forget(name: *const c_char) -> c_int;
+    pub fn astral_knowledge_forget_all() -> c_int;
+
+    pub fn astral_learn_source(paths: *const *const c_char, count: c_int) -> c_int;
+    pub fn astral_program_learn_symbols(program: *mut astral_program) -> c_int;
+
+    pub fn astral_contribution_ask(
+        repo: *const c_char,
+        policy: *mut astral_contribution_policy,
+    ) -> c_int;
+    pub fn astral_contribution_prepare(
+        database_path: *const c_char,
+        policy: *const astral_contribution_policy,
+    ) -> *mut astral_contribution;
+    pub fn astral_contribution_free(contribution: *mut astral_contribution);
+    pub fn astral_contribution_records(contribution: *const astral_contribution) -> c_int;
+    pub fn astral_contribution_withheld_kind(contribution: *const astral_contribution) -> c_int;
+    pub fn astral_contribution_withheld_private(contribution: *const astral_contribution)
+        -> c_int;
+    pub fn astral_contribution_example_count(contribution: *const astral_contribution) -> c_int;
+    pub fn astral_contribution_example(
+        contribution: *const astral_contribution,
+        index: c_int,
+    ) -> *const c_char;
+    pub fn astral_contribution_send(
+        repo: *const c_char,
+        contribution: *mut astral_contribution,
+        title: *const c_char,
+    ) -> *const c_char;
+    pub fn astral_contribution_delivery(contribution: *const astral_contribution) -> c_int;
+    pub fn astral_contribution_file(contribution: *const astral_contribution) -> *const c_char;
 
     pub fn astral_function_naming_reason(function: *const astral_function) -> *const c_char;
     pub fn astral_function_rename_count(function: *const astral_function) -> c_int;

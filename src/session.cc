@@ -7,6 +7,7 @@
 #include "knowledge.hh"
 #include "libc_protos.hh"
 #include "naming.hh"
+#include "paths.hh"
 
 #include "architecture.hh"
 #include "block.hh"
@@ -329,14 +330,10 @@ std::string prototype_text(const ghidra::FuncProto &proto, const std::string &na
 
 astral_status initialize(const char *spec_root)
 {
-    std::string root;
-    if (spec_root != nullptr && spec_root[0] != '\0') {
-        root = spec_root;
-    } else if (const char *env = std::getenv("ASTRAL_SPECS")) {
-        root = env;
-    } else {
-        root = ASTRAL_DEFAULT_SPEC_ROOT;
-    }
+    const std::string root =
+        spec_root != nullptr && spec_root[0] != '\0' ? spec_root : default_spec_root();
+    if (root.empty())
+        return ASTRAL_ERR_SPECS_MISSING;
 
     // Ghidra's own scan expects a full installation tree. This library ships a
     // flat <root>/<Processor>/data/languages layout, so the directories holding
@@ -900,6 +897,14 @@ std::string Session::apply_naming(void *funcdata, FunctionResult &out)
             try {
                 locals->renameSymbol(symbol, rename.second);
                 out.applied_renames.push_back(rename);
+                // The recorded names have to follow, or a value Astral just
+                // named reads as undeclared and gets an extern of its own.
+                for (std::string &name : out.local_names)
+                    if (name == rename.first)
+                        name = rename.second;
+                for (std::string &name : out.parameter_names)
+                    if (name == rename.first)
+                        name = rename.second;
             } catch (ghidra::LowlevelError &) {
                 // A name the scope will not accept is simply not applied.
             }
@@ -1105,7 +1110,7 @@ void Session::apply_learned_names()
 }
 
 bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained, bool comments,
-                     std::string &out, std::string &error)
+                     bool explain, std::string &out, std::string &error)
 {
     if (addresses.empty()) {
         error = "no functions to emit";
@@ -1130,6 +1135,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     CEmitOptions options;
     options.self_contained = self_contained;
     options.comments = comments;
+    options.explain = explain;
     out = emit_c_unit(results, options);
     return true;
 }

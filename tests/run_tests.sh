@@ -104,11 +104,11 @@ if cc -O1 -o "$work/greet" "$work/greet.c" 2>/dev/null; then
     check "import: labelled"       "(import) puts"    "$info"
     check "import: second one"     "strlen"           "$info"
 
-    listing=$("$astral" decompile -f main "$work/greet")
+    listing=$("$astral" decompile --pseudo-c -f main "$work/greet")
     check "string: printed as a literal" '"Hello, World!"' "$listing"
     check "import: called by name"       "puts("             "$listing"
 
-    unit=$("$astral" decompile -c --all "$work/greet")
+    unit=$("$astral" decompile --all "$work/greet")
     check "header: emitted for puts"    "#include <stdio.h>" "$unit"
     # The stub belongs to another image, so no body may be emitted for it.
     if printf '%s' "$unit" | grep -qE '^[A-Za-z_0-9 *]+ puts\(.*\)$'; then
@@ -121,7 +121,7 @@ if cc -O1 -o "$work/greet" "$work/greet.c" 2>/dev/null; then
 
     # The strongest check available: rebuild the program from its own
     # decompilation and confirm it still prints what it printed before.
-    "$astral" decompile -c --all "$work/greet" > "$work/greet_out.c" 2>/dev/null
+    "$astral" decompile --all "$work/greet" > "$work/greet_out.c" 2>/dev/null
     if cc -std=c11 "$work/greet_out.c" -o "$work/greet_rebuilt" 2>"$work/greet.log" \
         && [[ "$("$work/greet_rebuilt")" == "Hello, World!" ]]; then
         printf 'ok   c: rebuilt program reproduces its output\n'
@@ -142,9 +142,9 @@ fi
 # run against the behaviour of the original source.
 
 check "c: emits a translation unit" "Decompiled by Astral" \
-    "$("$astral" decompile -c -f add_values "$elf")"
+    "$("$astral" decompile -f add_values "$elf")"
 
-"$astral" decompile -c -f add_values "$elf" > "$work/add.c" 2>/dev/null
+"$astral" decompile -f add_values "$elf" > "$work/add.c" 2>/dev/null
 if cc -std=c11 -c "$work/add.c" -o "$work/add.o" 2>"$work/add.log"; then
     printf 'ok   c: elf output compiles\n'
     passed=$((passed + 1))
@@ -153,7 +153,7 @@ else
     failed=$((failed + 1))
 fi
 
-"$astral" decompile -c -f add_values "$pe" > "$work/add_pe.c" 2>/dev/null
+"$astral" decompile -f add_values "$pe" > "$work/add_pe.c" 2>/dev/null
 if cc -std=c11 -c "$work/add_pe.c" -o "$work/add_pe.o" 2>"$work/add_pe.log"; then
     printf 'ok   c: pe output compiles\n'
     passed=$((passed + 1))
@@ -163,7 +163,7 @@ else
 fi
 
 if [[ -x "$work/host" ]]; then
-    "$astral" decompile -c --all "$work/host" > "$work/host_all.c" 2>/dev/null
+    "$astral" decompile --all "$work/host" > "$work/host_all.c" 2>/dev/null
     if cc -std=c2x -Wall -c "$work/host_all.c" -o "$work/host_all.o" 2>"$work/host.log"; then
         printf 'ok   c: whole macho binary compiles\n'
         passed=$((passed + 1))
@@ -173,7 +173,7 @@ if [[ -x "$work/host" ]]; then
     fi
 
     # Behaviour: link the decompiled functions and compare against the original.
-    "$astral" decompile -c -f add_values -f sum_array "$work/host" > "$work/pure.c" 2>/dev/null
+    "$astral" decompile -f add_values -f sum_array "$work/host" > "$work/pure.c" 2>/dev/null
     cat > "$work/drive.c" <<'DRIVER'
 #include <stdio.h>
 #include <stdint.h>
@@ -208,7 +208,7 @@ DRIVER
 fi
 
 check "c: runtime include mode" "#include <astral/decompiled.h>" \
-    "$("$astral" decompile -c --runtime-include -f add_values "$elf")"
+    "$("$astral" decompile --runtime-include -f add_values "$elf")"
 
 # ------------------------------------------------- naming from evidence
 #

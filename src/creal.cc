@@ -417,26 +417,103 @@ void coerce_main(FunctionResult &function)
     function.return_type = "int";
 }
 
+// One selectable piece of the runtime header, as its marker describes it.
+struct RuntimePiece {
+    std::vector<std::string> provides;
+    std::vector<std::string> headers;
+    std::vector<std::string> depends;
+    std::string text;
+};
+
+// Reads the runtime header into pieces. Each is introduced by a marker naming
+// what it provides, the system headers it needs, and the pieces it depends on,
+// so only what a function refers to has to be emitted.
+const std::vector<RuntimePiece> &runtime_pieces()
+{
+    static const std::vector<RuntimePiece> pieces = [] {
+        std::vector<RuntimePiece> parsed;
+        const std::string source = RUNTIME_HEADER_TEXT;
+        const std::string marker = "/* ASTRAL:";
+
+        size_t at = source.find(marker);
+        while (at != std::string::npos) {
+            const size_t head_end = source.find("*/", at);
+            if (head_end == std::string::npos)
+                break;
+            const std::string head =
+                source.substr(at + marker.size(), head_end - at - marker.size());
+
+            RuntimePiece piece;
+            std::vector<std::string> *fields[] = {&piece.provides, &piece.headers,
+                                                  &piece.depends};
+            size_t field = 0;
+            std::string word;
+            for (size_t i = 0; i <= head.size(); ++i) {
+                const char c = i < head.size() ? head[i] : ' ';
+                if (c == ';') {
+                    if (!word.empty() && field < 3)
+                        fields[field]->push_back(word);
+                    word.clear();
+                    ++field;
+                    continue;
+                }
+                if (std::isspace(static_cast<unsigned char>(c))) {
+                    if (!word.empty() && field < 3)
+                        fields[field]->push_back(word);
+                    word.clear();
+                    continue;
+                }
+                word.push_back(c);
+            }
+
+            const size_t body = head_end + 2;
+            const size_t next = source.find(marker, body);
+            std::string text = source.substr(body, next == std::string::npos
+                                                       ? std::string::npos
+                                                       : next - body);
+            // Trailing prose belongs to the next piece, not this one.
+            const size_t tail = text.rfind("\n/*");
+            if (tail != std::string::npos && next != std::string::npos)
+                text = text.substr(0, tail);
+            // The guard closing the header is not part of any piece.
+            const size_t guard = text.find("#endif /* ASTRAL_DECOMPILED_H */");
+            if (guard != std::string::npos)
+                text = text.substr(0, guard);
+
+            size_t first = text.find_first_not_of("\n");
+            size_t last = text.find_last_not_of(" \n\t");
+            piece.text = first == std::string::npos
+                             ? std::string()
+                             : text.substr(first, last - first + 1);
+            if (!piece.provides.empty() && !piece.text.empty())
+                parsed.push_back(std::move(piece));
+            at = next;
+        }
+        return parsed;
+    }();
+    return pieces;
+}
+
+// Removes comments and the lines that held nothing else, for the caller who
+// asked for code without commentary.
 std::string strip_comments(const std::string &source)
 {
     std::string out;
     out.reserve(source.size());
     for (size_t i = 0; i < source.size();) {
         if (source.compare(i, 2, "/*") == 0) {
-            size_t end = source.find("*/", i + 2);
+            const size_t end = source.find("*/", i + 2);
             i = end == std::string::npos ? source.size() : end + 2;
-            // Keep the line structure so indentation still reads sensibly.
             continue;
         }
         if (source.compare(i, 2, "//") == 0) {
-            size_t end = source.find('\n', i);
+            const size_t end = source.find('\n', i);
             i = end == std::string::npos ? source.size() : end;
             continue;
         }
         out.push_back(source[i]);
         ++i;
     }
-    // Drop lines that held nothing but a comment.
     std::istringstream lines(out);
     std::string line;
     std::ostringstream result;
@@ -660,13 +737,45 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     }
 
     std::ostringstream out;
-    out << "/*\n"
-        << " * Decompiled by Astral.\n"
-        << " *\n"
-        << " * This is C, not a listing: it compiles. Behaviour is the decompiler's\n"
-        << " * reading of the machine code, so it is a starting point for review, not a\n"
-        << " * drop-in replacement for the original source.\n"
-        << " */\n";
+    out << "/* Decompiled by Astral. This compiles; whether it is right is the\n"
+           "   decompiler's reading of the machine code. */\n";
+
+    // Only the runtime pieces this code refers to. Most functions need none,
+    // and a reader should not have to scroll past a hundred lines of
+    // definitions to reach the six they came for.
+    std::set<std::string> wanted;
+    if (options.self_contained) {
+        std::set<std::string> mentioned;
+        for (const FunctionResult &function : functions)
+            for (const Identifier &identifier : scan_identifiers(function.c_code_real))
+                mentioned.insert(identifier.name);
+        for (const auto &entry : externals)
+            for (const Identifier &identifier : scan_identifiers(entry.second))
+                mentioned.insert(identifier.name);
+        for (const FunctionResult &function : functions)
+            for (const Identifier &identifier : scan_identifiers(function.signature_real))
+                mentioned.insert(identifier.name);
+
+        // A piece may pull in others, so keep going until nothing new appears.
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (const RuntimePiece &piece : runtime_pieces()) {
+                bool needed = false;
+                for (const std::string &name : piece.provides)
+                    if (mentioned.count(name) != 0)
+                        needed = true;
+                if (!needed || wanted.count(piece.provides.front()) != 0)
+                    continue;
+                wanted.insert(piece.provides.front());
+                for (const std::string &dependency : piece.depends)
+                    mentioned.insert(dependency);
+                for (const std::string &header : piece.headers)
+                    headers.insert(header);
+                grew = true;
+            }
+        }
+    }
 
     if (!headers.empty()) {
         out << '\n';
@@ -674,10 +783,14 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             out << "#include <" << header << ">\n";
     }
 
-    if (options.self_contained)
-        out << '\n' << RUNTIME_HEADER_TEXT << '\n';
-    else
+    if (!options.self_contained) {
         out << "\n#include <astral/decompiled.h>\n";
+    } else if (!wanted.empty()) {
+        out << '\n';
+        for (const RuntimePiece &piece : runtime_pieces())
+            if (wanted.count(piece.provides.front()) != 0)
+                out << piece.text << "\n\n";
+    }
 
     if (wants_int128) {
         out << "\n#if defined(__SIZEOF_INT128__)\n"
@@ -698,43 +811,43 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             aggregates.insert(std::stoi((*it)[1].str()));
     }
     if (!aggregates.empty()) {
-        out << "\n/* Values returned in more than one register. */\n";
+        out << '\n';
         for (int bytes : aggregates)
             out << "typedef struct { unsigned char b[" << bytes << "]; } astral_bytes" << bytes
                 << ";\n";
     }
 
     if (!typedefs.empty()) {
-        out << "\n/* Widths the decompiler had no core type for. */\n";
+        out << '\n';
         for (const auto &entry : typedefs)
             out << entry.second;
     }
 
     if (!helpers.empty()) {
-        out << "\n/* Width-specific p-code operations used below. */\n";
+        out << '\n';
         for (const auto &entry : helpers)
             out << entry.second;
     }
 
     if (!externals.empty()) {
-        out << "\n/* Referenced but defined elsewhere. */\n";
+        out << '\n';
         for (const auto &entry : externals)
             out << entry.second << '\n';
     }
 
     if (functions.size() > 1) {
-        out << "\n/* Forward declarations, so definition order does not matter. */\n";
+        out << '\n';
         for (const FunctionResult &function : functions)
             out << function.signature_real << ";\n";
     }
 
     out << '\n';
     for (const FunctionResult &function : functions) {
-        if (options.comments) {
-            // What Astral worked out about this function, said plainly, so a
-            // reader knows which parts are recovered and which are inferred.
+        // Only when asked. What Astral worked out is worth saying once, not on
+        // every line of every function.
+        if (options.explain) {
             if (!function.naming_reason.empty())
-                out << "/* Astral named this " << function.naming_reason << ". */\n";
+                out << "/* named " << function.naming_reason << " */\n";
             for (const std::string &note : function.comments)
                 out << "/* " << note << " */\n";
         }

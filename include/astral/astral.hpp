@@ -83,6 +83,8 @@ struct COptions {
     bool self_contained = true;
     // Keep the decompiler's warning comments.
     bool comments = true;
+    // Say which names Astral chose and why.
+    bool explain = false;
 
     unsigned to_flags() const;
 };

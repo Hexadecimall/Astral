@@ -128,17 +128,21 @@ which says whether submissions are open and which record kinds may travel.
 Everything else is dropped locally, before the network is touched. `--dry-run`
 checks and reports without sending.
 
+It arrives as a pull request carrying the whole database, into
+`contrib/databases`, and every file there is compiled into the knowledge base
+at build time. Merging one is all it takes for those names to reach everyone.
+
 No account is needed. It takes whichever route is open, in this order: a
 submission service the policy names, a GitHub token this machine already has,
-or, for almost everyone, the records written to a file with a prefilled issue
-opened in the browser, where you are already signed in.
+or, for almost everyone, the database written to a file and GitHub's upload
+page opened in the browser, which forks and opens the pull request for you.
 
 ```sh
 $ astral ctb database
 Checking for violations... None.
 Submitting... ready in your browser.
-https://github.com/Hexadecimall/Astral/issues/new?title=...
-Attach: ~/astral-contribution.astral
+https://github.com/Hexadecimall/Astral/upload/main/contrib/databases
+Upload: ~/<hash>.astral
 ```
 
 What travels is a fingerprint and the name someone chose for it. Records
@@ -171,7 +175,7 @@ a table of library prototypes, and the header that declares them included. That
 is what turns an address into a string:
 
 ```c
-$ astral -c -f main ./hello
+$ astral decompile -f main ./hello
 #include <stdio.h>
 ...
 int main(void)
@@ -185,7 +189,7 @@ The claim is tested rather than asserted. The suite compiles the emitted unit,
 links it, runs it, and checks it behaves like the original program.
 
 ```sh
-astral -c --all ./a.out > recovered.c
+astral decompile --all ./a.out > recovered.c
 cc -std=c11 -c recovered.c          # this is the point
 ```
 
@@ -237,7 +241,7 @@ already writable.
 
 ```
 <prefix>/
-  bin/       astral, astral-tui, astral-update, astral-sleigh
+  bin/       astral - one program; the interface is linked into it
   include/   astral/astral.h, astral/astral.hpp, astral/decompiled.h
   lib/astral/dynamic-libs/   libAstral.dylib
   lib/astral/static-libs/    libAstral.a
@@ -257,16 +261,18 @@ ships.
 
 ## Installing and updating
 
-`astral-update` rebuilds and reinstalls, and can vendor a newer Ghidra release
-first.
+`astral update` downloads the newest release, builds it and installs it. No
+source tree is needed: the one this copy was built from may not exist on the
+machine at all, and no path is compiled in.
 
 ```sh
-astral-update install                # build and install into /usr/local
-astral-update --check                # installed vs latest Ghidra
-astral-update                        # rebuild and reinstall in place
-astral-update --ghidra 12.1.3        # vendor that release, then rebuild
-astral-update --languages ALL        # compile every processor's specs
-astral-update --prefix /opt/astral   # install somewhere else
+astral update                      # fetch the newest release and install it
+astral update install              # into /usr/local rather than over this copy
+astral update --check              # what is installed against what is newest
+astral update --release v0.2.0     # a particular release
+astral update --local              # build a source tree you are standing in
+astral update --ghidra 12.1.3      # vendor that Ghidra release first
+astral update --languages ALL      # every processor's specs
 ```
 
 The `install` subcommand targets `/usr/local` and checks each destination
@@ -318,18 +324,22 @@ println!("{}", program.emit_c_all(Default::default())?);
 ```
 
 `build.rs` looks for the library in `ASTRAL_LIB_DIR`, then `$ASTRAL_ROOT/lib`,
-then `~/.astral/lib`, then `/usr/local/lib`, then an in-tree `build/`. It links
+then `~/.astral/lib`, then the system prefixes, then an in-tree `build/`. It links
 statically; enable the `shared` feature for the dynamic library. `generate.sh`
 regenerates the raw declarations with bindgen.
 
 ## Command line
 
+One program. `astral --help` prints the whole tree; every subcommand has its
+own `--help`.
+
 ```sh
 astral info ./a.out                    # format, language, segments, symbols
-astral decompile ./a.out               # the entry point
+astral decompile ./a.out               # the entry point, as C that compiles
 astral decompile -f main ./a.out       # one function by name; repeatable
 astral decompile -a 0x100004000 ./a.out  # by address; repeatable
-astral decompile --all -c ./a.out      # the whole program, as compilable C
+astral decompile --all ./a.out         # the whole program
+astral decompile -p -f main ./a.out    # the decompiler's listing instead
 astral decompile --why -f main ./a.out # explain every name it chose
 astral decompile --tui ./a.out         # explore it in the terminal
 astral disassemble -d 20 -a 0x1000 ./a.out
@@ -342,9 +352,12 @@ astral learn --source ./src            # prototypes, from the source
 astral learn delete --all              # forget everything you taught it
 astral ctb database                    # offer it back to the project
 astral sleigh in.slaspec out.sla       # compile a processor specification
-astral update install                  # rebuild and reinstall
+astral update                          # fetch and install the newest release
 astral version
 ```
+
+Compilable C is what `decompile` produces. `-p` or `--pseudo-c` gives the
+decompiler's raw listing, which reads as C but does not build.
 
 Imported stubs are named but never decompiled: their bodies belong to another
 image, so `--all` covers this program's own code.
@@ -352,8 +365,8 @@ image, so `--all` covers this program's own code.
 ## The interface
 
 `astral decompile --tui <binary>` opens a terminal interface over the same
-library: a filterable symbol list, the decompiled function beside it, and a
-details pane of parameters, locals and callees.
+library, in the same process. A filterable symbol list, the decompiled function
+beside it, and a details pane of parameters, locals and callees.
 
 | Key | Does |
 |---|---|

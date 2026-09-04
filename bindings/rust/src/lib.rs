@@ -237,6 +237,9 @@ pub struct COptions {
     pub self_contained: bool,
     /// Keep the decompiler's warning comments.
     pub comments: bool,
+    /// Explain the names Astral chose, as comments in the output. Off by
+    /// default, because most readers want the code rather than the reasoning.
+    pub explain: bool,
 }
 
 impl Default for COptions {
@@ -244,6 +247,7 @@ impl Default for COptions {
         COptions {
             self_contained: true,
             comments: true,
+            explain: false,
         }
     }
 }
@@ -256,6 +260,9 @@ impl COptions {
         }
         if !self.comments {
             flags |= sys::ASTRAL_C_NO_COMMENTS;
+        }
+        if self.explain {
+            flags |= sys::ASTRAL_C_EXPLAIN;
         }
         flags
     }
@@ -435,6 +442,18 @@ impl Program {
         })
     }
 
+    /// Records every named function in this program against a fingerprint of
+    /// its body, so the same code is recognised in programs carrying no
+    /// symbols. Returns how many records were added.
+    pub fn learn_symbols(&mut self) -> Result<usize> {
+        let added = unsafe { sys::astral_program_learn_symbols(self.handle) };
+        if added < 0 {
+            Err(last_error(Status::from(added)))
+        } else {
+            Ok(added as usize)
+        }
+    }
+
     /// Whether to name placeholders from evidence in the binary.
     pub fn set_auto_naming(&mut self, enabled: bool) {
         unsafe { sys::astral_program_set_auto_naming(self.handle, if enabled { 1 } else { 0 }) };
@@ -555,6 +574,190 @@ pub fn knowledge() -> KnowledgeStats {
             learned: sys::astral_knowledge_learned().max(0) as usize,
             path: cstr(sys::astral_knowledge_path()),
         }
+    }
+}
+
+/// Reads C or C++ source, or every source file under a directory, and records
+/// the prototypes it declares, so a decompiled function of the same name gets
+/// its real return type and argument names. Returns how many were added.
+pub fn learn_source<P: AsRef<Path>>(paths: &[P]) -> Result<usize> {
+    let owned = paths
+        .iter()
+        .map(|path| to_cstring(&path.as_ref().to_string_lossy()))
+        .collect::<Result<Vec<_>>>()?;
+    let pointers: Vec<*const c_char> = owned.iter().map(|path| path.as_ptr()).collect();
+    let added = unsafe { sys::astral_learn_source(pointers.as_ptr(), pointers.len() as c_int) };
+    if added < 0 {
+        Err(last_error(Status::from(added)))
+    } else {
+        Ok(added as usize)
+    }
+}
+
+/// Removes every learned record naming `name`; returns how many went.
+pub fn forget(name: &str) -> Result<usize> {
+    let name = to_cstring(name)?;
+    let gone = unsafe { sys::astral_knowledge_forget(name.as_ptr()) };
+    if gone < 0 {
+        Err(last_error(Status::from(gone)))
+    } else {
+        Ok(gone as usize)
+    }
+}
+
+/// Empties the learned database, leaving the built-in knowledge alone.
+pub fn forget_all() -> Result<()> {
+    check(unsafe { sys::astral_knowledge_forget_all() })
+}
+
+/// Reloads the knowledge base, optionally from a different user database.
+pub fn reload_knowledge(user_path: Option<&Path>) -> Result<()> {
+    let path = match user_path {
+        Some(path) => Some(to_cstring(&path.to_string_lossy())?),
+        None => None,
+    };
+    check(unsafe {
+        sys::astral_knowledge_reload(path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()))
+    })
+}
+
+/// How a submission reached the project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// A service that needs no account.
+    Endpoint,
+    /// A token this machine already had.
+    Api,
+    /// Written out, and the browser finishes it.
+    Browser,
+}
+
+impl From<c_int> for Delivery {
+    fn from(code: c_int) -> Self {
+        match code {
+            sys::ASTRAL_DELIVERY_API => Delivery::Api,
+            sys::ASTRAL_DELIVERY_BROWSER => Delivery::Browser,
+            _ => Delivery::Endpoint,
+        }
+    }
+}
+
+/// What a repository publishes about the submissions it takes.
+///
+/// The raw form is kept rather than copied out, because
+/// [`Contribution::prepare`] hands it straight back to the library.
+pub struct ContributionPolicy {
+    raw: sys::astral_contribution_policy,
+}
+
+impl ContributionPolicy {
+    /// Asks a repository, named `owner/name`, what it accepts.
+    pub fn ask(repo: &str) -> Result<Self> {
+        let repo = to_cstring(repo)?;
+        let mut raw = sys::astral_contribution_policy {
+            accepted: 0,
+            method: std::ptr::null(),
+            message: std::ptr::null(),
+            record_limit: 0,
+        };
+        check(unsafe { sys::astral_contribution_ask(repo.as_ptr(), &mut raw) })?;
+        Ok(ContributionPolicy { raw })
+    }
+
+    /// Whether submissions are being taken at all.
+    pub fn accepted(&self) -> bool {
+        self.raw.accepted != 0
+    }
+
+    /// How they are sent.
+    pub fn method(&self) -> String {
+        unsafe { cstr(self.raw.method) }
+    }
+
+    /// What the repository wants the sender to know.
+    pub fn message(&self) -> String {
+        unsafe { cstr(self.raw.message) }
+    }
+
+    /// The largest submission accepted, in records.
+    pub fn record_limit(&self) -> i32 {
+        self.raw.record_limit
+    }
+}
+
+/// Records selected from a learned database that a policy permits sending.
+pub struct Contribution {
+    handle: *mut sys::astral_contribution,
+}
+
+impl Contribution {
+    /// Selects what may be sent from a learned database. Everything the policy
+    /// does not permit is dropped here, before any network is touched.
+    pub fn prepare<P: AsRef<Path>>(database_path: P, policy: &ContributionPolicy) -> Result<Self> {
+        let path = to_cstring(&database_path.as_ref().to_string_lossy())?;
+        let handle = unsafe { sys::astral_contribution_prepare(path.as_ptr(), &policy.raw) };
+        if handle.is_null() {
+            Err(last_error(Status::Io))
+        } else {
+            Ok(Contribution { handle })
+        }
+    }
+
+    pub fn records(&self) -> usize {
+        unsafe { sys::astral_contribution_records(self.handle).max(0) as usize }
+    }
+
+    /// Records dropped because the policy does not take that kind.
+    pub fn withheld_kind(&self) -> usize {
+        unsafe { sys::astral_contribution_withheld_kind(self.handle).max(0) as usize }
+    }
+
+    /// Records dropped because they mention something private, such as a path.
+    pub fn withheld_private(&self) -> usize {
+        unsafe { sys::astral_contribution_withheld_private(self.handle).max(0) as usize }
+    }
+
+    pub fn examples(&self) -> Vec<String> {
+        let count = unsafe { sys::astral_contribution_example_count(self.handle) };
+        (0..count)
+            .map(|i| unsafe { cstr(sys::astral_contribution_example(self.handle, i)) })
+            .collect()
+    }
+
+    /// Sends it by whatever route is open, returning the URL that resulted.
+    ///
+    /// A token is never required: without one the records are written to a file
+    /// and the browser, where the person is already signed in, finishes it.
+    pub fn send(&mut self, repo: &str, title: Option<&str>) -> Result<String> {
+        let repo = to_cstring(repo)?;
+        let title = title.map(to_cstring).transpose()?;
+        let url = unsafe {
+            sys::astral_contribution_send(
+                repo.as_ptr(),
+                self.handle,
+                title.as_ref().map_or(std::ptr::null(), |t| t.as_ptr()),
+            )
+        };
+        if url.is_null() {
+            Err(last_error(Status::Io))
+        } else {
+            Ok(unsafe { cstr(url) })
+        }
+    }
+
+    pub fn delivery(&self) -> Delivery {
+        Delivery::from(unsafe { sys::astral_contribution_delivery(self.handle) })
+    }
+
+    /// The file the records were written to, when the browser has to carry them.
+    pub fn file(&self) -> String {
+        unsafe { cstr(sys::astral_contribution_file(self.handle)) }
+    }
+}
+
+impl Drop for Contribution {
+    fn drop(&mut self) {
+        unsafe { sys::astral_contribution_free(self.handle) };
     }
 }
 

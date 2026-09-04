@@ -269,7 +269,10 @@ typedef enum astral_c_option {
     /* Emit #include <astral/decompiled.h> rather than inlining the runtime. */
     ASTRAL_C_INCLUDE_RUNTIME = 1,
     /* Leave out the decompiler's warning comments. */
-    ASTRAL_C_NO_COMMENTS = 2
+    ASTRAL_C_NO_COMMENTS = 2,
+    /* Say which names Astral chose and why. Off by default: most of the time
+       the answer is code, not commentary. */
+    ASTRAL_C_EXPLAIN = 4
 } astral_c_option;
 
 /* Emit compilable C for the functions at these addresses. Caller frees. */

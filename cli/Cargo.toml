@@ -1,0 +1,23 @@
+[package]
+name = "astral-cli"
+version = "0.1.0"
+edition = "2021"
+description = "The astral command: decompile, inspect, learn, and update"
+
+# One program, not three. The terminal interface and the update command are
+# modules of this binary rather than siblings found on PATH.
+[[bin]]
+name = "astral"
+path = "src/main.rs"
+
+[dependencies]
+astral = { path = "../bindings/rust" }
+astral-tui = { path = "../tui" }
+
+[profile.release]
+opt-level = 2
+# The C++ core is linked by the platform linker, which is older than this
+# toolchain's LLVM. Plain object code rather than bitcode keeps the two from
+# having to agree on an intermediate format.
+lto = false
+codegen-units = 1

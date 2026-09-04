@@ -108,6 +108,8 @@ if [ "$uninstall" -eq 1 ]; then
         "$prefix/bin/astral-tui" \
         "$prefix/bin/astral-update" \
         "$prefix/bin/astral-sleigh"
+    # The last three were separate programs in earlier releases; they are named
+    # here so an upgrade from one of those leaves nothing behind.
     echo "removed. Anything you taught it is still in ${ASTRAL_HOME:-$HOME/.astral}"
     exit 0
 fi
@@ -142,7 +144,7 @@ cat <<REPORT
 
 Astral is installed in $prefix
 
-  programs   $prefix/bin/astral, astral-tui, astral-update, astral-sleigh
+  program    $prefix/bin/astral
   headers    $prefix/include/astral
   libraries  $prefix/lib/astral/dynamic-libs
              $prefix/lib/astral/static-libs

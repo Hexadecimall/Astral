@@ -73,6 +73,8 @@ unsigned COptions::to_flags() const
         flags |= ASTRAL_C_INCLUDE_RUNTIME;
     if (!comments)
         flags |= ASTRAL_C_NO_COMMENTS;
+    if (explain)
+        flags |= ASTRAL_C_EXPLAIN;
     return flags;
 }
 

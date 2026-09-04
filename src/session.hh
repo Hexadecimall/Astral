@@ -94,7 +94,7 @@ public:
 
     // Decompiles each address and renders them as one compilable C file.
     bool emit_c(const std::vector<uint64_t> &addresses, bool self_contained, bool comments,
-                std::string &out, std::string &error);
+                bool explain, std::string &out, std::string &error);
 
     // Addresses of every function symbol the loader recovered.
     std::vector<uint64_t> function_addresses() const;

@@ -17,6 +17,9 @@ struct CEmitOptions {
     bool self_contained = true;
     // Keep the decompiler's warning comments.
     bool comments = true;
+    // Say which names Astral chose and why. Off, because most of the time the
+    // answer is code, not commentary.
+    bool explain = false;
 };
 
 // Fills in c_code_real and signature_real: the same function written in C that

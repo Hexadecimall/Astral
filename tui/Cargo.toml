@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal UI for the Astral decompiler"
 
+[lib]
+name = "astral_tui"
+path = "src/lib.rs"
+# A plain Rust library: the astral command depends on this crate directly, so
+# the interface is part of that binary rather than a second program.
+crate-type = ["rlib"]
+
 [[bin]]
 name = "astral-tui"
 path = "src/main.rs"
@@ -15,3 +22,5 @@ astral = { path = "../bindings/rust" }
 
 [profile.release]
 opt-level = 2
+lto = false
+codegen-units = 1

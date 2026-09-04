@@ -611,7 +611,8 @@ char *emit_c_impl(astral_program *program, const std::vector<uint64_t> &addresse
     std::string text, error;
     const bool self_contained = (options & ASTRAL_C_INCLUDE_RUNTIME) == 0;
     const bool comments = (options & ASTRAL_C_NO_COMMENTS) == 0;
-    if (!program->session->emit_c(addresses, self_contained, comments, text, error)) {
+    const bool explain = (options & ASTRAL_C_EXPLAIN) != 0;
+    if (!program->session->emit_c(addresses, self_contained, comments, explain, text, error)) {
         set_error(error);
         return nullptr;
     }

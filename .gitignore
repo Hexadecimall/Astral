@@ -1,6 +1,7 @@
 # Build output
 build/
 build-*/
+cli/target/
 tui/target/
 examples/rust/target/
 target/

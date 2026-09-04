@@ -71,6 +71,7 @@ set(ASTRAL_LIB_SRC
     ${KNOWLEDGE_EMBEDDED}
     src/knowledge.cc
     src/naming.cc
+    src/paths.cc
     src/contribute.cc
     src/source_learn.cc
     src/creal.cc
@@ -89,10 +90,12 @@ add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${ASTRAL_DECOMP_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+# No path is written into the library. Where things are is worked out while
+# running, so a binary never names the machine that built it and never breaks
+# when an install is moved.
 target_compile_definitions(astral_objs PRIVATE
     ASTRAL_VERSION="${PROJECT_VERSION}"
-    ASTRAL_GHIDRA_VERSION="${ASTRAL_GHIDRA_VERSION}"
-    ASTRAL_DEFAULT_SPEC_ROOT="${CMAKE_INSTALL_PREFIX}/share/astral/specs")
+    ASTRAL_GHIDRA_VERSION="${ASTRAL_GHIDRA_VERSION}")
 target_link_libraries(astral_objs PUBLIC ZLIB::ZLIB)
 
 add_library(astral_static STATIC
@@ -117,43 +120,57 @@ target_include_directories(astral_shared INTERFACE
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(astral_shared PUBLIC ZLIB::ZLIB)
 
-# ---------------------------------------------------------------- tools
-add_executable(astral-sleigh tools/sleighc_main.cc)
-target_link_libraries(astral-sleigh PRIVATE astral_static)
-target_include_directories(astral-sleigh PRIVATE ${ASTRAL_DECOMP_DIR})
-
-add_executable(astral tools/astral_main.cc)
-target_link_libraries(astral PRIVATE astral_static)
-target_compile_definitions(astral PRIVATE
-    ASTRAL_VERSION="${PROJECT_VERSION}"
-    ASTRAL_GHIDRA_VERSION="${ASTRAL_GHIDRA_VERSION}")
-
-add_executable(astral-update tools/update_main.cc)
-target_compile_definitions(astral-update PRIVATE
-    ASTRAL_VERSION="${PROJECT_VERSION}"
-    ASTRAL_GHIDRA_VERSION="${ASTRAL_GHIDRA_VERSION}"
-    ASTRAL_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}"
-    ASTRAL_INSTALL_ROOT="${CMAKE_INSTALL_PREFIX}")
-
-# ------------------------------------------------------------------- interface
+# ---------------------------------------------------------------- the command
 #
-# The terminal interface is a Rust program built on the same library, so the
-# library itself never gains a terminal dependency. It is optional: without
-# cargo the rest of Astral still builds.
+# One program. The command line, the terminal interface, the updater and the
+# specification compiler are all modules of a single Rust binary that links the
+# library in; letting the Rust toolchain perform the final link is what makes
+# that possible, since the platform linker cannot read the objects it produces.
 find_program(CARGO_EXECUTABLE cargo)
-option(ASTRAL_BUILD_TUI "Build the terminal interface (needs cargo)" ON)
+option(ASTRAL_BUILD_TUI "Build the astral command (needs cargo)" ON)
+
+set(ASTRAL_CLI_BUILT ${CMAKE_CURRENT_SOURCE_DIR}/cli/target/release/astral)
+set(ASTRAL_CLI ${CMAKE_BINARY_DIR}/astral)
+
+# Rust records the file each panic could come from, which would otherwise write
+# the build machine's home directory into every shipped binary. These rewrite
+# those roots to neutral names; the separator is the unit character cargo reads
+# CARGO_ENCODED_RUSTFLAGS with, so a directory containing a space still works.
+string(ASCII 31 _rustflag_separator)
+set(_remap "--remap-path-prefix=${CMAKE_CURRENT_SOURCE_DIR}=/astral")
+foreach(_root CARGO_HOME RUSTUP_HOME HOME)
+    if(DEFINED ENV{${_root}})
+        string(TOLOWER ${_root} _name)
+        string(APPEND _remap
+               "${_rustflag_separator}--remap-path-prefix=$ENV{${_root}}=/${_name}")
+    endif()
+endforeach()
 
 if(ASTRAL_BUILD_TUI AND CARGO_EXECUTABLE)
-    set(TUI_BINARY ${CMAKE_CURRENT_SOURCE_DIR}/tui/target/release/astral-tui)
-    add_custom_target(astral-tui ALL
+    file(GLOB_RECURSE CLI_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/*.rs
+        ${CMAKE_CURRENT_SOURCE_DIR}/tui/src/*.rs
+        ${CMAKE_CURRENT_SOURCE_DIR}/bindings/rust/src/*.rs)
+    add_custom_command(OUTPUT ${ASTRAL_CLI}
         COMMAND ${CMAKE_COMMAND} -E env ASTRAL_LIB_DIR=$<TARGET_FILE_DIR:astral_static>
+                "CARGO_ENCODED_RUSTFLAGS=${_remap}"
                 ${CARGO_EXECUTABLE} build --release --quiet
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tui
-        DEPENDS astral_static
-        COMMENT "building the terminal interface")
-    install(PROGRAMS ${TUI_BINARY} DESTINATION bin)
-elseif(ASTRAL_BUILD_TUI)
-    message(STATUS "cargo not found: the terminal interface will not be built")
+        # Beside the libraries as well, so a build tree can be used in place.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ASTRAL_CLI_BUILT} ${ASTRAL_CLI}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/cli
+        DEPENDS astral_static ${CLI_SOURCES}
+                ${CMAKE_CURRENT_SOURCE_DIR}/cli/Cargo.toml
+                ${CMAKE_CURRENT_SOURCE_DIR}/tui/Cargo.toml
+                ${CMAKE_CURRENT_SOURCE_DIR}/bindings/rust/Cargo.toml
+                ${CMAKE_CURRENT_SOURCE_DIR}/bindings/rust/build.rs
+        COMMENT "building the astral command")
+    add_custom_target(astral_cli ALL DEPENDS ${ASTRAL_CLI})
+elseif(NOT CARGO_EXECUTABLE)
+    message(STATUS "cargo was not found: the astral command cannot be built, "
+                   "so this build produces only the libraries and headers")
+else()
+    message(STATUS "ASTRAL_BUILD_TUI is off: the astral command will not be built, "
+                   "so this build produces only the libraries and headers")
 endif()
 
 # ---------------------------------------------------------------- sleigh specs
@@ -190,11 +207,14 @@ foreach(_proc ${ASTRAL_LANGUAGES})
         COMMAND ${CMAKE_COMMAND} -E touch ${_stamp}
         DEPENDS ${_spec_files}
         COMMENT "staging ${_proc} language files")
+    if(NOT TARGET astral_cli)
+        continue()
+    endif()
     foreach(_ss ${_slaspecs})
         string(REPLACE ".slaspec" ".sla" _sla ${_ss})
         add_custom_command(OUTPUT ${_dst}/${_sla}
-            COMMAND astral-sleigh ${_dst}/${_ss} ${_dst}/${_sla}
-            DEPENDS ${_stamp} astral-sleigh
+            COMMAND ${ASTRAL_CLI} sleigh ${_dst}/${_ss} ${_dst}/${_sla}
+            DEPENDS ${_stamp} astral_cli
             COMMENT "sleigh ${_proc}/${_ss}")
         list(APPEND _all_sla ${_dst}/${_sla})
     endforeach()
@@ -213,7 +233,9 @@ set(ASTRAL_STATIC_LIB_DIR lib/astral/static-libs CACHE STRING "where static libr
 
 install(TARGETS astral_static ARCHIVE DESTINATION ${ASTRAL_STATIC_LIB_DIR})
 install(TARGETS astral_shared LIBRARY DESTINATION ${ASTRAL_DYNAMIC_LIB_DIR})
-install(TARGETS astral-sleigh astral astral-update RUNTIME DESTINATION bin)
+if(ASTRAL_BUILD_TUI AND CARGO_EXECUTABLE)
+    install(PROGRAMS ${ASTRAL_CLI_BUILT} DESTINATION bin)
+endif()
 install(DIRECTORY include/astral DESTINATION include)
 install(DIRECTORY ${SPEC_STAGE}/ DESTINATION share/astral/specs
         PATTERN ".*" EXCLUDE)
