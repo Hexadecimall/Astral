@@ -1242,6 +1242,104 @@ std::string promote_buffers(const std::string &source)
     return out;
 }
 
+// The decompiler sometimes splits one character array into a buffer plus a
+// separate one-byte slot that holds its trailing NUL: `char buf[7]` next to
+// `xStack_21`, with `xStack_21 = 0` standing in for `buf[7] = 0`. The compiler
+// need not place them adjacently, so a strcmp over buf runs off the end and
+// faults. When a byte array used as a string is followed by a one-byte scalar
+// that is only ever set to zero, fold the scalar back into the array.
+std::string merge_string_terminators(const std::string &source)
+{
+    static const std::regex array_decl(
+        R"(^\s*(?:char|uint1|int1|byte|uchar|undefined1|xunknown1)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[\s*(\d+)\s*\]\s*;\s*$)");
+    static const std::regex scalar_decl(
+        R"(^\s*(?:char|uint1|int1|byte|uchar|undefined1|xunknown1)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$)");
+
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(source);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+
+    auto uses_as_string = [&](const std::string &name) {
+        // Passed through a char* cast, or to a string function.
+        const std::string cast = "(char *)" + name;
+        if (source.find(cast) != std::string::npos)
+            return true;
+        for (const char *fn : {"strcmp", "strncmp", "strcpy", "strncpy", "strcat",
+                               "strlen", "strstr", "puts"}) {
+            std::string call = std::string(fn) + "(";
+            size_t at = source.find(call);
+            while (at != std::string::npos) {
+                size_t close = source.find(')', at);
+                if (close != std::string::npos &&
+                    source.find(name, at) < close)
+                    return true;
+                at = source.find(call, at + 1);
+            }
+        }
+        return false;
+    };
+
+    auto count_word = [&](const std::string &name) {
+        size_t n = 0;
+        size_t at = source.find(name);
+        while (at != std::string::npos) {
+            bool left = at > 0 && (std::isalnum((unsigned char)source[at - 1]) || source[at - 1] == '_');
+            size_t end = at + name.size();
+            bool right = end < source.size() &&
+                         (std::isalnum((unsigned char)source[end]) || source[end] == '_');
+            if (!left && !right)
+                ++n;
+            at = source.find(name, at + 1);
+        }
+        return n;
+    };
+
+    bool changed = false;
+    for (size_t i = 0; i + 1 < lines.size(); ++i) {
+        std::smatch am, sm;
+        if (!std::regex_match(lines[i], am, array_decl))
+            continue;
+        if (!std::regex_match(lines[i + 1], sm, scalar_decl))
+            continue;
+        const std::string arr = am[1];
+        const int n = std::stoi(am[2]);
+        const std::string scalar = sm[1];
+        if (!uses_as_string(arr))
+            continue;
+        // The scalar must be a pure terminator: it appears only in its own
+        // declaration and in a single `scalar = 0;` assignment.
+        const std::string zero_assign = scalar + " = 0;";
+        if (source.find(zero_assign) == std::string::npos)
+            continue;
+        if (count_word(scalar) != 2) // the declaration and the one assignment
+            continue;
+
+        // Grow the array by one and move the terminator into it.
+        lines[i] = std::regex_replace(lines[i], std::regex("\\[\\s*" + am[2].str() + "\\s*\\]"),
+                                      "[" + std::to_string(n + 1) + "]");
+        lines.erase(lines.begin() + static_cast<long>(i) + 1);
+        changed = true;
+        // Rewrite the assignment wherever it is in the body.
+        for (std::string &line : lines) {
+            size_t at = line.find(zero_assign);
+            if (at != std::string::npos) {
+                line.replace(at, zero_assign.size(), arr + "[" + std::to_string(n) + "] = 0;");
+                break;
+            }
+        }
+    }
+    if (!changed)
+        return source;
+    std::string out;
+    for (const std::string &line : lines)
+        out += line + "\n";
+    return out;
+}
+
 void realize_c(FunctionResult &function)
 {
     function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
@@ -1256,6 +1354,7 @@ void realize_c(FunctionResult &function)
     // that are only ever used as byte buffers into real arrays.
     function.c_code_real = reduce_gotos(function.c_code_real);
     function.c_code_real = promote_buffers(function.c_code_real);
+    function.c_code_real = merge_string_terminators(function.c_code_real);
 }
 
 std::string unnamed_location_type(const std::string &name)
@@ -1418,11 +1517,27 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                         decl.erase(0, kw.size());
                     if (!decl.empty() && decl.back() == ';')
                         decl.pop_back();
-                    char value[32];
-                    std::snprintf(value, sizeof value, "0x%llxULL",
-                                  static_cast<unsigned long long>(init->second));
                     decl = standardize_types(decl, used_stdint);
-                    definitions.emplace(declaration.name, decl + " = " + value + ";");
+                    // A data pointer (T *name, but not a function pointer) held
+                    // the address of something in the original image; that
+                    // address is invalid in a rebuild, so a dereference faults -
+                    // this is what the stack-guard read hits. Point it at real
+                    // zeroed storage instead, so *name is valid and self-
+                    // consistent (the guard compares equal, buffers read zero).
+                    bool data_pointer = decl.find('*') != std::string::npos &&
+                                        decl.find("(*") == std::string::npos;
+                    if (data_pointer) {
+                        std::string backing = "BACK_" + declaration.name;
+                        definitions.emplace(
+                            declaration.name,
+                            "static unsigned char " + backing + "[64] = {0};\n" + decl +
+                                " = (void *)" + backing + ";");
+                    } else {
+                        char value[32];
+                        std::snprintf(value, sizeof value, "0x%llxULL",
+                                      static_cast<unsigned long long>(init->second));
+                        definitions.emplace(declaration.name, decl + " = " + value + ";");
+                    }
                     continue;
                 }
             }
