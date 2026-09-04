@@ -2,7 +2,7 @@
 
 mod app;
 mod events;
-mod highlight;
+pub mod highlight;
 mod layout;
 mod panes;
 mod theme;
@@ -521,4 +521,57 @@ fn run_selftest(
     }
     println!("ok");
     Ok(())
+}
+
+/// Colours a whole text for a terminal, using the same tokenisers and palette
+/// the interface uses, so `astral decompile` on a tty reads the way the Code
+/// workspace does. Block comments carry across lines. Every line is closed
+/// with a reset, so a pager that cuts a line short never bleeds a colour into
+/// the next.
+pub fn ansi(syntax: highlight::Syntax, text: &str) -> String {
+    let theme = theme::Theme { color: true };
+    let mut out = String::with_capacity(text.len() * 2);
+    let mut in_block = false;
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(body) => (body, "\n"),
+            None => (line, ""),
+        };
+        let (tokens, still_open) = highlight::line(syntax, body, in_block);
+        in_block = still_open;
+        let mut coloured = false;
+        for (kind, range) in tokens {
+            let style = theme.syntax(kind);
+            if style == ratatui::style::Style::default() {
+                if coloured {
+                    out.push_str("\x1b[0m");
+                    coloured = false;
+                }
+            } else {
+                out.push_str(&sgr(style));
+                coloured = true;
+            }
+            out.push_str(&body[range]);
+        }
+        if coloured {
+            out.push_str("\x1b[0m");
+        }
+        out.push_str(newline);
+    }
+    out
+}
+
+/// C source, coloured.
+pub fn ansi_c(text: &str) -> String {
+    ansi(highlight::Syntax::C, text)
+}
+
+/// A disassembly listing, coloured.
+pub fn ansi_assembly(text: &str) -> String {
+    ansi(highlight::Syntax::Assembly, text)
+}
+
+/// A p-code listing, coloured.
+pub fn ansi_pcode(text: &str) -> String {
+    ansi(highlight::Syntax::Pcode, text)
 }
