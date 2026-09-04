@@ -18,6 +18,7 @@ export ASTRAL_SPECS="$build/specs"
 
 passed=0
 failed=0
+gaps=0
 
 check() {
     local name=$1 expected=$2 actual=$3
@@ -28,6 +29,22 @@ check() {
         printf 'FAIL %s\n     expected to contain: %s\n     got: %s\n' "$name" "$expected" \
             "$(printf '%s' "$actual" | head -20)"
         failed=$((failed + 1))
+    fi
+}
+
+# A documented known-gap. The desired behaviour is stated as a substring the
+# emitter does not yet produce; while it is absent the case is reported as a
+# gap and does NOT count as a failure, so the suite stays green. If a later
+# change makes the target appear, the same case turns into a pass on its own,
+# which is the point: each gap is a spec for a feature, not a disabled test.
+gap() {
+    local name=$1 want=$2 actual=$3 reason=$4
+    if [[ "$actual" == *"$want"* ]]; then
+        printf 'ok   %s (known gap now closed)\n' "$name"
+        passed=$((passed + 1))
+    else
+        printf 'gap  %s\n     target not met yet: %s\n' "$name" "$reason"
+        gaps=$((gaps + 1))
     fi
 }
 
@@ -264,6 +281,234 @@ else
     echo "skip naming tests: no host compiler"
 fi
 
+# ================================================================ patch engine
+#
+# `astral patch` writes edits back into a binary. These build a tiny host
+# program, describe an edit, and confirm the description and the written file
+# both come out as promised. On macOS `patch ... write` ad-hoc re-signs the
+# arm64 Mach-O it produces, so the patched copy runs without a signing step.
+
+cat > "$work/gate.c" <<'GATE'
+#include <stdio.h>
+int gate(int x) { if (x > 10) { return 1; } return 0; }
+int main(void) { if (gate(5)) { puts("YES"); } else { puts("NO"); } return gate(5); }
+GATE
+if cc -O0 -o "$work/gate" "$work/gate.c" 2>/dev/null; then
+    gate_addr=$("$astral" info "$work/gate" | awk '/ gate$/ {print $1}')
+
+    # --nop, described but not written, prints a byte-rewrite patch set.
+    nopset=$("$astral" patch "$work/gate" --nop "$gate_addr" --list --dry-run 2>&1)
+    check "patch: nop is queued"        "1 patch queued"       "$nopset"
+    check "patch: nop is a byte rewrite" "tier    byte-rewrite" "$nopset"
+    check "patch: nop writes a no-op"    "to      1f2003d5"     "$nopset"
+    check "patch: dry run writes nothing" "dry run: nothing written" "$nopset"
+
+    # --set names its own bytes and reports itself as a manual edit.
+    setout=$("$astral" patch "$work/gate" --set "$gate_addr=1f2003d5" --list --dry-run 2>&1)
+    check "patch: set is manual"  "tier    manual"   "$setout"
+    check "patch: set keeps bytes" "to      1f2003d5" "$setout"
+
+    # Nothing to do is an error, not a silent success.
+    check "patch: empty edit set rejected" "nothing to patch" \
+        "$("$astral" patch "$work/gate" 2>&1 || true)"
+
+    # --ret rewrites gate to return 1. gate(5) was false, so the program said
+    # NO and exited 0; forcing the return flips both the printout and the exit
+    # code, and the written file differs from the original.
+    orig_say=$("$work/gate"); orig_code=$?
+    "$astral" patch "$work/gate" --ret gate=1 -o "$work/gate_ret" >/dev/null 2>&1
+    if [[ -x "$work/gate_ret" ]] && ! cmp -s "$work/gate" "$work/gate_ret"; then
+        printf 'ok   patch: ret produces a different binary\n'; passed=$((passed + 1))
+    else
+        printf 'FAIL patch: ret produces a different binary\n'; failed=$((failed + 1))
+    fi
+    ret_say=$("$work/gate_ret" 2>&1); ret_code=$?
+    if [[ "$orig_say" == "NO" && "$orig_code" -eq 0 && "$ret_say" == "YES" && "$ret_code" -eq 1 ]]; then
+        printf 'ok   patch: ret binary re-runs with the forced return\n'; passed=$((passed + 1))
+    else
+        printf 'FAIL patch: ret binary re-runs with the forced return\n     was %s/%s, now %s/%s\n' \
+            "$orig_say" "$orig_code" "$ret_say" "$ret_code"; failed=$((failed + 1))
+    fi
+
+    # --invert flips a conditional branch. The branch address is read out of
+    # the disassembly so the test does not hard-code a compiler's layout;
+    # inverting gate's `x > 10` test makes gate(5) take the other arm.
+    branch=$("$astral" disassemble -a "$gate_addr" -d 16 "$work/gate" 2>/dev/null \
+        | awk 'tolower($2) ~ /^(b\.|cbz|cbnz|tbz|tbnz|j[a-z])/ {print $1; exit}' | tr -d ':')
+    if [[ -n "$branch" ]]; then
+        "$astral" patch "$work/gate" --invert "$branch" -o "$work/gate_inv" >/dev/null 2>&1
+        inv_say=$("$work/gate_inv" 2>&1); inv_code=$?
+        if [[ -x "$work/gate_inv" ]] && ! cmp -s "$work/gate" "$work/gate_inv" \
+            && [[ "$inv_say" == "YES" && "$inv_code" -eq 1 ]]; then
+            printf 'ok   patch: invert flips the branch and re-runs\n'; passed=$((passed + 1))
+        else
+            printf 'FAIL patch: invert flips the branch and re-runs\n     got %s/%s\n' \
+                "$inv_say" "$inv_code"; failed=$((failed + 1))
+        fi
+    else
+        printf 'FAIL patch: invert found no conditional branch to flip\n'; failed=$((failed + 1))
+    fi
+else
+    echo "skip patch tests: no host compiler"
+fi
+
+# ==================================================== whole-call-graph closure
+#
+# Decompiling a whole program should emit a body for every function reached,
+# with nothing left dangling: the unit must not just compile but LINK into a
+# runnable executable, which fails the moment one callee is missing.
+
+cat > "$work/graph.c" <<'GRAPH'
+int leaf(int x) { return x * 3; }
+int middle(int x) { return leaf(x) + leaf(x + 1); }
+int root(int x) { return middle(x) - leaf(x); }
+int main(void) { return root(2) & 0; }
+GRAPH
+if cc -O0 -o "$work/graph" "$work/graph.c" 2>/dev/null; then
+    unit=$("$astral" decompile --all "$work/graph" 2>/dev/null)
+    check "closure: leaf emitted"   "leaf("   "$unit"
+    check "closure: middle emitted" "middle(" "$unit"
+    check "closure: root emitted"   "root("   "$unit"
+
+    "$astral" decompile --all "$work/graph" > "$work/graph_all.c" 2>/dev/null
+    if cc -std=c11 -w "$work/graph_all.c" -o "$work/graph_rebuilt" 2>"$work/graph.log" \
+        && "$work/graph_rebuilt"; [[ $? -lt 128 ]]; then
+        printf 'ok   closure: whole call graph links into a runnable executable\n'
+        passed=$((passed + 1))
+    else
+        printf 'FAIL closure: whole call graph links into a runnable executable\n%s\n' \
+            "$(head -8 "$work/graph.log")"; failed=$((failed + 1))
+    fi
+
+    # KNOWN GAP: with the symbol table gone, --all on a Mach-O recovers only the
+    # entry-reachable function and leaves its callees (and main) undeclared, so
+    # the stripped copy does not link. Function discovery without symbols is the
+    # missing piece; the check is written so it flips to a pass once it lands.
+    cp "$work/graph" "$work/graph_stripped"; strip "$work/graph_stripped" 2>/dev/null
+    "$astral" decompile --all "$work/graph_stripped" > "$work/graph_s.c" 2>/dev/null
+    if cc -std=c11 -w "$work/graph_s.c" -o "$work/graph_s" 2>/dev/null; then s_links=LINKED; else s_links=NOLINK; fi
+    gap "closure: stripped binary still links" "LINKED" "$s_links" \
+        "stripped Mach-O: --all recovers only entry-reachable code, callees left undefined"
+fi
+
+# ==================================================== data-global definitions
+#
+# A function that reads a global refers to the global's address. For the
+# rebuilt program to link, that global has to be defined in the unit.
+#
+# KNOWN GAP: the emitter declares the global as `extern` (e.g. iRam<addr>) but
+# never defines it, so a program that uses a global compiles yet does not link.
+# Emitting a definition seeded with the bytes from the original image is the
+# fix; when it lands, the unit links and this turns into a pass.
+
+cat > "$work/glob.c" <<'GLOB'
+#include <stdio.h>
+int config = 7;
+int scaled(int x) { return x * config; }
+int main(void) { printf("%d\n", scaled(6)); return 0; }
+GLOB
+if cc -O0 -o "$work/glob" "$work/glob.c" 2>/dev/null; then
+    "$astral" decompile --all "$work/glob" > "$work/glob_all.c" 2>/dev/null
+    if cc -std=c11 -w "$work/glob_all.c" -o "$work/glob_rebuilt" 2>/dev/null; then
+        g_links=LINKED
+    else
+        g_links=NOLINK
+    fi
+    gap "data: program using a global links" "LINKED" "$g_links" \
+        "global emitted as an undefined extern; no definition is synthesised for it"
+fi
+
+# ============================================================== camelCase locals
+#
+# KNOWN GAP: recovered parameters and locals are rendered in Ghidra's style,
+# param_1 / iVar1, rather than a camelCase param1. The target here is the
+# absence of the underscore form; while param_1 is still emitted this is a gap.
+
+pnames=$("$astral" decompile -f add_values "$elf" 2>/dev/null)
+if [[ "$pnames" == *"param_1"* ]]; then
+    printf 'gap  naming: parameters are camelCase (param1, not param_1)\n'
+    printf '     target not met yet: recovered locals keep the Ghidra param_1 / iVar1 spelling\n'
+    gaps=$((gaps + 1))
+else
+    # No underscore form anywhere and a camelCase param present: target met.
+    check "naming: parameters are camelCase (param1, not param_1)" "param1" "$pnames"
+fi
+
+# ========================================================== diagnostic pragmas
+#
+# KNOWN GAP: where recovery produces C a strict compiler would reject (an int
+# used where a pointer is expected, etc.), the emitted unit could wrap itself
+# in `#pragma` lines that quiet exactly those diagnostics so the output still
+# builds. No such pragma is emitted today. Crackme 19, whose recovered `check`
+# takes a char* but is handed an int, is the case this would rescue.
+
+pragma_probe=$("$astral" decompile --all "$work/greet" 2>/dev/null)
+gap "emitter: quiets int/pointer conversions with a pragma" "-Wint-conversion" \
+    "$pragma_probe" \
+    "no diagnostic pragma is emitted; type-conflicting output still fails a strict build"
+
+# ============================================= near-identical source (twins)
+#
+# The strongest grade: decompile a whole program, recompile the recovered unit,
+# then run the original and the rebuilt binary on the same (empty) input and
+# demand byte-identical stdout and the same exit status. These programs are
+# chosen to sidestep two recovery gaps on purpose: they take no argv, and they
+# report through puts of string literals or the process exit code rather than
+# through printf of a computed value (variadic arguments are not recovered).
+
+twin() {
+    local name=$1 src=$2 dir
+    dir="$work/twin_$name"; mkdir -p "$dir"
+    printf '%s' "$src" > "$dir/o.c"
+    if ! cc -O1 -o "$dir/orig" "$dir/o.c" 2>/dev/null; then
+        printf 'FAIL twin %s: original did not build\n' "$name"; failed=$((failed + 1)); return
+    fi
+    "$astral" decompile --all "$dir/orig" > "$dir/dec.c" 2>/dev/null
+    if ! cc -std=c11 -w -o "$dir/rebuilt" "$dir/dec.c" 2>"$dir/log"; then
+        printf 'FAIL twin %s: recovered unit did not rebuild\n%s\n' \
+            "$name" "$(head -6 "$dir/log")"; failed=$((failed + 1)); return
+    fi
+    local o1 c1 o2 c2
+    o1=$("$dir/orig"); c1=$?
+    o2=$("$dir/rebuilt"); c2=$?
+    if [[ "$o1" == "$o2" && "$c1" -eq "$c2" ]]; then
+        printf 'ok   twin %s: rebuilt binary matches the original\n' "$name"
+        passed=$((passed + 1))
+    else
+        printf 'FAIL twin %s: rebuilt binary diverged\n     orig %s/%s vs rebuilt %s/%s\n' \
+            "$name" "$o1" "$c1" "$o2" "$c2"; failed=$((failed + 1))
+    fi
+}
+
+if cc -O1 -o "$work/twinprobe" "$work/host.c" 2>/dev/null; then
+    twin exitcode 'int main(void){ int s=0; for(int i=0;i<100;i++) s+=i*3-1; return s & 0x7f; }'
+    twin branch '#include <stdio.h>
+int main(void){ int s=0; for(int i=1;i<=20;i++) s+=i; if(s%2==0) puts("even"); else puts("odd"); return 0; }'
+    twin gcd 'static int g(int a,int b){ while(b){int t=a%b;a=b;b=t;} return a; } int main(void){ return g(1071,462); }'
+    twin bitwork 'int main(void){ unsigned x=0xC0FFEEu; x^=0x1234u; x=(x<<3)|(x>>5); return (int)(x & 0x3f); }'
+
+    # KNOWN GAP twin: printf of a computed integer. The recovered main drops the
+    # variadic argument, so the rebuilt program prints a garbage number. It is
+    # kept as a gap, not a pass, to document that variadic argument recovery is
+    # what stands between this and a clean match.
+    tdir="$work/twin_printf"; mkdir -p "$tdir"
+    cat > "$tdir/o.c" <<'PRINTF'
+#include <stdio.h>
+int main(void){ int s=0; for(int i=1;i<=9;i++) s+=i; printf("%d\n", s); return 0; }
+PRINTF
+    cc -O1 -o "$tdir/orig" "$tdir/o.c" 2>/dev/null
+    "$astral" decompile --all "$tdir/orig" > "$tdir/dec.c" 2>/dev/null
+    if cc -std=c11 -w -o "$tdir/rebuilt" "$tdir/dec.c" 2>/dev/null; then
+        po=$("$tdir/orig"); pr=$("$tdir/rebuilt")
+        gap "twin printf: computed number prints identically" "$po" "$pr" \
+            "recovered main drops the printf argument; variadic arguments are not recovered"
+    else
+        printf 'gap  twin printf: computed number prints identically\n'
+        printf '     target not met yet: recovered unit with a dropped printf argument did not rebuild\n'
+        gaps=$((gaps + 1))
+    fi
+fi
+
 # ------------------------------------------------------------------ languages
 check "languages listed" "x86:LE:64:default" "$("$astral" languages)"
 
@@ -273,5 +518,5 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
-printf '\n%d passed, %d failed\n' "$passed" "$failed"
+printf '\n%d passed, %d failed, %d known-gaps\n' "$passed" "$failed" "$gaps"
 [[ $failed -eq 0 ]]

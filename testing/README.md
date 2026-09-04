@@ -54,6 +54,24 @@ The failures are worth reading, because each names a real limit:
   `char *` but passes an integer at one call site, which modern compilers
   reject outright.
 
+Which level lands in which bucket, so the report can be read without a
+re-run. The ten that behave are 01, 03, 07, 08, 10, 11, 13, 14, 15 and 17.
+The ten that do not each hit one of the limits above:
+
+- **Reading absolute addresses** — 02, 04, 05, 06, 09, 12, 16, 18, 20. Each
+  recovered `check` dereferences an address from the original image (a
+  `wanted[]` table, an xor key, a substitution map). Level 02 reads
+  `*(char *)(i + 0x10000054c)`, the address its `orbit` string sat at; the
+  rebuilt program has nothing there, so it reads garbage and rejects the key.
+  The others fault outright on the unmapped address. This is one gap, not
+  nine: emitting the bytes a function reads would close all of them, and it is
+  the same target as the `data:` and stripped-`closure:` gaps in
+  `tests/run_tests.sh`. The harness is behaving correctly here — it drives the
+  recovered `check` directly; the miss is in the emitter, so the assertions are
+  left as they are rather than weakened.
+- **Types that disagree** — 19, which does not compile at all, for the reason
+  above.
+
 ## Adding to it
 
 Keep a level self-checking and self-contained: standard C, no dependencies
