@@ -64,6 +64,7 @@ std::string to_identifier(const std::string &demangled)
         }
         s.push_back(demangled[i++]);
     }
+    s = map_operators(s); // before <> stripping, so operator<< survives
     s = strip_groups(s, '<', '>');
     s = strip_groups(s, '(', ')');
     // Drop trailing cv/ref/exception qualifiers left after removing the args.
@@ -79,21 +80,30 @@ std::string to_identifier(const std::string &demangled)
     // The inline versioning namespace is noise.
     for (size_t at = s.find("__1::"); at != std::string::npos; at = s.find("__1::"))
         s.erase(at, 5);
-    s = map_operators(s);
-    // Whatever is left becomes a valid identifier.
+    // Whatever is left becomes a camelCase identifier: split on non-alnum runs,
+    // lower-case the first word, capitalise the rest.
     std::string id;
+    bool boundary = false;
+    bool first = true;
     for (char c : s) {
-        if (std::isalnum(static_cast<unsigned char>(c)))
-            id.push_back(c);
-        else if (!id.empty() && id.back() != '_')
-            id.push_back('_');
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            if (first) {
+                id.push_back(static_cast<char>(std::tolower((unsigned char)c)));
+                first = false;
+            } else if (boundary) {
+                id.push_back(static_cast<char>(std::toupper((unsigned char)c)));
+            } else {
+                id.push_back(c);
+            }
+            boundary = false;
+        } else {
+            boundary = true;
+        }
     }
-    while (!id.empty() && id.back() == '_')
-        id.pop_back();
     if (id.empty())
         return std::string();
     if (std::isdigit(static_cast<unsigned char>(id[0])))
-        id.insert(id.begin(), '_');
+        id.insert(id.begin(), 'v');
     return id;
 }
 

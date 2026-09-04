@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <map>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -1519,12 +1520,68 @@ void tidy_names(std::string &out)
 {
     struct Rule { std::regex re; std::string rep; };
     static const std::vector<Rule> rules = {
-        {std::regex(R"(\b[A-Za-z]{1,4}Ram0*([0-9A-Fa-f]+)\b)"), "g_$1"},
-        {std::regex(R"(\bfunc_0x0*([0-9A-Fa-f]+)\b)"), "sub_$1"},
-        {std::regex(R"(\b(?:code_r|joined_r)0x0*([0-9A-Fa-f]+)\b)"), "L_$1"},
+        {std::regex(R"(\b[A-Za-z]{1,4}Ram0*([0-9A-Fa-f]+)\b)"), "g$1"},
+        {std::regex(R"(\bfunc_0x0*([0-9A-Fa-f]+)\b)"), "sub$1"},
+        {std::regex(R"(\b(?:code_r|joined_r)0x0*([0-9A-Fa-f]+)\b)"), "loc$1"},
+        {std::regex(R"(\bDAT_0*([0-9A-Fa-f]+)\b)"), "dat$1"},
     };
     for (const Rule &r : rules)
         out = std::regex_replace(out, r.re, r.rep);
+}
+
+// Whether the bytes at the start form a printable, NUL-terminated C string.
+bool looks_like_string(const std::vector<uint8_t> &b, size_t &length_out)
+{
+    size_t i = 0;
+    for (; i < b.size(); ++i) {
+        uint8_t c = b[i];
+        if (c == 0)
+            break;
+        if (c != '\n' && c != '\t' && c != '\r' && (c < 0x20 || c > 0x7e))
+            return false;
+    }
+    if (i == 0 || i >= b.size() || b[i] != 0)
+        return false; // empty, or no terminator within the window
+    length_out = i;
+    return true;
+}
+
+// A readable name for a string constant, from its own text: "arg1" -> s_arg1,
+// "Crackme EZ\n" -> s_crackme_ez.
+std::string string_slug(const std::vector<uint8_t> &b, size_t len)
+{
+    std::string slug = "s";
+    bool boundary = true; // first alnum after the 's' is capitalised
+    for (size_t i = 0; i < len && slug.size() < 32; ++i) {
+        char c = static_cast<char>(b[i]);
+        if (std::isalnum(static_cast<unsigned char>(c))) {
+            slug.push_back(boundary ? static_cast<char>(std::toupper((unsigned char)c))
+                                    : static_cast<char>(std::tolower((unsigned char)c)));
+            boundary = false;
+        } else {
+            boundary = true;
+        }
+    }
+    return slug.size() > 1 ? slug : std::string();
+}
+
+// The C source form of a string literal, escaped.
+std::string c_string_literal(const std::vector<uint8_t> &b, size_t len)
+{
+    std::string out = "\"";
+    for (size_t i = 0; i < len; ++i) {
+        uint8_t c = b[i];
+        switch (c) {
+        case '\n': out += "\\n"; break;
+        case '\t': out += "\\t"; break;
+        case '\r': out += "\\r"; break;
+        case '\"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        default: out.push_back(static_cast<char>(c));
+        }
+    }
+    out.push_back('\"');
+    return out;
 }
 
 void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t, uint64_t>> &code,
@@ -1574,17 +1631,34 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
             size = 1;
         std::vector<uint8_t> bytes(size, 0);
         image.read(a, bytes.data(), bytes.size());
-        char name[32];
-        std::snprintf(name, sizeof name, "DAT_%llx", static_cast<unsigned long long>(a));
-        defs << "static unsigned char " << name << "[" << size << "] = {";
-        for (size_t b = 0; b < bytes.size(); ++b) {
-            if (b % 16 == 0)
-                defs << "\n  ";
-            char byte[8];
-            std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
-            defs << byte;
+        char name[40];
+        // A referenced constant that is really a C string is emitted as a named
+        // string literal, so the source reads sArg1 = \"arg1\" rather than a wall
+        // of bytes. Anything else stays a byte array (camelCase datNNN).
+        size_t slen = 0;
+        std::string slug;
+        if (looks_like_string(bytes, slen))
+            slug = string_slug(bytes, slen);
+        if (!slug.empty()) {
+            static std::map<std::string, int> used_slugs;
+            int &n = used_slugs[slug];
+            std::string sname = n == 0 ? slug : slug + std::to_string(n + 1);
+            ++n;
+            std::snprintf(name, sizeof name, "%s", sname.c_str());
+            defs << "static const char " << name << "[] = " << c_string_literal(bytes, slen)
+                 << ";\n";
+        } else {
+            std::snprintf(name, sizeof name, "dat%llx", static_cast<unsigned long long>(a));
+            defs << "static unsigned char " << name << "[" << size << "] = {";
+            for (size_t b = 0; b < bytes.size(); ++b) {
+                if (b % 16 == 0)
+                    defs << "\n  ";
+                char byte[8];
+                std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
+                defs << byte;
+            }
+            defs << "\n};\n";
         }
-        defs << "\n};\n";
         // Rewrite every use of the literal to the array (it decays to a pointer).
         char literal[24];
         std::snprintf(literal, sizeof literal, "0x%llx", static_cast<unsigned long long>(a));
@@ -1627,6 +1701,23 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     std::set<uint64_t> entries(image_.entry_points.begin(), image_.entry_points.end());
     auto name_for = [&](uint64_t addr) { return entries.count(addr) ? std::string("main")
                                                                     : std::string(); };
+    // A call into the C++ standard library or the language runtime is a library
+    // call, not the program's own code. It is left as an external declaration
+    // rather than decompiled, the way a call to printf is - otherwise a small
+    // program drags in thousands of lines of std::string and iostream.
+    std::map<uint64_t, std::string> sym_names;
+    for (const Symbol &sym : image_.symbols)
+        if (!sym.name.empty())
+            sym_names.emplace(sym.address, sym.name);
+    auto is_library = [&](uint64_t addr) {
+        auto it = sym_names.find(addr);
+        if (it == sym_names.end())
+            return false;
+        const std::string &n = it->second;
+        return n.rfind("std", 0) == 0 || n.rfind("__", 0) == 0 ||
+               n.rfind("operator", 0) == 0 || n.rfind("_GLOBAL", 0) == 0 ||
+               n.find("cxx") != std::string::npos;
+    };
     auto in_code = [&](uint64_t addr) {
         for (const Segment &seg : image_.segments)
             if (seg.executable && addr >= seg.address && addr < seg.address + seg.size)
@@ -1662,7 +1753,8 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
             continue;
         }
         for (uint64_t callee : probe.callees)
-            if (callee != 0 && !discovered.count(callee) && !imports.count(callee) && in_code(callee))
+            if (callee != 0 && !discovered.count(callee) && !imports.count(callee) &&
+                in_code(callee) && !is_library(callee))
                 worklist.push_back(callee);
     }
     if (discovered.empty()) {
