@@ -126,6 +126,16 @@ public:
     // architecture's no-op. A recognised structural edit (tier byte-rewrite).
     bool patch_nop(uint64_t address, int instruction_count, std::string &error);
 
+    // Inverts the conditional branch at `address` (b.cond, cbz/cbnz, tbz/tbnz
+    // on arm64; the Jcc family on x86-64), so the path it guards is taken when
+    // it was not and the other way round. A recognised structural edit.
+    bool patch_invert_branch(uint64_t address, std::string &error);
+
+    // Overwrites the start of the function at `address` so it does nothing but
+    // return `value`. Enough of the prologue is replaced to hold the two
+    // instructions; the rest becomes unreachable.
+    bool patch_return(uint64_t address, uint64_t value, std::string &error);
+
     // The original file with every accumulated patch applied, written to
     // `out_path`. Re-reads the source file, so the original must still be on
     // disk at image().path.

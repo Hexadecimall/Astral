@@ -503,6 +503,16 @@ impl Program {
         check(unsafe { sys::astral_program_patch_nop(self.handle, address, count as c_int) })
     }
 
+    /// Queues inverting the conditional branch at `address`.
+    pub fn patch_invert(&mut self, address: u64) -> Result<()> {
+        check(unsafe { sys::astral_program_patch_invert(self.handle, address) })
+    }
+
+    /// Queues overwriting the function at `address` so it only returns `value`.
+    pub fn patch_return(&mut self, address: u64, value: u64) -> Result<()> {
+        check(unsafe { sys::astral_program_patch_return(self.handle, address, value) })
+    }
+
     /// How many patches are queued.
     pub fn patch_count(&self) -> usize {
         unsafe { sys::astral_program_patch_count(self.handle) }

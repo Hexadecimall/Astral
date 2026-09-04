@@ -400,6 +400,28 @@ astral_status astral_program_patch_nop(astral_program *program, uint64_t address
     return ASTRAL_OK;
 }
 
+astral_status astral_program_patch_invert(astral_program *program, uint64_t address)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_invert_branch(address, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_patch_return(astral_program *program, uint64_t address, uint64_t value)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_return(address, value, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
 size_t astral_program_patch_count(astral_program *program)
 {
     return program == nullptr ? 0 : program->session->patches().size();

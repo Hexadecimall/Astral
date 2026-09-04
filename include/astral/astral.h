@@ -247,6 +247,13 @@ ASTRAL_API astral_status astral_program_patch_bytes(astral_program *program, uin
 ASTRAL_API astral_status astral_program_patch_nop(astral_program *program, uint64_t address,
                                                   int count);
 
+/* Queue inverting the conditional branch at `address`. */
+ASTRAL_API astral_status astral_program_patch_invert(astral_program *program, uint64_t address);
+
+/* Queue overwriting the function at `address` so it only returns `value`. */
+ASTRAL_API astral_status astral_program_patch_return(astral_program *program, uint64_t address,
+                                                     uint64_t value);
+
 /* How many patches are queued. */
 ASTRAL_API size_t astral_program_patch_count(astral_program *program);
 /* Drop the most recently queued patch. */

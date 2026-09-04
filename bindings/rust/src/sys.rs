@@ -181,6 +181,12 @@ extern "C" {
         address: u64,
         count: c_int,
     ) -> c_int;
+    pub fn astral_program_patch_invert(program: *mut astral_program, address: u64) -> c_int;
+    pub fn astral_program_patch_return(
+        program: *mut astral_program,
+        address: u64,
+        value: u64,
+    ) -> c_int;
     pub fn astral_program_patch_count(program: *mut astral_program) -> usize;
     pub fn astral_program_patch_undo(program: *mut astral_program);
     pub fn astral_program_patch_clear(program: *mut astral_program);

@@ -15,6 +15,8 @@ use crate::out::{error, paint, print, tint, Stream};
 enum Edit {
     Nop { at: String, count: usize },
     Bytes { at: String, hex: String },
+    Invert { at: String },
+    Return { at: String, value: u64 },
 }
 
 struct Args {
@@ -70,6 +72,10 @@ pub fn run(arguments: &[String]) -> i32 {
                     .map_err(|e| e.to_string()),
                 (Err(e), _) | (_, Err(e)) => Err(e),
             },
+            Edit::Invert { at } => resolve(&program, at)
+                .and_then(|addr| program.patch_invert(addr).map_err(|e| e.to_string())),
+            Edit::Return { at, value } => resolve(&program, at)
+                .and_then(|addr| program.patch_return(addr, *value).map_err(|e| e.to_string())),
         };
         if let Err(message) = outcome {
             error(&message);
@@ -269,6 +275,37 @@ fn parse(arguments: &[String]) -> Result<Args, i32> {
                     hex: hex.to_string(),
                 });
             }
+            "--invert" => {
+                let Some(spec) = it.next() else {
+                    error("--invert needs an address");
+                    return Err(2);
+                };
+                args.edits.push(Edit::Invert { at: spec.clone() });
+            }
+            "--ret" => {
+                let Some(spec) = it.next() else {
+                    error("--ret needs an address, optionally =<value>");
+                    return Err(2);
+                };
+                let (at, value) = match spec.split_once('=') {
+                    Some((a, v)) => {
+                        let parsed = if let Some(h) = v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                            u64::from_str_radix(h, 16)
+                        } else {
+                            v.parse::<u64>()
+                        };
+                        match parsed {
+                            Ok(value) => (a.to_string(), value),
+                            Err(_) => {
+                                error(&format!("bad return value {v}"));
+                                return Err(2);
+                            }
+                        }
+                    }
+                    None => (spec.clone(), 0),
+                };
+                args.edits.push(Edit::Return { at, value });
+            }
             "--asm" => {
                 error("assembling instructions is not built yet; use --set <addr>=<hex> for now");
                 return Err(2);
@@ -313,7 +350,9 @@ pub fn usage(stream: Stream) -> i32 {
     w.write("usage: astral patch <binary> [edits] [output]\n\n");
     w.write("edits\n");
     w.write("  --nop <addr>[:<n>]      replace n instructions (default 1) with no-ops\n");
-    w.write("  --set <addr>=<hex>      write exact bytes, e.g. --set 0x1000=1f2003d5\n\n");
+    w.write("  --set <addr>=<hex>      write exact bytes, e.g. --set 0x1000=1f2003d5\n");
+    w.write("  --invert <addr>         flip a conditional branch (b.cond, cbz, jcc)\n");
+    w.write("  --ret <addr>[=<value>]  make the function at addr return value (default 0)\n\n");
     w.write("output\n");
     w.write("  -o, --output <path>     write the patched binary here\n");
     w.write("  --in-place              overwrite the original (keeps a .bak)\n");

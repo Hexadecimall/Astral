@@ -710,6 +710,82 @@ bool Session::patch_nop(uint64_t address, int instruction_count, std::string &er
                                               : "no-op instructions", error);
 }
 
+bool Session::patch_invert_branch(uint64_t address, std::string &error)
+{
+    std::vector<uint8_t> insn(4);
+    if (image_.read(address, insn.data(), 4) < 4) {
+        error = "cannot read the branch instruction";
+        return false;
+    }
+    bool arm = archid_.find("AARCH64") != std::string::npos;
+    bool x86 = archid_.find("x86") != std::string::npos;
+    if (arm) {
+        uint32_t w = uint32_t(insn[0]) | (uint32_t(insn[1]) << 8) | (uint32_t(insn[2]) << 16) |
+                     (uint32_t(insn[3]) << 24);
+        // B.cond: 0101010 0 imm19 0 cond -> flip the low bit of the condition.
+        if ((w & 0xff000010u) == 0x54000000u) {
+            w ^= 1u;
+        }
+        // CBZ/CBNZ: sf 011010 op imm19 Rt -> flip bit 24 (op).
+        else if ((w & 0x7e000000u) == 0x34000000u) {
+            w ^= (1u << 24);
+        }
+        // TBZ/TBNZ: b5 011011 op b40 imm14 Rt -> flip bit 24 (op).
+        else if ((w & 0x7e000000u) == 0x36000000u) {
+            w ^= (1u << 24);
+        } else {
+            error = "not a conditional branch at that address";
+            return false;
+        }
+        std::vector<uint8_t> out = {uint8_t(w), uint8_t(w >> 8), uint8_t(w >> 16), uint8_t(w >> 24)};
+        return patch_bytes(address, out, PatchTier::ByteRewrite, "invert branch", error);
+    }
+    if (x86) {
+        // Short Jcc: 0x70-0x7f, invert by flipping bit 0 of the opcode.
+        if (insn[0] >= 0x70 && insn[0] <= 0x7f) {
+            std::vector<uint8_t> out = {uint8_t(insn[0] ^ 1u)};
+            return patch_bytes(address, out, PatchTier::ByteRewrite, "invert branch", error);
+        }
+        // Near Jcc: 0x0f 0x80-0x8f.
+        if (insn[0] == 0x0f && insn[1] >= 0x80 && insn[1] <= 0x8f) {
+            std::vector<uint8_t> out = {0x0f, uint8_t(insn[1] ^ 1u)};
+            return patch_bytes(address, out, PatchTier::ByteRewrite, "invert branch", error);
+        }
+        error = "not a conditional jump at that address";
+        return false;
+    }
+    error = "inverting branches is not built in for this architecture yet";
+    return false;
+}
+
+bool Session::patch_return(uint64_t address, uint64_t value, std::string &error)
+{
+    bool arm = archid_.find("AARCH64") != std::string::npos;
+    bool x86 = archid_.find("x86") != std::string::npos;
+    if (arm) {
+        if (value > 0xffff) {
+            error = "arm64 return shortcut supports values up to 0xffff";
+            return false;
+        }
+        // movz w0, #value ; ret
+        uint32_t movz = 0x52800000u | (uint32_t(value & 0xffff) << 5);
+        uint32_t ret = 0xd65f03c0u;
+        std::vector<uint8_t> out = {
+            uint8_t(movz), uint8_t(movz >> 8), uint8_t(movz >> 16), uint8_t(movz >> 24),
+            uint8_t(ret),  uint8_t(ret >> 8),  uint8_t(ret >> 16),  uint8_t(ret >> 24)};
+        return patch_bytes(address, out, PatchTier::ByteRewrite, "return a constant", error);
+    }
+    if (x86) {
+        // mov eax, imm32 ; ret
+        uint32_t v = uint32_t(value);
+        std::vector<uint8_t> out = {0xb8, uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16),
+                                    uint8_t(v >> 24), 0xc3};
+        return patch_bytes(address, out, PatchTier::ByteRewrite, "return a constant", error);
+    }
+    error = "the return shortcut is not built in for this architecture yet";
+    return false;
+}
+
 bool Session::write_patched(const std::string &out_path, std::string &error) const
 {
     if (image_.path.empty()) {
