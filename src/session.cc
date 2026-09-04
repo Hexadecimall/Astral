@@ -933,13 +933,19 @@ Session::collect_vararg_overrides(void *funcdata)
             pieces.intypes.push_back(t);
             pieces.innames.emplace_back();
         }
-        pieces.firstVarArgSlot = -1;
+        pieces.firstVarArgSlot = fixed; // args past the fixed ones are variadic
         try {
             // Exactly as Ghidra's own prototype override: internal storage, no
             // input lock, so the surrounding register analysis is not disturbed.
             ghidra::FuncProto *proto = new ghidra::FuncProto();
             proto->setInternal(pieces.model, tVoid);
             proto->setPieces(pieces);
+            // The pieces are laid out as varargs so the model places the
+            // arguments past the format on the stack, the way Apple's ABI does.
+            // Then this is marked non-variadic, so parameter recovery treats
+            // those stack slots as committed arguments and traces their values,
+            // rather than skipping straight to the model and dropping them.
+            proto->setDotdotdot(false);
             overrides.emplace_back(op->getAddr(), proto);
         } catch (ghidra::LowlevelError &) {
         }
