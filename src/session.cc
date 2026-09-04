@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <vector>
@@ -1382,6 +1383,22 @@ namespace {
 // program links but faults. This defines each referenced data address as a real
 // C array (the bytes for read-only data, zero for .bss the code fills itself)
 // and rewrites the address to point at that array, so the rebuilt program runs.
+// Replaces the decompiler's long address-encoded names with short, conventional
+// ones, so the source reads the way a person writes it: pxRam0000000100004130
+// becomes g_100004130, func_0x000100000e5c becomes sub_e5c, and a goto label
+// code_r0x000100000758 becomes L_758. Whole-token, so every use stays in step.
+void tidy_names(std::string &out)
+{
+    struct Rule { std::regex re; std::string rep; };
+    static const std::vector<Rule> rules = {
+        {std::regex(R"(\b[A-Za-z]{1,4}Ram0*([0-9A-Fa-f]+)\b)"), "g_$1"},
+        {std::regex(R"(\bfunc_0x0*([0-9A-Fa-f]+)\b)"), "sub_$1"},
+        {std::regex(R"(\b(?:code_r|joined_r)0x0*([0-9A-Fa-f]+)\b)"), "L_$1"},
+    };
+    for (const Rule &r : rules)
+        out = std::regex_replace(out, r.re, r.rep);
+}
+
 void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t, uint64_t>> &code,
                         std::string &out)
 {
@@ -1574,6 +1591,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     for (const FunctionResult &r : results)
         code_ranges.emplace_back(r.address, r.address + (r.size == 0 ? 1 : r.size));
     emit_absolute_data(image_, code_ranges, out);
+    tidy_names(out);
     return true;
 }
 
