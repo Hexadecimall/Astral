@@ -1429,6 +1429,64 @@ std::string scope_declarations(const std::string &source)
     return out;
 }
 
+// Eliminates a local that only aliases another value: ppcStack20 = argv, used
+// thereafter as ppcStack20, is replaced by argv itself. Applies when the local
+// is assigned exactly once, from a bare identifier that is never reassigned, so
+// the substitution changes nothing but the reading.
+std::regex decl_line(const std::string &name)
+{
+    return std::regex("^\\s+[A-Za-z_][A-Za-z0-9_ ]*[ ]\\*{0,3}" + name + "\\s*;\\s*\\n",
+                      std::regex::multiline);
+}
+
+std::string copy_propagate(const std::string &source)
+{
+    // Collect declared local names from the top declaration block.
+    static const std::regex decl(R"(^\s+[A-Za-z_][A-Za-z0-9_ ]*[ ]\*{0,3}([A-Za-z_][A-Za-z0-9_]*)\s*;\s*$)");
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(source);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+    auto assign_count = [&](const std::string &name) {
+        std::regex a("\\b" + name + "\\s*=[^=]");
+        int n = 0;
+        for (const std::string &l : lines) {
+            for (auto it = std::sregex_iterator(l.begin(), l.end(), a);
+                 it != std::sregex_iterator(); ++it)
+                ++n;
+        }
+        return n;
+    };
+    std::string out = source;
+    bool any = false;
+    for (const std::string &line : lines) {
+        std::smatch m;
+        if (!std::regex_match(line, m, decl))
+            continue;
+        const std::string x = m[1].str();
+        if (assign_count(x) != 1)
+            continue;
+        // Find the single `x = R;` and require R to be one identifier.
+        std::smatch am;
+        std::regex assign("\\b" + x + "\\s*=\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*;");
+        if (!std::regex_search(out, am, assign))
+            continue;
+        const std::string r = am[1].str();
+        if (r == x || assign_count(r) != 0)
+            continue; // R must never be reassigned
+        // Drop the declaration and the assignment, then substitute x -> r.
+        out = std::regex_replace(out, decl_line(x), "");
+        out = std::regex_replace(out, std::regex("^\\s*" + x + "\\s*=\\s*" + r + "\\s*;\\s*\\n",
+                                                 std::regex::multiline), "");
+        out = std::regex_replace(out, std::regex("\\b" + x + "\\b"), r);
+        any = true;
+    }
+    return any ? out : source;
+}
+
 void realize_c(FunctionResult &function)
 {
     function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
@@ -1444,6 +1502,7 @@ void realize_c(FunctionResult &function)
     function.c_code_real = reduce_gotos(function.c_code_real);
     function.c_code_real = promote_buffers(function.c_code_real);
     function.c_code_real = merge_string_terminators(function.c_code_real);
+    function.c_code_real = copy_propagate(function.c_code_real);
     function.c_code_real = scope_declarations(function.c_code_real);
 }
 
