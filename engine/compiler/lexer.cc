@@ -1,5 +1,6 @@
 #include "lexer.hh"
 
+#include <cstdint>
 #include <cstdlib>
 
 namespace astral_internal {

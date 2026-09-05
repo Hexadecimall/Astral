@@ -1,8 +1,10 @@
 #include "image.hh"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace astral_internal {
 

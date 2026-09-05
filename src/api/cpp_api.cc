@@ -1,6 +1,7 @@
 // The C++ interface, compiled into the library so consumers need only -lAstral.
 #include "astral/astral.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 
 namespace astral {

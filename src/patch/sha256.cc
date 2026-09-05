@@ -1,5 +1,6 @@
 #include "sha256.hh"
 
+#include <cstdint>
 #include <cstring>
 
 namespace {

@@ -11,10 +11,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <map>
 #include <set>
 #include <regex>
 #include <sstream>
+#include <utility>
 
 namespace astral_internal {
 namespace {

@@ -1,5 +1,6 @@
 #include "patch.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

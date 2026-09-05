@@ -1,11 +1,13 @@
 #ifndef ASTRAL_KNOWLEDGE_HH
 #define ASTRAL_KNOWLEDGE_HH
 
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <mutex>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace astral_internal {

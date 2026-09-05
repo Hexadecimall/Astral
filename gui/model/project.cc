@@ -11,6 +11,7 @@
 #include <QTextStream>
 
 #include <algorithm>
+#include <utility>
 
 namespace astral::gui {
 namespace {

@@ -4,6 +4,7 @@
 #define ASTRAL_GUI_TABLEPANE_HH
 
 #include <QWidget>
+#include <vector>
 
 class QLineEdit;
 class QSortFilterProxyModel;

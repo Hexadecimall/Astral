@@ -9,6 +9,7 @@
 #include "parser.hh"
 #include "sema.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>

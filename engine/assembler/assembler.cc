@@ -2,6 +2,7 @@
 #include "text.hh"
 
 #include <algorithm>
+#include <cstdint>
 
 namespace astral_internal {
 namespace assembler {

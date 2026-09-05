@@ -8,6 +8,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QVBoxLayout>
+#include <algorithm>
 
 namespace astral::gui {
 

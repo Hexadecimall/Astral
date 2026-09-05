@@ -2,7 +2,10 @@
 // actually needs: the mapped image, the entry point, and function symbols.
 #include "image.hh"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <utility>
 
 namespace astral_internal {
 namespace {

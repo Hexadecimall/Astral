@@ -15,6 +15,7 @@
 #include "memstate.hh"
 #include "translate.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <sstream>
 #include <cstring>

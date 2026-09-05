@@ -12,6 +12,7 @@
 #include "ast.hh"
 #include "compiler.hh"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 

@@ -1,7 +1,10 @@
 // PE/COFF reader: sections, entry point, export table and import thunk names.
 #include "image.hh"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <utility>
 
 namespace astral_internal {
 namespace {

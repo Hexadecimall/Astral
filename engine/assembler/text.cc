@@ -1,6 +1,7 @@
 #include "text.hh"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
 

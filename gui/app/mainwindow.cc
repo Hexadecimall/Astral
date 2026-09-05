@@ -55,6 +55,7 @@
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace astral::gui {
 namespace {

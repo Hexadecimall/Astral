@@ -6,6 +6,7 @@
 // so it is asked for as well and checked for any trace of the reading spellings.
 #include "astral/astral.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <cstdlib>

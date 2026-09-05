@@ -10,12 +10,15 @@
 #include "session.hh"
 #include "source_learn.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
+#include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace astral_internal;

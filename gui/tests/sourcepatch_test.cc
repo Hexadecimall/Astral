@@ -38,7 +38,9 @@ private:
 namespace {
 
 const char *const kSubject = R"(#include <stdio.h>
+#include <cstdint>
 #include <string.h>
+#include <utility>
 int check(const char *key) { return strcmp(key, "astral") == 0; }
 
 int main(int argc, char **argv) {

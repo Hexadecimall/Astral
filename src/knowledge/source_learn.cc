@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <set>
@@ -22,6 +24,7 @@
 
 #include <dirent.h>
 #include <sys/stat.h>
+#include <utility>
 
 namespace astral_internal {
 namespace {

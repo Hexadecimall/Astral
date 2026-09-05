@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStringList>
+#include <utility>
 
 namespace astral::gui {
 

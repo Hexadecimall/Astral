@@ -1,6 +1,7 @@
 // Finding things at run time.
 #include "paths.hh"
 
+#include <cstdint>
 #include <cstdlib>
 #include <sys/stat.h>
 #include <vector>

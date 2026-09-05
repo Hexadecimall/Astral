@@ -15,6 +15,7 @@
 #include <QPushButton>
 #include <QShortcut>
 #include <QVBoxLayout>
+#include <utility>
 
 namespace astral::gui {
 

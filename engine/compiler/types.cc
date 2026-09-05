@@ -9,6 +9,8 @@
 #include "ast.hh"
 
 #include <algorithm>
+#include <cstdint>
+#include <utility>
 
 namespace astral_internal {
 namespace compiler {

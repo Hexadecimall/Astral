@@ -7,6 +7,7 @@
 #include <QStandardItemModel>
 #include <QTreeView>
 #include <QVBoxLayout>
+#include <vector>
 
 namespace astral::gui {
 

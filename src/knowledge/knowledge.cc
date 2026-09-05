@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include <sys/stat.h>

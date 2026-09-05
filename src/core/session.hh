@@ -4,6 +4,7 @@
 #include "image.hh"
 #include "patch.hh"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -218,6 +219,10 @@ private:
     const std::map<std::string, GlobalSymbol> &globals() const;
     std::string apply_naming(void *funcdata, FunctionResult &out);
     void print_function(void *funcdata, std::string &listing, std::string &readable);
+    // Whether the readable listing is worth producing. Emitting compilable C
+    // walks the whole reachable call graph and never looks at the readable
+    // form, so producing it there is work nobody asked for.
+    bool want_readable_ = true;
     void analyse_function(void *funcdata, FunctionResult &out);
     void apply_learned_names();
     void apply_known_prototype(const std::string &name);

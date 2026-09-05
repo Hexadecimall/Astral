@@ -4,6 +4,8 @@
 #include "format_finish.hh"
 #include "macho_sign.hh"
 
+#include <cstdint>
+#include <cstring>
 #include <sys/stat.h>
 
 #include "assembler.hh"
@@ -1451,6 +1453,11 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
     arch_->print->docFunction(fd);
     listing = code.str();
 
+    if (!want_readable_) {
+        readable.clear();
+        return;
+    }
+
     ghidra::registerAstralPrintLanguage();
     const std::string chosen = arch_->print->getName();
     std::ostringstream pretty;
@@ -2405,6 +2412,16 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         error = "no functions to emit";
         return false;
     }
+    // Emitting compilable C walks everything the named functions reach, and
+    // none of it is ever read in its readable form. Producing that form for
+    // each one doubles the printing for nothing, which is felt on a whole
+    // program. It is restored however this returns.
+    struct ReadableOff {
+        bool *flag;
+        bool was;
+        ~ReadableOff() { *flag = was; }
+    } readable_off{&want_readable_, want_readable_};
+    want_readable_ = false;
     // Addresses that name a library import, so a call to one is left as an
     // external declaration rather than decompiled into a stub body.
     std::set<uint64_t> imports;

@@ -23,6 +23,7 @@
 #include "codegen.hh"
 
 #include <algorithm>
+#include <cstdint>
 #include <sstream>
 
 namespace astral_internal {

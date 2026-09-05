@@ -4,6 +4,7 @@
 #include "parser.hh"
 #include "sema.hh"
 
+#include <cstdint>
 #include <map>
 
 namespace astral_internal {

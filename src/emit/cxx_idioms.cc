@@ -18,11 +18,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <map>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace astral_internal {

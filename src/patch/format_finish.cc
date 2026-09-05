@@ -1,6 +1,7 @@
 #include "format_finish.hh"
 
 #include "macho_sign.hh"
+#include <cstdint>
 
 namespace astral_internal {
 namespace {

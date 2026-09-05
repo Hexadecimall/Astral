@@ -1,5 +1,6 @@
 #include "parser.hh"
 
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <map>

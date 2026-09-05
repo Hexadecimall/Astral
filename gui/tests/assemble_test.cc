@@ -33,6 +33,7 @@ namespace {
 
 const char *kSource = R"(
 #include <string.h>
+#include <utility>
 int check(const char *key) { return strcmp(key, "astral") == 0; }
 int main(int argc, char **argv) { return argc == 2 ? check(argv[1]) : 2; }
 )";

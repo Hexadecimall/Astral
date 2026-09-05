@@ -1,7 +1,10 @@
 // Mach-O reader, including thin slice selection out of a universal binary.
 #include "image.hh"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace astral_internal {

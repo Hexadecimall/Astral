@@ -11,6 +11,7 @@
 #include "contribute.hh"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>

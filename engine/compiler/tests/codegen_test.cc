@@ -10,12 +10,14 @@
 #include "compiler/compiler.hh"
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 using namespace astral_internal;

@@ -2,6 +2,7 @@
 
 #include <QFont>
 #include <QFontDatabase>
+#include <utility>
 
 namespace astral::gui {
 

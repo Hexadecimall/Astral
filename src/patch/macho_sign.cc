@@ -2,6 +2,7 @@
 
 #include "sha256.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>

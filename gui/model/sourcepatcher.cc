@@ -6,6 +6,7 @@
 #include "compiler/compiler.hh"
 
 #include <QStringList>
+#include <cstdint>
 
 namespace astral::gui {
 

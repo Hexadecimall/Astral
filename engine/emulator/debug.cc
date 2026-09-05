@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <map>
 #include <set>
 #include <sstream>
+#include <utility>
 
 namespace astral_internal {
 namespace emulator {

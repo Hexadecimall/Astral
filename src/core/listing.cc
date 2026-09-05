@@ -4,11 +4,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <set>
 #include <sstream>
+#include <utility>
 
 namespace astral_internal {
 namespace {

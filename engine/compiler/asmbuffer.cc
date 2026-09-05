@@ -7,8 +7,10 @@
 #include "asmbuffer.hh"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
+#include <utility>
 
 namespace astral_internal {
 namespace compiler {

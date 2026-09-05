@@ -18,6 +18,7 @@
 #include "ast.hh"
 #include "compiler.hh"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>

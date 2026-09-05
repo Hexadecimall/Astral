@@ -7,6 +7,7 @@
 #include <QtTest/QtTest>
 
 #include <astral/astral.hpp>
+#include <utility>
 
 using namespace astral::gui;
 

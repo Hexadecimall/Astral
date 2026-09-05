@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QRegularExpression>
 #include <QTextBlock>
+#include <cstdint>
 
 namespace astral::gui {
 

@@ -2,7 +2,9 @@
 #include "codegen.hh"
 
 #include <algorithm>
+#include <cstdint>
 #include <sstream>
+#include <utility>
 
 namespace astral_internal {
 namespace compiler {

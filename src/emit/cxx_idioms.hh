@@ -2,6 +2,7 @@
 // same thing: stream output becomes printf.
 #pragma once
 
+#include <iostream>
 #include <string>
 
 namespace astral_internal {
