@@ -3261,29 +3261,6 @@ int4 RuleMultiCollapse::applyOp(PcodeOp *op,Funcdata &data)
   for(int4 i=0;i<op->numInput();++i)	// Everything must be heritaged before collapse
     if (!op->getIn(i)->isHeritageKnown()) return 0;
 
-  // Every branch merging the same constant is that constant: two arms that
-  // both wrote `return 0` do not need a variable to carry it.
-  {
-    bool allSame = op->numInput() > 0;
-    Varnode *first = op->getIn(0);
-    for(int4 i=0;i<op->numInput() && allSame;++i) {
-      Varnode *vn = op->getIn(i);
-      if (!vn->isConstant() || vn->getSize() != first->getSize() || vn->getOffset() != first->getOffset())
-	allSame = false;
-    }
-    if (allSame && first->isConstant()) {
-      BlockBasic *bl = op->getParent();
-      Varnode *cvn = data.newConstant(first->getSize(),first->getOffset());
-      while(op->numInput() > 1)
-	data.opRemoveInput(op,op->numInput()-1);
-      data.opSetInput(op,cvn,0);
-      data.opSetOpcode(op,CPUI_COPY);
-      data.opUninsert(op);
-      data.opInsertBegin(op,bl);
-      return 1;
-    }
-  }
-
   func_eq = false;		// Start assuming absolute equality of branches
   nofunc = false;		// Functional equalities are initially allowed
   defcopyr = (Varnode *)0;
