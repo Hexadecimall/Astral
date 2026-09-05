@@ -127,6 +127,9 @@ public:
 
     // Whether to name placeholders from evidence. On by default.
     void set_auto_naming(bool on) { auto_naming_ = on; }
+    // Which back-end writes the readable listing: "nova" or "astral-c". An
+    // unknown name is kept and handed to the engine, which refuses it there.
+    void set_readable_language(const std::string &name);
     bool auto_naming() const { return auto_naming_; }
     // Hands one option command to the decompiler's option database. The
     // engine takes up to three parameters; which of them mean what is the
@@ -243,6 +246,10 @@ private:
     // walks the whole reachable call graph and never looks at the readable
     // form, so producing it there is work nobody asked for.
     bool want_readable_ = true;
+    // Which back-end writes the readable form. The pseudo-C listing is what
+    // --pseudo-c has always meant and is still the default; Nova is asked for
+    // by name, and any other registered name is passed through as given.
+    std::string readable_language_ = "astral-c";
     void analyse_function(void *funcdata, FunctionResult &out);
     // Puts the user's chosen names on this function's values and prints the
     // body again, so the names appear everywhere the values are used.

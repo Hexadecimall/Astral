@@ -429,11 +429,62 @@ void incremental_updates()
     }
 }
 
+// What the decompiler writes is what the compiler reads. These are the exact
+// texts `astral decompile --nova` produces for the test subject, kept here so
+// that a change to either end which parts them fails rather than passes.
+void what_the_decompiler_writes()
+{
+    std::printf("the listing the decompiler writes compiles again\n");
+    const char *emitted =
+        "func check(pointer: *char): bool {\n"
+        "  var result: i32 = strcmp(pointer, \"astral\");\n"
+        "  return (result == 0);\n"
+        "}\n";
+    {
+        std::vector<nova::Diagnostic> diagnostics;
+        bool ok = nova::check(emitted, diagnostics);
+        report(ok, "the emitted listing is accepted as Nova", diagnostics_text(diagnostics));
+    }
+    {
+        Arena arena;
+        nova::Result result;
+        void *code = build(arena, emitted, "the emitted listing compiles", &result);
+        if (code) {
+            auto check = reinterpret_cast<int (*)(const char *)>(code);
+            expect_equal(check("astral"), 1, "the recompiled listing accepts the right key");
+            expect_equal(check("wrong"), 0, "the recompiled listing refuses the wrong key");
+        }
+    }
+    // A listing full of the things a real one has: a global at an address, a
+    // frame slot, a label, and storage whose meaning was never worked out.
+    const char *harder =
+        "var globalCount: u32 @ 0x10000c0d0;\n"
+        "\n"
+        "func walk(items: *i32, count: i32): i32 {\n"
+        "  var total: i32 = 0;\n"
+        "  var index: i32 = 0;\n"
+        "again:\n"
+        "  if (index < count) {\n"
+        "    total = (total + items[index]);\n"
+        "    index = (index + 1);\n"
+        "    goto again;\n"
+        "  }\n"
+        "  return total;\n"
+        "}\n";
+    {
+        std::vector<nova::Diagnostic> diagnostics;
+        bool ok = nova::check(harder, diagnostics);
+        report(ok, "a listing with a global, a label and a goto is accepted",
+               diagnostics_text(diagnostics));
+    }
+}
+
 } // namespace
 
 int main()
 {
     every_level_runs();
+    what_the_decompiler_writes();
     language_features();
     refusals();
     incremental_updates();

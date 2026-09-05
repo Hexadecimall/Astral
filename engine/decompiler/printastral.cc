@@ -45,7 +45,7 @@ const TypeSpelling TYPE_SPELLINGS[] = {
 // The listing spelling of a type name, or the name itself when it already says
 // what it is (char, bool, void, code, and every type read from a program's own
 // debug information).
-string readableTypeName(const string &name)
+string spellTypeName(const string &name)
 
 {
   for(int4 i=0;i<(int4)(sizeof(TYPE_SPELLINGS)/sizeof(TypeSpelling));++i) {
@@ -190,10 +190,20 @@ string readableSymbolName(const string &name)
   return globalPlaceName(name);
 }
 
+} // namespace
+
+// Forwards to the table above, so PrintNova spells a type the same way the
+// readable listing does and the two can never drift apart.
+string PrintAstral::readableTypeName(const string &name)
+
+{
+  return spellTypeName(name);
+}
+
 // True when a cast between these two says nothing a reader needs: same width,
 // and both sides are plain integers whose only difference is how the bits are
 // read.
-bool castIsSilent(const Datatype *from,const Datatype *to)
+bool PrintAstral::castIsSilent(const Datatype *from,const Datatype *to)
 
 {
   if (from == (const Datatype *)0 || to == (const Datatype *)0) return false;
@@ -208,8 +218,6 @@ bool castIsSilent(const Datatype *from,const Datatype *to)
   if (from->isEnumType() || to->isEnumType()) return false;
   return true;
 }
-
-} // namespace
 
 PrintAstralCapability::PrintAstralCapability(void)
 

@@ -287,6 +287,80 @@ CHighlighter::CHighlighter(QTextDocument *document) : QSyntaxHighlighter(documen
     commentFormat_ = formatFor("token.comment");
 }
 
+// ------------------------------------------------------------------ Nova
+
+NovaHighlighter::NovaHighlighter(QTextDocument *document) : QSyntaxHighlighter(document)
+{
+    static const char *keywords[] = {
+        "func", "var", "val", "stack", "return", "if", "else", "while", "for", "in", "loop",
+        "break", "continue", "match", "or", "enum", "struct", "asm", "call", "import", "goto",
+        "label", "sizeof", "as", "do", "switch", "extern", "true", "false", "null"};
+    static const char *types[] = {
+        "void", "bool", "char", "byte", "code", "int", "uint", "isize", "usize",
+        "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128",
+        "f32", "f64", "f80", "f128", "unknown8", "unknown16", "unknown32", "unknown64",
+        "unk8", "unk16", "unk24", "unk32", "unk40", "unk48", "unk56", "unk64",
+        "size_t", "wchar16", "wchar32"};
+
+    QStringList kw, ty;
+    for (const char *k : keywords)
+        kw << QString::fromLatin1(k);
+    for (const char *t : types)
+        ty << QString::fromLatin1(t);
+
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b(%1)\\b").arg(kw.join(QLatin1Char('|')))),
+                      formatFor("token.keyword")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b(%1)\\b").arg(ty.join(QLatin1Char('|')))),
+                      formatFor("token.type")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()")),
+                      formatFor("token.function")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b(0x[0-9A-Fa-f]+|0b[01_]+|0o[0-7_]+|\\d[\\d_]*)\\b")),
+                      formatFor("token.number")});
+    // `@` says where a thing lives, and the place after it is the point of it.
+    rules_.push_back({QRegularExpression(QStringLiteral("@\\s*[-+]?[A-Za-z0-9_]+(@entry)?")),
+                      formatFor("token.global")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b(global|label|data|function)[0-9a-fA-F]{3,}\\b")),
+                      formatFor("token.global")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\\b(local|stack)[0-9a-fA-F]+\\b")),
+                      formatFor("token.parameter")});
+    rules_.push_back({QRegularExpression(QStringLiteral("\"(\\\\.|[^\"\\\\])*\"|'(\\\\.|[^'\\\\])'")),
+                      formatFor("token.string")});
+    rules_.push_back({QRegularExpression(QStringLiteral("^\\s*[A-Za-z_][A-Za-z0-9_]*:\\s*$")),
+                      formatFor("token.label")});
+    // Nova comments start at a `#` wherever it sits, and Nova reads C's too.
+    rules_.push_back({QRegularExpression(QStringLiteral("#[^\\n]*")), formatFor("token.comment")});
+    rules_.push_back({QRegularExpression(QStringLiteral("//[^\\n]*")), formatFor("token.comment")});
+
+    commentStart_ = QRegularExpression(QStringLiteral("/\\*"));
+    commentEnd_ = QRegularExpression(QStringLiteral("\\*/"));
+    commentFormat_ = formatFor("token.comment");
+}
+
+void NovaHighlighter::highlightBlock(const QString &text)
+{
+    for (const Rule &rule : rules_) {
+        auto it = rule.pattern.globalMatch(text);
+        while (it.hasNext()) {
+            const auto match = it.next();
+            setFormat(match.capturedStart(), match.capturedLength(), rule.format);
+        }
+    }
+    setCurrentBlockState(0);
+    int start = previousBlockState() == 1 ? 0 : text.indexOf(commentStart_);
+    while (start >= 0) {
+        const auto end = commentEnd_.match(text, start);
+        int length = 0;
+        if (end.hasMatch()) {
+            length = end.capturedEnd() - start;
+        } else {
+            setCurrentBlockState(1);
+            length = text.length() - start;
+        }
+        setFormat(start, length, commentFormat_);
+        start = text.indexOf(commentStart_, start + length);
+    }
+}
+
 void CHighlighter::highlightBlock(const QString &text)
 {
     for (const Rule &rule : rules_) {

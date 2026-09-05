@@ -53,7 +53,7 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
 
     code_ = new CodeView;
     code_->setEditable(true);
-    new CHighlighter(code_->document());
+    highlighter_ = new CHighlighter(code_->document());
     layout->addWidget(code_, 1);
 
     // A pill over the code while the engine works, so a slow function is
@@ -120,6 +120,14 @@ void DecompilerView::showFunction(const Decompiled &function)
 
 void DecompilerView::setPseudo(bool pseudo)
 {
+    if (pseudo != pseudo_ || highlighter_ == nullptr) {
+        // The listing pane reads Nova and the other reads C. Colouring one as
+        // the other is worse than not colouring it at all, so the highlighter
+        // follows what the pane is actually showing.
+        delete highlighter_;
+        highlighter_ = pseudo ? static_cast<QSyntaxHighlighter *>(new NovaHighlighter(code_->document()))
+                              : static_cast<QSyntaxHighlighter *>(new CHighlighter(code_->document()));
+    }
     pseudo_ = pseudo;
     // Both views are documents to work in. The engine's listing names types by
     // width, so patching from it usually needs those spellings replaced first;

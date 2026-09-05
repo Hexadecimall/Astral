@@ -13,7 +13,9 @@ namespace astral_internal {
 // Text in, text out. The printer decides what each thing is called; this
 // decides where it goes, which is a question about whole lines and so is
 // answered on the printed form, the way the compilable path already does it.
-std::string readable_listing(const std::string &source);
+// `nova` says the listing is Nova rather than pseudo-C, which changes what a
+// declaration looks like and lets an `else` join the brace that precedes it.
+std::string readable_listing(const std::string &source, bool nova = false);
 
 } // namespace astral_internal
 

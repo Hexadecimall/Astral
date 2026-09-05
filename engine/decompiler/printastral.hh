@@ -37,13 +37,17 @@ class PrintAstral : public PrintC {
   std::set<string> frameRegisters;	///< Registers whose entry value addresses the frame
   Datatype *charType;			///< Character type used to probe an address for text
   bool triedCharType;			///< Whether the character type has been looked up
-
+protected:
+  // Reachable by PrintNova, which shares the readable naming and adds Nova
+  // syntax on top of it.
   Datatype *getCharType(void);				///< The character type, looked up once
   bool isFrameBase(const Varnode *vn) const;		///< Is this the caller's frame register
   bool frameSlot(const Varnode *vn,int8 &off) const;	///< Does this value address a frame slot
   bool frameSlotOfOp(const PcodeOp *op,int8 &off) const;	///< Does this op form a frame address
   bool pushStringAt(uintb val,const Varnode *vn,const PcodeOp *op);	///< Push the text at an address
   string callContext(const PcodeOp *op,const Varnode *vn) const;	///< "ioctl:1" for a call argument
+  static bool castIsSilent(const Datatype *from,const Datatype *to);	///< Does a cast say nothing a reader needs
+  static string readableTypeName(const string &name);	///< The listing spelling of a type name
 public:
   PrintAstral(Architecture *g,const string &nm="astral-c");
   virtual ~PrintAstral(void) {}

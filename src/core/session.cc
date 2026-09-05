@@ -26,6 +26,7 @@
 #include "funcdata.hh"
 #include "libdecomp.hh"
 #include "printastral.hh"
+#include "printnova.hh"
 #include "printc.hh"
 #include "sleigh_arch.hh"
 #include "slgh_compile.hh"
@@ -1498,6 +1499,13 @@ void Session::collect_externals(FunctionResult &result, const void *funcdata) co
 }
 
 
+// The reader's language. "pseudo-c" is the name the setting uses for the
+// C-shaped listing; inside, that back-end is registered as "astral-c".
+void Session::set_readable_language(const std::string &name)
+{
+    readable_language_ = name == "pseudo-c" ? "astral-c" : name;
+}
+
 // Prints one function twice: once with the c-language printer, which is what
 // the compilable path is built from, and once with the readable one. Both come
 // from the same decompiled form, so the two never disagree about the code.
@@ -1515,17 +1523,21 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
     }
 
     ghidra::registerAstralPrintLanguage();
+    ghidra::registerNovaPrintLanguage();
     const std::string chosen = arch_->print->getName();
     std::ostringstream pretty;
     try {
-        arch_->setPrintLanguage("astral-c");
+        arch_->setPrintLanguage(readable_language_);
         // A printer just built carries the decompiler's defaults, not what
         // this session was configured with.
         if (!option_commands_.empty())
             replay_options();
         arch_->print->setOutputStream(&pretty);
         arch_->print->docFunction(fd);
-        readable = readable_listing(pretty.str());
+        // The layout pass names labels in order and moves declarations down to
+        // where the value is first given. Both are true of Nova as well, and
+        // Nova declarations are the ones it was taught to recognise.
+        readable = readable_listing(pretty.str(), readable_language_ == "nova");
     } catch (ghidra::LowlevelError &) {
         // Nothing readable came out, so the plain listing stands. The listing
         // the rest of the library uses was already taken.

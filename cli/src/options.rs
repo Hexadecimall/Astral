@@ -52,6 +52,10 @@ pub struct Options {
     pub all: bool,
     /// Ask for the decompiler's own listing rather than compilable C.
     pub pseudo_c: bool,
+    /// Which language the readable listing is written in, when a flag asked
+    /// for one. `None` leaves the setting alone, so the configuration file
+    /// and `--option readableLanguage=` still decide.
+    pub readable_language: Option<String>,
     pub tui: bool,
     pub why: bool,
     pub raw_names: bool,
@@ -87,6 +91,7 @@ impl Default for Options {
             raw: false,
             all: false,
             pseudo_c: false,
+            readable_language: None,
             tui: false,
             why: false,
             raw_names: false,
@@ -234,8 +239,25 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
             }
             // The one letter that differs: a listing for decompile, a p-code
             // count everywhere else.
-            "-p" if command == Command::Decompile => options.pseudo_c = true,
-            "--pseudo-c" => options.pseudo_c = true,
+            //
+            // Asking for the listing does not say what language to write it
+            // in. That is a setting, and it answers Nova unless it was told
+            // otherwise, so the two flags below are the way to override it for
+            // one command rather than the way to find out what it holds.
+            // Both ask for the readable listing; each also says which language
+            // to write it in, so neither depends on what the settings hold.
+            "-p" if command == Command::Decompile => {
+                options.pseudo_c = true;
+                options.readable_language = Some("pseudo-c".to_string());
+            }
+            "--pseudo-c" => {
+                options.pseudo_c = true;
+                options.readable_language = Some("pseudo-c".to_string());
+            }
+            "--nova" => {
+                options.pseudo_c = true;
+                options.readable_language = Some("nova".to_string());
+            }
             "-p" | "--pcode" => {
                 let text = value("--pcode", &mut index)?;
                 options.pcode = parse_count(&text);

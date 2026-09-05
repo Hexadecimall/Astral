@@ -165,6 +165,20 @@ std::vector<OptionDescriptor> build()
                            "Emit `#include <astral/decompiled.h>` instead of writing the "
                            "runtime declarations into the output."));
 
+    OptionDescriptor readable;
+    readable.name = "readableLanguage";
+    readable.group = "Output";
+    readable.label = "Read a program as";
+    readable.kind = OptionKind::Choice;
+    readable.scope = OptionScope::Emission;
+    readable.fallback = "nova";
+    readable.choices = {"nova", "pseudo-c"};
+    readable.explanation = "The language the readable listing is written in. Nova names "
+                           "what a thing is before its type, says where recovered storage "
+                           "lives, and is the language Astral compiles back to bytes; "
+                           "pseudo-c is the C-shaped listing that came before it.";
+    t.push_back(readable);
+
     OptionDescriptor view;
     view.name = "openView";
     view.group = "Output";

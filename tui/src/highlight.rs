@@ -46,6 +46,8 @@ pub type Token = (Kind, Range<usize>);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Syntax {
     C,
+    /// Nova: the language the decompiler writes for a person to read.
+    Nova,
     Assembly,
     Pcode,
     /// No tokenising: the whole line is one plain run.
@@ -59,7 +61,8 @@ pub enum Syntax {
 /// C tokeniser uses it.
 pub fn line(syntax: Syntax, text: &str, in_block: bool) -> (Vec<Token>, bool) {
     match syntax {
-        Syntax::C => c_line(text, in_block),
+        Syntax::C => c_line(text, in_block, false),
+        Syntax::Nova => c_line(text, in_block, true),
         Syntax::Assembly => (listing_line(text, false), false),
         Syntax::Pcode => (listing_line(text, true), false),
         Syntax::None => (vec![(Kind::Plain, 0..text.len())], false),
@@ -71,7 +74,13 @@ pub fn line(syntax: Syntax, text: &str, in_block: bool) -> (Vec<Token>, bool) {
 /// carry block-comment state across the lines above the viewport without
 /// tokenising them.
 pub fn c_opens_block(text: &str, in_block: bool) -> bool {
-    c_line(text, in_block).1
+    c_line(text, in_block, false).1
+}
+
+/// The same, for Nova. Nova reads C's block comments too, so the state has to
+/// be carried across lines exactly as it is for C.
+pub fn nova_opens_block(text: &str, in_block: bool) -> bool {
+    c_line(text, in_block, true).1
 }
 
 // ---- C -------------------------------------------------------------------
@@ -90,6 +99,39 @@ const C_TYPES: &[&str] = &[
 
 fn is_c_keyword(word: &str) -> bool {
     C_KEYWORDS.contains(&word)
+}
+
+/// Nova's own vocabulary. It shares most of C's shapes and almost none of its
+/// spellings, so the two lists are kept apart rather than merged: a word that
+/// means something in one language and nothing in the other should not be
+/// coloured as though it did.
+const NOVA_KEYWORDS: &[&str] = &[
+    "as", "asm", "break", "call", "continue", "do", "else", "enum", "extern", "false", "for",
+    "func", "goto", "if", "import", "in", "label", "loop", "match", "null", "or", "return",
+    "sizeof", "stack", "struct", "switch", "true", "val", "var", "while",
+];
+
+const NOVA_TYPES: &[&str] = &[
+    "bool", "byte", "char", "code", "isize", "usize", "int", "uint", "void",
+];
+
+fn is_nova_keyword(word: &str) -> bool {
+    NOVA_KEYWORDS.contains(&word)
+}
+
+/// Nova names a width in bits and says outright when it does not know what the
+/// bits mean. `unknown32` is a type; so is every width the listing spells.
+fn is_nova_type(word: &str) -> bool {
+    if NOVA_TYPES.contains(&word) || READABLE_TYPES.contains(&word) {
+        return true;
+    }
+    if word.ends_with("_t") && word.len() > 2 {
+        return true;
+    }
+    if let Some(rest) = word.strip_prefix("unknown") {
+        return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
 }
 
 /// Types the decompiler emits, on top of the language's own: `int4`, `uint8`,
@@ -121,7 +163,7 @@ const READABLE_TYPES: &[&str] = &[
     "unk32", "unk40", "unk48", "unk56", "unk64", "f32", "f64", "f80", "f128", "wchar16", "wchar32",
 ];
 
-fn c_line(text: &str, mut in_block: bool) -> (Vec<Token>, bool) {
+fn c_line(text: &str, mut in_block: bool, nova: bool) -> (Vec<Token>, bool) {
     let bytes = text.as_bytes();
     let mut out: Vec<Token> = Vec::new();
     let mut at = 0usize;
@@ -187,6 +229,12 @@ fn c_line(text: &str, mut in_block: bool) -> (Vec<Token>, bool) {
                 push(&mut out, &mut plain_from, Kind::Str, at..end);
                 at = end;
             }
+            // Nova comments run from a `#` to the end of the line, wherever
+            // the `#` sits. C's `#` only means anything at the start of one.
+            b'#' if nova => {
+                push(&mut out, &mut plain_from, Kind::Comment, at..bytes.len());
+                at = bytes.len();
+            }
             b'#' if text[..at].trim().is_empty() => {
                 let mut end = at + 1;
                 while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
@@ -195,6 +243,20 @@ fn c_line(text: &str, mut in_block: bool) -> (Vec<Token>, bool) {
                 }
                 preproc = true;
                 push(&mut out, &mut plain_from, Kind::Preproc, at..end);
+                at = end;
+            }
+            // `@` says where something lives, and what follows it is a place:
+            // a register, an address, or an offset into the frame.
+            b'@' if nova => {
+                let mut end = at + 1;
+                if bytes.get(end) == Some(&b'-') || bytes.get(end) == Some(&b'+') {
+                    end += 1;
+                }
+                while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
+                {
+                    end += 1;
+                }
+                push(&mut out, &mut plain_from, Kind::Register, at..end);
                 at = end;
             }
             b'0'..=b'9' => {
@@ -210,9 +272,9 @@ fn c_line(text: &str, mut in_block: bool) -> (Vec<Token>, bool) {
             _ if is_ident_start(byte) => {
                 let end = ident(bytes, at);
                 let word = &text[at..end];
-                let kind = if is_c_keyword(word) {
+                let kind = if if nova { is_nova_keyword(word) } else { is_c_keyword(word) } {
                     Kind::Keyword
-                } else if is_c_type(word) {
+                } else if if nova { is_nova_type(word) } else { is_c_type(word) } {
                     Kind::Type
                 } else if next_is_open_paren(bytes, end) {
                     Kind::Call

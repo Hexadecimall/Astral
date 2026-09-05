@@ -79,6 +79,28 @@ private:
     QTextCharFormat commentFormat_;
 };
 
+// Colours Nova: the language the decompiler writes for a person to read.
+// Nova shares C's brackets and almost none of its spellings, so it gets rules
+// of its own rather than a few extra words bolted onto the C ones.
+class NovaHighlighter : public QSyntaxHighlighter {
+    Q_OBJECT
+public:
+    explicit NovaHighlighter(QTextDocument *document);
+
+protected:
+    void highlightBlock(const QString &text) override;
+
+private:
+    struct Rule {
+        QRegularExpression pattern;
+        QTextCharFormat format;
+    };
+    std::vector<Rule> rules_;
+    QRegularExpression commentStart_;
+    QRegularExpression commentEnd_;
+    QTextCharFormat commentFormat_;
+};
+
 // Colours a disassembly listing: address, mnemonic, registers, numbers.
 class AsmHighlighter : public QSyntaxHighlighter {
     Q_OBJECT

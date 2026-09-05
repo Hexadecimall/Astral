@@ -50,6 +50,14 @@ fn open(options: &Options) -> Option<Opened> {
     if options.raw_names {
         program.set_auto_naming(false);
     }
+    // A flag naming the language the listing is read in stands over the stored
+    // setting, since it was asked for on this command line.
+    if let Some(language) = options.readable_language.as_deref() {
+        if let Err(failure) = program.set_setting("readableLanguage", language) {
+            library_error(&failure);
+            return None;
+        }
+    }
     Some(Opened {
         program,
         _library: library,
@@ -269,6 +277,23 @@ pub fn decompile(options: &Options) -> i32 {
     let colour = options.output.is_none() && stdout_colour(options.color);
     let paint_c = |text: String| if colour { astral_tui::ansi_c(&text) } else { text };
 
+    // The listing is coloured as the language it is actually in.
+    // The flag that asked for the listing said which language it is in; only
+    // when neither was given does the setting decide.
+    let readable_is_nova = match options.readable_language.as_deref() {
+        Some(name) => name == "nova",
+        None => program.setting("readableLanguage") == "nova",
+    };
+    let paint_readable = |text: String| {
+        if !colour {
+            text
+        } else if readable_is_nova {
+            astral_tui::ansi_nova(&text)
+        } else {
+            astral_tui::ansi_c(&text)
+        }
+    };
+
     let wanted = wanted_addresses(program, options);
     let mut code = 0;
     if wanted.is_empty() {
@@ -282,7 +307,7 @@ pub fn decompile(options: &Options) -> i32 {
                     if options.why {
                         report_naming(&mut out, &function);
                     }
-                    out.write(&paint_c(function.c_code()));
+                    out.write(&paint_readable(function.c_code()));
                 }
                 Err(failure) => {
                     error(&format!("0x{address:x}: {}", failure.message));

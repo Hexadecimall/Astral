@@ -104,6 +104,7 @@ set(ASTRAL_LIB_SRC
     src/core/session.cc
     src/api/capi.cc
     engine/decompiler/printastral.cc
+    engine/decompiler/printnova.cc
     engine/assembler/assembler.cc
     engine/assembler/text.cc
     engine/assembler/arm64.cc

@@ -566,6 +566,11 @@ pub fn ansi_c(text: &str) -> String {
     ansi(highlight::Syntax::C, text)
 }
 
+/// Nova, coloured.
+pub fn ansi_nova(text: &str) -> String {
+    ansi(highlight::Syntax::Nova, text)
+}
+
 /// A disassembly listing, coloured.
 pub fn ansi_assembly(text: &str) -> String {
     ansi(highlight::Syntax::Assembly, text)

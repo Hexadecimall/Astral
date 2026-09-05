@@ -907,6 +907,8 @@ astral_status astral_program_set_setting(astral_program *program, const char *na
     }
     if (d->name == "autoNaming")
         program->session->set_auto_naming(std::string(value) == "on");
+    if (d->name == "readableLanguage")
+        program->session->set_readable_language(value);
     program->settings[d->name] = value;
     clear_error();
     return ASTRAL_OK;

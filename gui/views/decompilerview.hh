@@ -4,6 +4,7 @@
 
 #include "model/programdocument.hh"
 
+#include <QSyntaxHighlighter>
 #include <QWidget>
 
 class QLabel;
@@ -24,6 +25,8 @@ public:
     void showError(const QString &error);
     void showEmpty(const QString &message);
     // Whether the pane shows the engine's listing rather than compilable C.
+    // The listing is Nova, so saying which one this is also decides how it is
+    // coloured.
     void setPseudo(bool pseudo);
     CodeView *codeView() const { return code_; }
     QString text() const;
@@ -65,6 +68,7 @@ private:
     QLabel *header_;
     QLabel *detail_;
     CodeView *code_;
+    QSyntaxHighlighter *highlighter_ = nullptr;
 };
 
 } // namespace astral::gui

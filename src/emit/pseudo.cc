@@ -64,6 +64,232 @@ bool blank(const std::string &line)
 // technique the compilable path uses, with the same caution: a declaration only
 // moves when its first mention is a plain assignment at the function's own
 // brace depth, because anywhere else it would change what the name reaches.
+// The same, for Nova, whose declarations name the thing before its type. A
+// declaration moves under exactly the same rule: only when the first mention
+// of the name is a plain assignment at the depth the declaration already sits
+// at, because anywhere else the name would stop reaching what it reached.
+std::string nova_declarations_at_first_use(const std::string &source)
+{
+    std::vector<std::string> lines = split_lines(source);
+    size_t open = 0;
+    while (open < lines.size() && lines[open].find('{') == std::string::npos)
+        ++open;
+    if (open >= lines.size())
+        return source;
+
+    static const std::regex any_decl(R"(^\s+(?:var|val|stack) [^;]+;\s*$)");
+    static const std::regex decl(
+        R"(^(\s+)(var|val|stack) ([A-Za-z_][A-Za-z0-9_@]*): ([^;=]+);\s*$)");
+
+    size_t body = open + 1;
+    while (body < lines.size() && (blank(lines[body]) || std::regex_match(lines[body], any_decl)))
+        ++body;
+
+    std::vector<int> depth(lines.size() + 1, 0);
+    for (size_t i = body; i < lines.size(); ++i) {
+        int here = depth[i];
+        for (char c : lines[i]) {
+            if (c == '{')
+                ++here;
+            else if (c == '}')
+                --here;
+        }
+        depth[i + 1] = here;
+        if (here < depth[i])
+            depth[i] = here;
+    }
+
+    std::set<size_t> moved;
+    for (size_t d = open + 1; d < body; ++d) {
+        std::smatch m;
+        if (!std::regex_match(lines[d], m, decl))
+            continue;
+        const std::string word_kind = m[2].str();
+        const std::string name = m[3].str();
+        std::string type = m[4].str();
+        while (!type.empty() && type.back() == ' ')
+            type.pop_back();
+        // A value the caller left behind is never assigned here, so no
+        // declaration of it can stand anywhere. The name says what it is.
+        if (name.find('@') != std::string::npos) {
+            moved.insert(d);
+            continue;
+        }
+        const std::regex word("\\b" + name + "\\b");
+        std::vector<size_t> uses;
+        for (size_t i = body; i < lines.size(); ++i)
+            if (std::regex_search(lines[i], word))
+                uses.push_back(i);
+        if (uses.empty())
+            continue;
+        const size_t use = uses.front();
+        const int inner = depth[use];
+        size_t from = use;
+        size_t to = use;
+        if (inner > 0) {
+            while (from > body && depth[from - 1] >= inner)
+                --from;
+            while (to + 1 < lines.size() && depth[to + 1] >= inner)
+                ++to;
+        } else {
+            from = body;
+            to = lines.size() - 1;
+        }
+        if (uses.back() > to || uses.front() < from)
+            continue;
+        std::smatch am;
+        const std::regex assign("^(\\s*)" + name + " = ([^;]*);\\s*$");
+        if (!std::regex_match(lines[use], am, assign))
+            continue;
+        if (std::regex_search(am[2].str(), word))
+            continue;
+        lines[use] = am[1].str() + word_kind + " " + name + ": " + type + " = " + am[2].str() + ";";
+        moved.insert(d);
+    }
+    if (moved.empty())
+        return source;
+
+    std::vector<std::string> kept;
+    kept.reserve(lines.size());
+    for (size_t i = 0; i < lines.size(); ++i)
+        if (moved.count(i) == 0)
+            kept.push_back(lines[i]);
+    size_t after = open + 1;
+    while (after < kept.size() && std::regex_match(kept[after], any_decl))
+        ++after;
+    if (after == open + 1)
+        while (after < kept.size() && blank(kept[after]))
+            kept.erase(kept.begin() + static_cast<long>(after));
+    return join_lines(kept);
+}
+
+// Where a top-level operator sits in an expression, ignoring anything inside
+// brackets or quotes. Returns the offset of the first one that produces a
+// truth value, or npos when there is none.
+size_t top_level_truth_operator(const std::string &text)
+{
+    static const char *const truths[] = {"==", "!=", "<=", ">=", "&&", "||"};
+    int depth = 0;
+    char quote = '\0';
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quote != '\0') {
+            if (c == '\\')
+                ++i;
+            else if (c == quote)
+                quote = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c == '(' || c == '[')
+            ++depth;
+        else if (c == ')' || c == ']')
+            --depth;
+        if (depth != 0)
+            continue;
+        for (const char *op : truths)
+            if (text.compare(i, 2, op) == 0)
+                return i;
+        // A lone < or > is a comparison; -> is not, and neither is a shift.
+        if ((c == '<' || c == '>') && text.compare(i, 2, "<<") != 0
+            && text.compare(i, 2, ">>") != 0 && (i == 0 || text[i - 1] != '-'))
+            return i;
+    }
+    return std::string::npos;
+}
+
+// Whether the whole of `text` is already inside one pair of brackets.
+bool wholly_bracketed(const std::string &text)
+{
+    if (text.size() < 2 || text.front() != '(' || text.back() != ')')
+        return false;
+    int depth = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '(')
+            ++depth;
+        else if (text[i] == ')' && --depth == 0)
+            return i + 1 == text.size();
+    }
+    return false;
+}
+
+// An expression that produces a truth value is written in brackets, so that a
+// condition looks like a condition wherever it appears rather than only where
+// a keyword happens to put brackets around it.
+std::string bracket_truth_values(const std::string &source)
+{
+    std::vector<std::string> lines = split_lines(source);
+    static const std::regex returns(R"(^(\s*return )(.+);\s*$)");
+    static const std::regex assigns(R"(^(\s*(?:var |val |stack )?[A-Za-z_][A-Za-z0-9_@.\[\]>*-]* = )(.+);\s*$)");
+    for (std::string &line : lines) {
+        std::smatch m;
+        if (!std::regex_match(line, m, returns) && !std::regex_match(line, m, assigns))
+            continue;
+        const std::string value = m[2].str();
+        if (wholly_bracketed(value))
+            continue;
+        if (top_level_truth_operator(value) == std::string::npos)
+            continue;
+        line = m[1].str() + "(" + value + ");";
+    }
+    return join_lines(lines);
+}
+
+// A comma separates, and a separator that touches what follows it is harder to
+// read than one that does not. The printer packs them because C is written
+// that way; Nova is not. Text inside quotes is left exactly as it is, since a
+// comma there is part of the message rather than punctuation.
+std::string space_after_commas(const std::string &source)
+{
+    std::string out;
+    out.reserve(source.size() + source.size() / 32);
+    char quote = '\0';
+    for (size_t i = 0; i < source.size(); ++i) {
+        const char c = source[i];
+        out.push_back(c);
+        if (quote != '\0') {
+            if (c == '\\' && i + 1 < source.size()) {
+                out.push_back(source[++i]);
+                continue;
+            }
+            if (c == quote)
+                quote = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+            continue;
+        }
+        if (c == ',' && i + 1 < source.size() && source[i + 1] != ' '
+            && source[i + 1] != '\n')
+            out.push_back(' ');
+    }
+    return out;
+}
+
+// `else` belongs on the brace that closed the branch before it. The printer
+// puts it on its own line because C is written both ways; Nova is not.
+std::string join_else(const std::string &source)
+{
+    std::vector<std::string> lines = split_lines(source);
+    static const std::regex closing(R"(^(\s*)\}\s*$)");
+    static const std::regex opening(R"(^\s*(else\b.*)$)");
+    std::vector<std::string> kept;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::smatch m;
+        if (!kept.empty() && std::regex_match(lines[i], m, opening)
+            && std::regex_match(kept.back(), closing)) {
+            kept.back() += " " + m[1].str();
+            continue;
+        }
+        kept.push_back(lines[i]);
+    }
+    return join_lines(kept);
+}
+
 std::string declarations_at_first_use(const std::string &source)
 {
     std::vector<std::string> lines = split_lines(source);
@@ -169,10 +395,13 @@ std::string declarations_at_first_use(const std::string &source)
 
 } // namespace
 
-std::string readable_listing(const std::string &source)
+std::string readable_listing(const std::string &source, bool nova)
 {
     if (source.empty())
         return source;
+    if (nova)
+        return bracket_truth_values(
+            space_after_commas(join_else(nova_declarations_at_first_use(number_labels(source)))));
     return declarations_at_first_use(number_labels(source));
 }
 
