@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
