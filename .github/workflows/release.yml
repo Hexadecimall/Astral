@@ -31,7 +31,7 @@ jobs:
           - name: macos-x86_64
             runner: macos-13
           - name: linux-x86_64
-            runner: ubuntu-22.04
+            runner: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
@@ -45,12 +45,15 @@ jobs:
           brew install cmake qt@6
           echo "CMAKE_PREFIX_PATH=$(brew --prefix qt@6)" >> "$GITHUB_ENV"
 
+      # The application needs Qt 6.5, which no Ubuntu release packages yet, so
+      # the Linux archive carries the command and the libraries and not the
+      # application. That is checked below rather than left to be noticed.
       - name: Install what the build needs (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build \
-            qt6-base-dev qt6-svg-dev libgl1-mesa-dev
+            qt6-base-dev libqt6svg6-dev libgl1-mesa-dev
 
       - name: Build
         run: |
@@ -65,6 +68,22 @@ jobs:
 
       - name: Package
         run: cmake --build build --target package
+
+      # An archive without the command in it is not a release, whatever else
+      # went right.
+      - name: Check the archive holds what it should
+        run: |
+          cd build
+          archive=$(ls astral-*.tar.gz)
+          tar tzf "$archive" > contents
+          for wanted in bin/astral include/astral/astral.h share/astral/specs; do
+            grep -q "/$wanted" contents || { echo "missing $wanted"; exit 1; }
+          done
+          if grep -q "bin/astral-gui" contents; then
+            echo "$archive carries the application"
+          else
+            echo "$archive carries no application (Qt 6.5 was not available)"
+          fi
 
       - name: Record what each archive hashes to
         run: |
