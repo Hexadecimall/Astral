@@ -253,6 +253,21 @@ int main()
                "reading a register makes a function level 2", "Level::Typed");
     }
 
+    // ---------------------------------------------------------- documentation
+    {
+        std::string text = round_trip("statement documentation round trip",
+            "func f(): i32 {\n"
+            "    /* WARNING: Subroutine does not return */\n"
+            "    exit(1);\n"
+            "    #/ a note #\\\n"
+            "    return 0;\n"
+            "}\n");
+        report(text.find("#/ WARNING: Subroutine does not return #\\\n    exit(1);") != std::string::npos,
+               "a C block comment becomes a Nova note on the statement it precedes", text);
+        report(text.find("#/ a note #\\\n    return 0;") != std::string::npos,
+               "a Nova note stays on its statement", text);
+    }
+
     // ---------------------------------------------------------- precedence
     {
         std::string text = round_trip("precedence round trip",

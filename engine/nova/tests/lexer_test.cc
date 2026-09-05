@@ -122,6 +122,10 @@ int main()
           "asm { stp x29, x30, [sp, #-0x20]! }",
           "asm asm( stp x29, x30, [sp, #-0x20]! )");
 
+    check("C comments are read: // is dropped and /* */ is kept",
+          "var a = 1; // gone\n/* WARNING: kept */ var b = 2;",
+          "var a = 1 ; doc( WARNING: kept ) var b = 2 ;");
+
     check("escapes in a string",
           "\"one\\ttwo\\n\"",
           "\"one\ttwo\n\"");

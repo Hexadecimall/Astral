@@ -57,6 +57,7 @@ private:
 
     // ------------------------------------------------------------ statements
     StatementPtr parse_statement();
+    StatementPtr parse_statement_body();
     StatementPtr parse_block();
     StatementPtr parse_declaration(bool is_stack);
     StatementPtr parse_if();
@@ -597,6 +598,15 @@ StatementPtr Parser::parse_block()
             complain(block->where, "a block was never closed");
             return nullptr;
         }
+        // A note with nothing after it belongs to the block itself.
+        if (peek().is(Token::Kind::Documentation) && peek(1).is_punctuation("}")) {
+            auto note = std::make_unique<Statement>();
+            note->kind = Statement::Kind::Empty;
+            note->where = peek().where;
+            note->documentation = take().text;
+            block->body.push_back(std::move(note));
+            continue;
+        }
         size_t before = at_;
         StatementPtr statement = parse_statement();
         if (statement)
@@ -611,7 +621,15 @@ StatementPtr Parser::parse_block()
 
 StatementPtr Parser::parse_statement()
 {
-    take_documentation();
+    std::string documentation = take_documentation();
+    StatementPtr statement = parse_statement_body();
+    if (statement && !documentation.empty())
+        statement->documentation = documentation;
+    return statement;
+}
+
+StatementPtr Parser::parse_statement_body()
+{
     const Token &token = peek();
     if (token.is_punctuation("{"))
         return parse_block();

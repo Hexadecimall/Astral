@@ -322,6 +322,34 @@ void Writer::value(const Expression &expression)
 
 void Writer::statement(const Statement &statement)
 {
+    if (!statement.documentation.empty()) {
+        // One line when it fits on one, so a warning reads as a remark and
+        // not as a paragraph.
+        std::string text = statement.documentation;
+        while (!text.empty() && (text.front() == ' ' || text.front() == '\n'))
+            text.erase(text.begin());
+        while (!text.empty() && (text.back() == ' ' || text.back() == '\n'))
+            text.pop_back();
+        if (text.find('\n') == std::string::npos) {
+            line("#/ " + text + " #\\");
+        } else {
+            line("#/");
+            size_t start = 0;
+            while (start <= text.size()) {
+                size_t end = text.find('\n', start);
+                if (end == std::string::npos)
+                    end = text.size();
+                std::string one = text.substr(start, end - start);
+                while (!one.empty() && one.front() == ' ')
+                    one.erase(one.begin());
+                line(one);
+                if (end == text.size())
+                    break;
+                start = end + 1;
+            }
+            line("#\\");
+        }
+    }
     switch (statement.kind) {
     case Statement::Kind::Compound:
         indent();

@@ -108,6 +108,40 @@ void Reader::skip_blanks_and_comments(std::vector<Token> &out)
     for (;;) {
         while (!done() && std::isspace(static_cast<unsigned char>(peek())))
             advance();
+        // C's comments are read too. A `//` comment is dropped like a `#`
+        // one; a `/* */` comment is kept, because that is how the decompiler
+        // writes its warnings, and a warning about the code should reach
+        // whoever reads the code.
+        if (peek() == '/' && peek(1) == '/') {
+            while (!done() && peek() != '\n')
+                advance();
+            continue;
+        }
+        if (peek() == '/' && peek(1) == '*') {
+            Where where = here();
+            advance();
+            advance();
+            std::string text;
+            for (;;) {
+                if (done()) {
+                    complain(where, "a comment was never closed with */");
+                    break;
+                }
+                if (peek() == '*' && peek(1) == '/') {
+                    advance();
+                    advance();
+                    break;
+                }
+                text.push_back(peek());
+                advance();
+            }
+            Token token;
+            token.kind = Token::Kind::Documentation;
+            token.where = where;
+            token.text = text;
+            out.push_back(token);
+            continue;
+        }
         if (peek() != '#')
             return;
 

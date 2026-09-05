@@ -202,6 +202,9 @@ struct Statement {
     StatementPtr else_branch;
     std::vector<MatchArm> arms;       // Match
     std::string assembly;             // Asm: the instructions, one per line
+    // What was written about this statement, kept so the decompiler's
+    // warnings and a person's notes survive a round trip.
+    std::string documentation;
 };
 
 // ---------------------------------------------------------------- top level
