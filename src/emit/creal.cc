@@ -356,6 +356,124 @@ std::string rewrite_code_calls(const std::string &source)
     return out;
 }
 
+std::string trim_copy(const std::string &text)
+{
+    const size_t first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return std::string();
+    const size_t last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+bool is_c_name(const std::string &text)
+{
+    if (text.empty() || (!std::isalpha(static_cast<unsigned char>(text[0])) && text[0] != '_'))
+        return false;
+    for (char c : text)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+            return false;
+    return true;
+}
+
+// A value wider than a register comes back from a call in two of them, and the
+// decompiler describes the place it is put as an array of bytes. C will not
+// assign to an array, so both the value arriving and the value being stored
+// have to be said differently: the local becomes the wide type it is really
+// holding, and the store becomes the copy it really is.
+//
+// Written by hand rather than as a pattern. The shapes are fixed, a scan over
+// the text is what a pattern would compile down to anyway, and the emitter runs
+// this over every line it writes.
+std::string rewrite_wide_values(const std::string &source)
+{
+    static const char *const byte_types[] = {"unk8",  "undefined1", "undefined",
+                                             "byte",  "uint1",      "int1",
+                                             "uint8_t"};
+    std::vector<std::string> lines;
+    for (size_t at = 0; at <= source.size();) {
+        const size_t nl = source.find('\n', at);
+        lines.push_back(source.substr(at, nl == std::string::npos ? std::string::npos : nl - at));
+        if (nl == std::string::npos)
+            break;
+        at = nl + 1;
+    }
+
+    // Which locals are declared as sixteen bytes, and where.
+    std::map<std::string, size_t> wide;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string body = trim_copy(lines[i]);
+        if (body.size() < 8 || body.compare(body.size() - 5, 5, "[16];") != 0)
+            continue;
+        for (const char *type : byte_types) {
+            const std::string prefix = std::string(type) + " ";
+            if (body.compare(0, prefix.size(), prefix) != 0)
+                continue;
+            std::string name = trim_copy(body.substr(prefix.size(), body.size() - prefix.size() - 5));
+            if (!name.empty() && is_c_name(name))
+                wide.emplace(name, i);
+            break;
+        }
+    }
+
+    std::string out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        std::string line = lines[i];
+
+        // `*(T (*) [N])(where) = value;` is a copy of N bytes, and saying it as
+        // an assignment is the one thing C will not let you say.
+        const size_t open = line.find("*(");
+        const size_t arrow = line.find(") [");
+        const size_t assign = line.find(" = ");
+        if (open != std::string::npos && arrow != std::string::npos &&
+            assign != std::string::npos && arrow < assign &&
+            line.find("(*)", open) != std::string::npos) {
+            const size_t close = line.find(']', arrow);
+            const size_t paren = close == std::string::npos ? std::string::npos
+                                                            : line.find(')', close);
+            if (close != std::string::npos && paren != std::string::npos && paren < assign) {
+                const std::string count = line.substr(arrow + 3, close - arrow - 3);
+                const size_t where_open = line.find('(', paren);
+                const size_t where_close = assign;
+                bool numeric = !count.empty();
+                for (char c : count)
+                    if (!std::isdigit(static_cast<unsigned char>(c)))
+                        numeric = false;
+                if (numeric && where_open != std::string::npos && where_open < where_close) {
+                    std::string where = line.substr(where_open + 1, where_close - where_open - 2);
+                    std::string value = trim_copy(line.substr(assign + 3));
+                    if (!value.empty() && value.back() == ';')
+                        value.pop_back();
+                    const std::string indent = line.substr(0, line.find_first_not_of(" \t"));
+                    line = indent + "memcpy((void *)(" + where + "), &" + trim_copy(value) + ", " +
+                           count + ");";
+                }
+            }
+        }
+
+        // A local assigned to whole is holding one value, not an array of them.
+        const size_t equals = line.find(" = ");
+        if (equals != std::string::npos) {
+            const std::string name = trim_copy(line.substr(0, equals));
+            auto it = wide.find(name);
+            if (it != wide.end()) {
+                const std::string &declaration = lines[it->second];
+                const std::string indent =
+                    declaration.substr(0, declaration.find_first_not_of(" \t"));
+                lines[it->second] = indent + "astral_uint128 " + name + ";";
+                wide.erase(it);
+            }
+        }
+        lines[i] = line;
+    }
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        if (i + 1 < lines.size())
+            out += '\n';
+    }
+    return out;
+}
+
 std::string rewrite_pieces(const std::string &source)
 {
     static const std::regex piece(R"(([A-Za-z_][A-Za-z0-9_]*)\._(\d+)_(\d+)_)");
@@ -1522,7 +1640,8 @@ std::string copy_propagate(const std::string &source)
 
 void realize_c(FunctionResult &function)
 {
-    function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
+    function.c_code_real =
+        rewrite_wide_values(rewrite_code_calls(rewrite_pieces(function.c_code)));
     function.signature_real = tidy_pointer_spacing(function.signature);
 
     int bytes = 0;

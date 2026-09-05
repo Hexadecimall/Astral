@@ -22,6 +22,7 @@ string(STRIP "${ASTRAL_GHIDRA_VERSION}" ASTRAL_GHIDRA_VERSION)
 
 find_package(ZLIB REQUIRED)
 
+
 # ---------------------------------------------------------------- vendored core
 astral_expand(_core_src ${ASTRAL_CORE} ${ASTRAL_DECCORE} ${ASTRAL_SLEIGH} ${ASTRAL_EXTRA})
 astral_expand(_slacomp_src ${ASTRAL_SLACOMP})
@@ -305,6 +306,25 @@ add_test(NAME emit_listing COMMAND astral_listing_test
          $<TARGET_FILE:astral_listing_subject>)
 set_tests_properties(emit_listing PROPERTIES
     ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
+
+# The decompiler's settings, checked against the same crackme the compiler
+# tests use. The last group is the one that matters: a program decompiled with
+# nothing set has to come out exactly as it did before the settings existed.
+add_executable(astral_options_subject testing/crackmes/01_plain.c)
+set_target_properties(astral_options_subject PROPERTIES OUTPUT_NAME options_subject
+    C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/option-tests)
+target_compile_options(astral_options_subject PRIVATE -O0)
+
+add_executable(astral_options_test src/core/tests/options_test.cc)
+set_target_properties(astral_options_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(astral_options_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(astral_options_test PRIVATE astral_static)
+add_dependencies(astral_options_test astral_options_subject)
+add_test(NAME decompiler_options COMMAND astral_options_test
+         $<TARGET_FILE:astral_options_subject>)
+set_tests_properties(decompiler_options PROPERTIES
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
 
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)
