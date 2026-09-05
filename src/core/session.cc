@@ -2680,11 +2680,24 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     for (const Symbol &sym : image_.symbols)
         if (!sym.name.empty())
             sym_names.emplace(sym.address, sym.name);
+    // A body the knowledge base recognises answers under the name it was
+    // learned under, which is the only name a stripped image has. Kept per
+    // address because the same target is asked about once per call site.
+    std::map<uint64_t, std::string> recognised;
     auto is_library = [&](uint64_t addr) {
+        std::string name;
         auto it = sym_names.find(addr);
-        if (it == sym_names.end())
+        if (it != sym_names.end()) {
+            name = it->second;
+        } else {
+            auto known = recognised.find(addr);
+            if (known == recognised.end())
+                known = recognised.emplace(addr, learned_name_for(addr, 0)).first;
+            name = known->second;
+        }
+        if (name.empty())
             return false;
-        const std::string &n = it->second;
+        const std::string &n = name;
         if (n == "main")
             return false;
         // Judged by the name's own prefix, mangled or not. A name that arrives
