@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <cstring>
 #include <map>
 #include <set>
@@ -606,8 +607,12 @@ std::string decompile_cil(const DotnetMethod &method, const DotnetAssembly &asse
             if (op == 0x2c || op == 0x2d) { target = at + 1 + static_cast<size_t>(static_cast<int64_t>(static_cast<int8_t>(code[at]))); at += 1; }
             else { target = at + 4 + static_cast<size_t>(static_cast<int64_t>(static_cast<int32_t>(u32_at(at)))); at += 4; }
             const std::string condition = pop();
+            // brfalse jumps when the value is false, so what follows runs when
+            // it is true; brtrue is the other way round. The condition kept here
+            // is the one the following code runs under, which is what an if is
+            // written with.
             statements.push_back({current, "", true, true, target,
-                                  when_false ? "!(" + condition + ")" : condition});
+                                  when_false ? condition : "!(" + condition + ")"});
             continue;
         }
         if (op == 0x58) { const std::string b_ = pop(), a_ = pop(); stack.push_back(a_ + " + " + b_); continue; }
@@ -625,39 +630,108 @@ std::string decompile_cil(const DotnetMethod &method, const DotnetAssembly &asse
         say("/* an instruction Astral does not read yet */");
     }
 
-    // Render. A branch keeps its label and its jump: turning one back into an
-    // if with an else needs the block structure recovered first, and printing a
-    // shape the code does not have would be worse than printing the jump.
+    // Render. A conditional branch forward is an if: what follows it runs when
+    // the branch is not taken, and what it lands on is the else. Where the two
+    // arms rejoin decides where the if ends. A branch whose shape is not one of
+    // these keeps its label and its jump, because printing a shape the code
+    // does not have would be worse than printing the jump.
     std::ostringstream out;
-    std::vector<bool> consumed(statements.size(), false);
-    std::set<size_t> emitted;
-    for (size_t i = 0; i < statements.size(); ++i) {
-        if (consumed[i])
-            continue;
-        const Statement &one = statements[i];
-        // A branch can land on an instruction that produces no statement of its
-        // own - loading a value onto the stack, say - so the label belongs to
-        // the first statement at or after that point.
-        for (const auto &label : labels) {
-            if (emitted.count(label.first) || label.first > one.at)
-                continue;
-            const bool mine = i == 0 || statements[i - 1].at < label.first;
-            if (!mine)
-                continue;
-            out << label.second << ":\n";
-            emitted.insert(label.first);
+    std::set<size_t> jumped_to;
+
+    auto index_of = [&](size_t offset) -> size_t {
+        for (size_t i = 0; i < statements.size(); ++i)
+            if (statements[i].at >= offset)
+                return i;
+        return statements.size();
+    };
+    auto leaves = [&](const Statement &one) {
+        return !one.is_branch && one.text.compare(0, 6, "return") == 0;
+    };
+    auto indent_of = [](int depth) { return std::string(4 + depth * 4, ' '); };
+
+    // Which offsets still need a label, decided before anything is written.
+    std::function<void(size_t, size_t)> mark = [&](size_t begin, size_t end) {
+        size_t i = begin;
+        while (i < end) {
+            const Statement &one = statements[i];
+            if (one.is_branch) {
+                const size_t landing = index_of(one.target);
+                if (landing <= i || landing > end)
+                    jumped_to.insert(one.target);
+            }
+            ++i;
         }
-        if (one.is_branch) {
-            const std::string where =
-                labels.count(one.target) ? labels[one.target] : "elsewhere";
-            if (one.conditional)
-                out << "    if (" << one.condition << ") goto " << where << ";\n";
-            else
-                out << "    goto " << where << ";\n";
-            continue;
+    };
+    mark(0, statements.size());
+
+    std::function<void(size_t, size_t, int)> render = [&](size_t begin, size_t end, int depth) {
+        size_t i = begin;
+        while (i < end) {
+            const Statement &one = statements[i];
+            if (jumped_to.count(one.at))
+                out << labels[one.at] << ":\n";
+
+            if (one.is_branch && one.conditional) {
+                const size_t landing = index_of(one.target);
+                if (landing > i && landing <= end) {
+                    size_t then_begin = i + 1;
+                    size_t then_end = landing;
+                    size_t else_begin = landing;
+                    size_t else_end = end;
+                    size_t resume = end;
+                    bool has_else = false;
+
+                    if (then_end > then_begin && leaves(statements[then_end - 1])) {
+                        // The first arm leaves the method, so everything the
+                        // branch lands on is the other arm.
+                        has_else = else_begin < end;
+                        resume = end;
+                    } else if (then_end > then_begin && statements[then_end - 1].is_branch &&
+                               !statements[then_end - 1].conditional) {
+                        // The first arm jumps over the second: where it jumps to
+                        // is where the two rejoin.
+                        const size_t join = index_of(statements[then_end - 1].target);
+                        then_end -= 1; // the jump is the shape, not a statement
+                        else_end = join <= end ? join : end;
+                        has_else = else_begin < else_end;
+                        resume = else_end;
+                    } else {
+                        // Nothing to jump over: an if with no else.
+                        out << indent_of(depth) << "if (" << one.condition << ") {\n";
+                        render(then_begin, then_end, depth + 1);
+                        out << indent_of(depth) << "}\n";
+                        i = landing;
+                        continue;
+                    }
+
+                    out << indent_of(depth) << "if (" << one.condition << ") {\n";
+                    render(then_begin, then_end, depth + 1);
+                    if (has_else) {
+                        out << indent_of(depth) << "} else {\n";
+                        render(else_begin, else_end, depth + 1);
+                    }
+                    out << indent_of(depth) << "}\n";
+                    i = resume;
+                    continue;
+                }
+            }
+
+            if (one.is_branch) {
+                const std::string where =
+                    labels.count(one.target) ? labels[one.target] : "elsewhere";
+                if (one.conditional)
+                    out << indent_of(depth) << "if (!(" << one.condition << ")) goto " << where
+                        << ";\n";
+                else
+                    out << indent_of(depth) << "goto " << where << ";\n";
+                ++i;
+                continue;
+            }
+            out << indent_of(depth) << one.text << "\n";
+            ++i;
         }
-        out << "    " << one.text << "\n";
-    }
+    };
+    render(0, statements.size(), 0);
     return out.str();
 }
 

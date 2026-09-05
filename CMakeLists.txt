@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.18.0 LANGUAGES CXX)
+project(Astral VERSION 0.19.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -104,7 +104,16 @@ set(ASTRAL_LIB_SRC
     engine/assembler/text.cc
     engine/assembler/arm64.cc
     engine/assembler/arm32.cc
-    engine/assembler/x86.cc)
+    engine/assembler/x86.cc
+    engine/compiler/asmbuffer.cc
+    engine/compiler/codegen.cc
+    engine/compiler/codegen_arm64.cc
+    engine/compiler/compiler.cc
+    engine/compiler/types.cc
+    engine/compiler/lexer.cc
+    engine/compiler/parser.cc
+    engine/compiler/sema.cc
+    engine/compiler/front.cc)
 
 add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs
@@ -202,6 +211,41 @@ else()
     message(STATUS "ASTRAL_BUILD_TUI is off: the astral command will not be built, "
                    "so this build produces only the libraries and headers")
 endif()
+
+# ---------------------------------------------------------------- checks
+# The C front end reads text and answers with a tree, so it can be checked on
+# its own without a binary, a target or a spec anywhere in sight.
+add_executable(astral_compiler_test EXCLUDE_FROM_ALL engine/compiler/tests/front_test.cc)
+target_include_directories(astral_compiler_test PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS})
+target_link_libraries(astral_compiler_test PRIVATE astral_static)
+# Registered with ctest as well, so `ctest` in a build tree runs it. Real
+# decompiled files are passed in by the shell suite, which has an astral to
+# produce them with; on its own it checks the language.
+enable_testing()
+add_test(NAME compiler_front COMMAND astral_compiler_test)
+
+# The back end is checked by running what it wrote. Most of it executes the
+# bytes in place; the last of it writes them into a real program and runs that,
+# which is the only evidence that actually settles the question. The program is
+# built here at -O0 so the call the patch replaces is really made rather than
+# folded away.
+enable_language(C)
+add_executable(astral_compiler_crackme testing/crackmes/01_plain.c)
+set_target_properties(astral_compiler_crackme PROPERTIES OUTPUT_NAME crackme_plain
+    C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/compiler-tests)
+target_compile_options(astral_compiler_crackme PRIVATE -O0)
+
+add_executable(astral_compiler_codegen_test engine/compiler/tests/codegen_test.cc)
+set_target_properties(astral_compiler_codegen_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(astral_compiler_codegen_test PRIVATE
+    ${ASTRAL_ENGINE_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(astral_compiler_codegen_test PRIVATE astral_static)
+add_dependencies(astral_compiler_codegen_test astral_compiler_crackme)
+add_test(NAME compiler_codegen COMMAND astral_compiler_codegen_test
+         $<TARGET_FILE:astral_compiler_crackme>)
+set_tests_properties(compiler_codegen PROPERTIES
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
 
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)

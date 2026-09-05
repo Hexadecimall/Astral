@@ -667,5 +667,28 @@ check "the same functions whatever the thread count" "yes" \
 check "a bad thread count is refused" "wants a count" \
     "$("$astral" decompile --all --threads nonsense "$work/host" 2>&1)"
 
+# ---------------------------------------------------------------- the compiler
+#
+# The C front end is checked on its own by astral_compiler_test. Here it is
+# given what the decompiler actually wrote, which is the input that matters:
+# whatever comes out of the emitter has to go back in.
+front_test="$build/astral_compiler_test"
+if [[ -x "$front_test" ]]; then
+    sources=()
+    for binary in "$work/host" /bin/echo /bin/cat; do
+        [[ -e "$binary" ]] || continue
+        name=$(basename "$binary")
+        if "$astral" decompile "$binary" > "$work/$name.c" 2>/dev/null; then
+            sources+=("$work/$name.c")
+        fi
+    done
+    front_output=$("$front_test" "${sources[@]}" 2>&1)
+    check "the C front end reads its own output" "0 failed" \
+        "$(printf '%s' "$front_output" | tail -1)"
+else
+    printf 'gap  the C front end was not built (make astral_compiler_test)\n'
+    gaps=$((gaps + 1))
+fi
+
 printf '\n%d passed, %d failed, %d known-gaps\n' "$passed" "$failed" "$gaps"
 [[ $failed -eq 0 ]]
