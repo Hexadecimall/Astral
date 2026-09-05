@@ -18,6 +18,7 @@
 #include <regex>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace astral_internal {
 namespace {
@@ -470,6 +471,184 @@ std::string rewrite_wide_values(const std::string &source)
         out += lines[i];
         if (i + 1 < lines.size())
             out += '\n';
+    }
+    return out;
+}
+
+// How many arguments a signature takes, and whether it ends in an ellipsis.
+// `void f(void)` takes none; `void f(void *a, int b)` takes two.
+struct Arity {
+    size_t count = 0;
+    bool variadic = false;
+};
+
+// The offset just past the parenthesised group that starts at `open`, skipping
+// nested groups and anything inside quotes. std::string::npos if it never
+// closes.
+size_t end_of_group(const std::string &text, size_t open)
+{
+    int depth = 0;
+    for (size_t at = open; at < text.size(); ++at) {
+        const char c = text[at];
+        if (c == '"' || c == '\'') {
+            const char quote = c;
+            for (++at; at < text.size() && text[at] != quote; ++at)
+                if (text[at] == '\\')
+                    ++at;
+            continue;
+        }
+        if (c == '(' || c == '[' || c == '{')
+            ++depth;
+        else if (c == ')' || c == ']' || c == '}') {
+            --depth;
+            if (depth == 0)
+                return at + 1;
+        }
+    }
+    return std::string::npos;
+}
+
+// The arguments of the parenthesised group at `open`, as offsets into the text.
+// Nothing but whitespace between the parentheses is no arguments at all, which
+// is not the same as one empty one.
+std::vector<std::pair<size_t, size_t>> arguments_in(const std::string &text, size_t open,
+                                                    size_t close)
+{
+    std::vector<std::pair<size_t, size_t>> spans;
+    size_t start = open + 1;
+    int depth = 0;
+    for (size_t at = open + 1; at + 1 <= close && at < text.size(); ++at) {
+        const char c = text[at];
+        if (c == '"' || c == '\'') {
+            const char quote = c;
+            for (++at; at < text.size() && text[at] != quote; ++at)
+                if (text[at] == '\\')
+                    ++at;
+            continue;
+        }
+        if (c == '(' || c == '[' || c == '{')
+            ++depth;
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth == 0)
+                break;
+            --depth;
+        } else if (c == ',' && depth == 0) {
+            spans.emplace_back(start, at);
+            start = at + 1;
+        }
+    }
+    if (spans.empty() && trim_copy(text.substr(open + 1, close - open - 2)).empty())
+        return spans;
+    spans.emplace_back(start, close - 1);
+    return spans;
+}
+
+// Reads `<return type> <name>(<parameters>)` and reports the name and how many
+// arguments it wants.
+bool arity_of_signature(const std::string &signature, std::string &name, Arity &arity)
+{
+    const size_t open = signature.find('(');
+    if (open == std::string::npos)
+        return false;
+    size_t end = open;
+    while (end > 0 && std::isspace(static_cast<unsigned char>(signature[end - 1])))
+        --end;
+    size_t start = end;
+    while (start > 0 && (std::isalnum(static_cast<unsigned char>(signature[start - 1])) ||
+                         signature[start - 1] == '_'))
+        --start;
+    name = signature.substr(start, end - start);
+    if (!is_c_name(name))
+        return false;
+    const size_t close = end_of_group(signature, open);
+    if (close == std::string::npos)
+        return false;
+    const std::vector<std::pair<size_t, size_t>> spans = arguments_in(signature, open, close);
+    for (const auto &span : spans) {
+        const std::string text = trim_copy(signature.substr(span.first, span.second - span.first));
+        if (text == "...") {
+            arity.variadic = true;
+            continue;
+        }
+        if (text == "void" && spans.size() == 1)
+            return true;
+        ++arity.count;
+    }
+    return true;
+}
+
+// A call to a function this unit also defines has to pass what that definition
+// takes. The decompiler decides a prototype once and then writes each call site
+// from what it can see there, so a path where the argument was already in the
+// register it travels in prints as a call with nothing in it - which reads fine
+// and does not compile. Where a call disagrees with the definition beside it,
+// the definition wins: a missing argument becomes a zero, and one too many is
+// dropped.
+std::string reconcile_call_arity(const std::string &source,
+                                 const std::map<std::string, Arity> &arities)
+{
+    std::string out;
+    out.reserve(source.size());
+    size_t at = 0;
+    while (at < source.size()) {
+        const char c = source[at];
+        if (c == '"' || c == '\'') {
+            const size_t start = at;
+            const char quote = c;
+            for (++at; at < source.size() && source[at] != quote; ++at)
+                if (source[at] == '\\')
+                    ++at;
+            if (at < source.size())
+                ++at;
+            out.append(source, start, at - start);
+            continue;
+        }
+        if (!std::isalpha(static_cast<unsigned char>(c)) && c != '_') {
+            out.push_back(c);
+            ++at;
+            continue;
+        }
+        const size_t start = at;
+        while (at < source.size() &&
+               (std::isalnum(static_cast<unsigned char>(source[at])) || source[at] == '_'))
+            ++at;
+        const std::string word = source.substr(start, at - start);
+        // A name at the very start of a line is the declaration or the
+        // definition itself; only what is indented inside a body is a call.
+        const bool at_line_start = start == 0 || source[start - 1] == '\n';
+        size_t open = at;
+        while (open < source.size() && (source[open] == ' ' || source[open] == '\t'))
+            ++open;
+        const std::map<std::string, Arity>::const_iterator found = arities.find(word);
+        if (at_line_start || open >= source.size() || source[open] != '(' ||
+            found == arities.end() || found->second.variadic) {
+            out.append(word);
+            continue;
+        }
+        const size_t close = end_of_group(source, open);
+        if (close == std::string::npos) {
+            out.append(word);
+            continue;
+        }
+        std::vector<std::pair<size_t, size_t>> spans = arguments_in(source, open, close);
+        if (spans.size() == found->second.count) {
+            out.append(word);
+            continue;
+        }
+        out.append(word);
+        out.push_back('(');
+        std::string joined;
+        for (size_t index = 0; index < found->second.count; ++index) {
+            if (index != 0)
+                joined += ", ";
+            joined += index < spans.size()
+                          ? trim_copy(source.substr(spans[index].first,
+                                                    spans[index].second - spans[index].first))
+                          : std::string("0");
+        }
+        out.append(joined);
+        out.push_back(')');
+        at = close;
     }
     return out;
 }
@@ -1149,11 +1328,32 @@ std::vector<std::string> split_args(const std::string &text)
 // is recoverable from the name and slots that share a byte range can be found.
 bool stack_slot(const std::string &name, long &offset)
 {
-    size_t underscore = name.rfind('_');
-    if (underscore == std::string::npos || underscore + 1 >= name.size())
+    // The slot's offset follows its kind, with or without an underscore
+    // between them depending on how the name reached here: the printer writes
+    // one, and the pass that gives locals conventional names takes it out.
+    size_t split = name.rfind('_');
+    if (split == std::string::npos) {
+        split = name.size();
+        while (split > 0 && std::isxdigit(static_cast<unsigned char>(name[split - 1])))
+            --split;
+        if (split == name.size() || split == 0)
+            return false;
+        const std::string head = name.substr(0, split);
+        const std::string tail = name.substr(split);
+        if (!(head.size() >= 5 && head.compare(head.size() - 5, 5, "Stack") == 0) &&
+            head != "local")
+            return false;
+        try {
+            offset = std::stol(tail, nullptr, 16);
+        } catch (...) {
+            return false;
+        }
+        return true;
+    }
+    if (split + 1 >= name.size())
         return false;
-    const std::string head = name.substr(0, underscore);
-    const std::string tail = name.substr(underscore + 1);
+    const std::string head = name.substr(0, split);
+    const std::string tail = name.substr(split + 1);
     bool is_stack = head.size() >= 5 && head.compare(head.size() - 5, 5, "Stack") == 0;
     bool is_local = head == "local";
     if (!is_stack && !is_local)
@@ -1189,6 +1389,199 @@ bool scalar_integer_type(const std::string &type)
     std::string stem;
     int size = 0;
     return split_generic_type(type, stem, size) && stem != "unkfloat";
+}
+
+// The width in bytes of a scalar type the decompiler prints, or 0 for anything
+// whose layout is not fixed by its spelling alone.
+int scalar_width(const std::string &type)
+{
+    static const std::map<std::string, int> widths = {
+        {"char", 1},     {"uchar", 1},     {"byte", 1},      {"sbyte", 1},
+        {"int1", 1},     {"uint1", 1},     {"undefined1", 1}, {"int8_t", 1},
+        {"uint8_t", 1},  {"bool", 1},
+        {"short", 2},    {"ushort", 2},    {"word", 2},      {"int2", 2},
+        {"uint2", 2},    {"undefined2", 2}, {"int16_t", 2},  {"uint16_t", 2},
+        {"int", 4},      {"uint", 4},      {"dword", 4},     {"int4", 4},
+        {"uint4", 4},    {"undefined4", 4}, {"int32_t", 4},  {"uint32_t", 4},
+        {"float", 4},    {"float4", 4},
+        {"long", 8},     {"ulong", 8},     {"qword", 8},     {"int8", 8},
+        {"uint8", 8},    {"undefined8", 8}, {"int64_t", 8},  {"uint64_t", 8},
+        {"double", 8},   {"float8", 8},    {"undefined", 8},
+        {"xunknown1", 1}, {"xunknown2", 2}, {"xunknown4", 4}, {"xunknown8", 8}};
+    const std::map<std::string, int>::const_iterator found = widths.find(type);
+    if (found != widths.end())
+        return found->second;
+    // The printer's generated widths, unkbyte9 and the like.
+    std::string stem;
+    int size = 0;
+    if (split_generic_type(type, stem, size) && size > 0 && size <= 16)
+        return size;
+    return 0;
+}
+
+// The decompiler names a stack slot after where it sits, and prints one local
+// per slot. That is faithful to the frame and wrong as C: a call handed the
+// address of one slot writes over the slots above it - a `stat` is a hundred
+// and forty-four bytes across eighteen of them - and the compiler is free to
+// put those eighteen locals anywhere it likes. The recovered program then
+// overwrites its own frame and faults, having read perfectly well the whole
+// time.
+//
+// A run of slots that sits contiguously in the frame and has any member's
+// address taken is therefore declared as one structure. The names, the types
+// and every use stay exactly as they were, one field selection deeper; what
+// changes is that C now has to lay them out the way the program does. Only
+// runs of one width are packed, so the structure carries no padding of its own
+// and its fields land where the frame put them.
+std::string pack_stack_frames(const std::string &source, std::vector<std::string> &introduced)
+{
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(source);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+
+    struct Slot {
+        std::string name;
+        std::string type;
+        std::string indent;
+        size_t line = 0;
+        long offset = 0;
+        int width = 0;
+        bool addressed = false;
+    };
+    std::vector<Slot> slots;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const std::string &line = lines[i];
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos || line.find(';') == std::string::npos)
+            continue;
+        const size_t semi = line.find(';');
+        if (line.find_first_not_of(" \t", semi + 1) != std::string::npos)
+            continue;
+        // `<type> <name>;` and nothing else: no initialiser, no punctuation.
+        const std::string body = trim_copy(line.substr(first, semi - first));
+        const size_t gap = body.rfind(' ');
+        if (gap == std::string::npos || body.find_first_of("*[]()=,") != std::string::npos)
+            continue;
+        Slot slot;
+        slot.type = trim_copy(body.substr(0, gap));
+        slot.name = trim_copy(body.substr(gap + 1));
+        if (!is_c_name(slot.name) || slot.type.empty())
+            continue;
+        slot.width = scalar_width(slot.type);
+        if (slot.width == 0 || !stack_slot(slot.name, slot.offset))
+            continue;
+        slot.indent = line.substr(0, first);
+        slot.line = i;
+        slots.push_back(slot);
+    }
+    if (slots.size() < 2)
+        return source;
+
+    for (Slot &slot : slots) {
+        for (size_t i = 0; i < lines.size() && !slot.addressed; ++i) {
+            if (i == slot.line)
+                continue;
+            size_t at = lines[i].find(slot.name);
+            while (at != std::string::npos) {
+                const bool whole =
+                    (at == 0 || (!std::isalnum(static_cast<unsigned char>(lines[i][at - 1])) &&
+                                 lines[i][at - 1] != '_')) &&
+                    (at + slot.name.size() >= lines[i].size() ||
+                     (!std::isalnum(static_cast<unsigned char>(lines[i][at + slot.name.size()])) &&
+                      lines[i][at + slot.name.size()] != '_'));
+                if (whole && at > 0 && lines[i][at - 1] == '&') {
+                    slot.addressed = true;
+                    break;
+                }
+                at = lines[i].find(slot.name, at + 1);
+            }
+        }
+    }
+
+    // Frame offsets count downwards from the top of the frame, so the largest
+    // offset is the lowest address and the run reads from there upwards.
+    std::sort(slots.begin(), slots.end(),
+              [](const Slot &a, const Slot &b) { return a.offset > b.offset; });
+
+    std::map<std::string, std::string> field_of; // slot name -> structure name
+    std::map<size_t, std::string> replacement;   // decl line -> what to write there
+    std::set<size_t> dropped;                    // decl lines the structure absorbs
+    int frames = 0;
+    for (size_t start = 0; start < slots.size();) {
+        size_t end = start + 1;
+        while (end < slots.size() && slots[end].width == slots[start].width &&
+               slots[end - 1].offset - slots[end].offset == slots[end - 1].width)
+            ++end;
+        bool addressed = false;
+        for (size_t i = start; i < end; ++i)
+            addressed = addressed || slots[i].addressed;
+        const long span = slots[start].offset - slots[end - 1].offset + slots[end - 1].width;
+        if (end - start >= 2 && addressed && span >= 16) {
+            // Not a name the naming pass can also produce: a leaked stack
+            // symbol reaches the unit as `stackFrame`, and a local of the same
+            // name would hide it.
+            const std::string frame =
+                "astralFrame" + (frames == 0 ? std::string() : std::to_string(frames + 1));
+            ++frames;
+            introduced.push_back(frame);
+            std::string text = slots[start].indent + "struct {\n";
+            for (size_t i = start; i < end; ++i)
+                text += slots[start].indent + "    " + slots[i].type + " " + slots[i].name + ";\n";
+            text += slots[start].indent + "} " + frame + ";";
+            replacement[slots[start].line] = text;
+            for (size_t i = start; i < end; ++i) {
+                field_of[slots[i].name] = frame;
+                if (i != start)
+                    dropped.insert(slots[i].line);
+            }
+        }
+        start = end;
+    }
+    if (field_of.empty())
+        return source;
+
+    std::string out;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (dropped.count(i) != 0)
+            continue;
+        std::string line;
+        const std::map<size_t, std::string>::const_iterator whole = replacement.find(i);
+        if (whole != replacement.end()) {
+            line = whole->second;
+        } else {
+            const std::string &original = lines[i];
+            for (size_t j = 0; j < original.size();) {
+                if (!std::isalpha(static_cast<unsigned char>(original[j])) && original[j] != '_') {
+                    line.push_back(original[j]);
+                    ++j;
+                    continue;
+                }
+                const size_t start = j;
+                while (j < original.size() && (std::isalnum(static_cast<unsigned char>(original[j])) ||
+                                               original[j] == '_'))
+                    ++j;
+                const std::string word = original.substr(start, j - start);
+                // A field selection is not a name to substitute again.
+                const bool selected = start > 0 && (original[start - 1] == '.' ||
+                                                    (start > 1 && original[start - 2] == '-' &&
+                                                     original[start - 1] == '>'));
+                const std::map<std::string, std::string>::const_iterator found =
+                    field_of.find(word);
+                if (found != field_of.end() && !selected)
+                    line += found->second + "." + word;
+                else
+                    line += word;
+            }
+        }
+        out += line;
+        if (i + 1 < lines.size() || (!source.empty() && source.back() == '\n'))
+            out.push_back('\n');
+    }
+    return out;
 }
 
 // Promotes a stack slot the code treats purely as a byte buffer to a real
@@ -1655,6 +2048,16 @@ void realize_c(FunctionResult &function)
     function.c_code_real = promote_buffers(function.c_code_real);
     function.c_code_real = merge_string_terminators(function.c_code_real);
     function.c_code_real = copy_propagate(function.c_code_real);
+    // Last of the rewrites that work on names, because it is the one that puts
+    // a name inside something else: a pass that still expects to find a slot's
+    // declaration would no longer find it.
+    // The frames this introduces are declarations the body now carries, so they
+    // are recorded as locals: what a function declares itself is not something
+    // it references from elsewhere.
+    std::vector<std::string> frames;
+    function.c_code_real = pack_stack_frames(function.c_code_real, frames);
+    for (const std::string &frame : frames)
+        function.local_names.push_back(frame);
     function.c_code_real = scope_declarations(function.c_code_real);
 }
 
@@ -2128,7 +2531,18 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     // Once more over the finished unit. A function's locals are written from the
     // types it recorded, so a sixteen-byte local assigned to whole is only
     // visible as one here, after those types have been spelled out.
-    return rewrite_wide_values(out.str());
+    std::string unit = rewrite_wide_values(out.str());
+
+    // And once the whole unit is in hand, every call in it can be measured
+    // against the definition it names, which is only knowable here.
+    std::map<std::string, Arity> arities;
+    for (const FunctionResult &function : functions) {
+        std::string name;
+        Arity arity;
+        if (arity_of_signature(function.signature_real, name, arity))
+            arities[name] = arity;
+    }
+    return reconcile_call_arity(unit, arities);
 }
 
 } // namespace astral_internal

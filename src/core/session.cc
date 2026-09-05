@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <sys/stat.h>
 
 #include "assembler.hh"
@@ -1353,6 +1354,17 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
         // The user's own names go on last, so nothing the engine chose can
         // overwrite them.
         apply_local_renames(fd, out);
+
+        // What this function turned out to take is now settled, so hold it
+        // there. A caller decompiled later works out the arguments of a call
+        // from what it can see at that one call site, and where the value was
+        // already in the register it travels in there is nothing to see: the
+        // call prints with nothing in it while the body it reaches takes an
+        // argument. Holding the prototype makes every call site agree with the
+        // definition, which is the difference between C that reads and C that
+        // compiles.
+        if (!fd->getFuncProto().isInputLocked() && !fd->getFuncProto().isDotdotdot())
+            fd->getFuncProto().setInputLock(true);
 
         realize_c(out);
         collect_externals(out, fd);
@@ -2828,8 +2840,39 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
 
     // The second pass decompiles everything again now that the names are
     // settled, so callers and callees agree.
-    std::vector<uint64_t> ordered(discovered.begin(), discovered.end());
-    std::sort(ordered.begin(), ordered.end());
+    //
+    // Callees first. A function's prototype is held once it has been analysed,
+    // and a caller only honours what is already held when it is analysed
+    // itself, so taking the graph from the leaves upwards is what makes a call
+    // site pass what the body it reaches takes. Within that, address order,
+    // so a run is the same every time; a cycle is broken by whichever of its
+    // members is reached first.
+    std::vector<uint64_t> ordered;
+    ordered.reserve(discovered.size());
+    {
+        std::set<uint64_t> placed;
+        std::set<uint64_t> underway;
+        std::function<void(uint64_t)> place = [&](uint64_t address) {
+            if (placed.count(address) != 0 || !underway.insert(address).second)
+                return;
+            auto found = found_results.find(address);
+            if (found != found_results.end()) {
+                std::vector<uint64_t> callees(found->second.callees.begin(),
+                                              found->second.callees.end());
+                std::sort(callees.begin(), callees.end());
+                for (uint64_t callee : callees)
+                    if (discovered.count(callee) != 0)
+                        place(callee);
+            }
+            underway.erase(address);
+            if (placed.insert(address).second)
+                ordered.push_back(address);
+        };
+        std::vector<uint64_t> roots(discovered.begin(), discovered.end());
+        std::sort(roots.begin(), roots.end());
+        for (uint64_t address : roots)
+            place(address);
+    }
     std::map<uint64_t, FunctionResult> final_results;
     std::map<uint64_t, std::string> final_names;
     pool.run(ordered, &settled_names, final_results, final_names, nullptr, first_error);
