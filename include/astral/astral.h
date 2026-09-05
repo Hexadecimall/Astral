@@ -329,6 +329,9 @@ ASTRAL_API char *astral_disassemble(astral_program *program, uint64_t address, i
  * where a branch comes back to, and what a loaded address holds. Caller frees. */
 ASTRAL_API char *astral_disassemble_readable(astral_program *program, uint64_t address,
                                              int count);
+/* A trace, as the debugger recorded it, written the way a readable listing is:
+ * calls and branches by name, and what a loaded address holds. Caller frees. */
+ASTRAL_API char *astral_readable_trace(astral_program *program, const char *raw);
 
 /* --- Running ----------------------------------------------------------------
  *
@@ -344,6 +347,140 @@ ASTRAL_API char *astral_disassemble_readable(astral_program *program, uint64_t a
 ASTRAL_API char *astral_program_run(astral_program *program, uint64_t entry,
                                     const char *const *arguments, const char *input,
                                     uint64_t step_limit);
+
+/* --- Debugging ---------------------------------------------------------------
+ *
+ * The same machine held still. A run reports what a program did; a debugger
+ * stops it where it is told, and while it is stopped everything it holds can be
+ * read and changed. Nothing here touches the operating system: the process
+ * being debugged is not a process, so a program for another architecture debugs
+ * the same as a native one and nothing that happens can escape.
+ *
+ * A debugger reads the program it was opened on, so it must be freed before
+ * that program is. */
+
+typedef struct astral_debugger astral_debugger;
+
+/* Why it is not running just now. */
+typedef enum astral_stop {
+    ASTRAL_STOP_NOT_STARTED = 0,
+    ASTRAL_STOP_STEPPED = 1,     /* the step asked for is done */
+    ASTRAL_STOP_BREAKPOINT = 2,  /* it reached one that was set */
+    ASTRAL_STOP_WATCHPOINT = 3,  /* memory being watched changed */
+    ASTRAL_STOP_RETURNED = 4,    /* the frame being watched returned */
+    ASTRAL_STOP_FINISHED = 5,    /* the program ran to its end */
+    ASTRAL_STOP_STEP_LIMIT = 6,  /* it was still going when the budget ran out */
+    ASTRAL_STOP_FAULT = 7,       /* it did something it could not do */
+    ASTRAL_STOP_CANCELLED = 8    /* something asked it to stop */
+} astral_stop;
+
+/* Opens a run that has not started. `entry` is where to begin, or zero for the
+ * program's own entry point; `arguments` is a NULL-terminated array, argv[0]
+ * included; `input` is what the program reads, or NULL. Returns NULL on
+ * failure. */
+ASTRAL_API astral_debugger *astral_debugger_open(astral_program *program, uint64_t entry,
+                                                 const char *const *arguments, const char *input,
+                                                 uint64_t step_limit);
+ASTRAL_API void astral_debugger_free(astral_debugger *debugger);
+
+/* Puts it at the first instruction with nothing executed yet. */
+ASTRAL_API astral_status astral_debugger_start(astral_debugger *debugger);
+/* One instruction, entering any call it makes. */
+ASTRAL_API astral_status astral_debugger_step(astral_debugger *debugger);
+/* One instruction, running any call it makes to completion. */
+ASTRAL_API astral_status astral_debugger_step_over(astral_debugger *debugger);
+/* Until the current frame returns. */
+ASTRAL_API astral_status astral_debugger_step_out(astral_debugger *debugger);
+/* Until it reaches `address`, a breakpoint, or the end. */
+ASTRAL_API astral_status astral_debugger_run_to(astral_debugger *debugger, uint64_t address);
+/* Until a breakpoint, or the end. */
+ASTRAL_API astral_status astral_debugger_go(astral_debugger *debugger);
+/* Asks a run in progress to stop. Safe to call from another thread; the run
+ * stops at the next instruction and reports ASTRAL_STOP_CANCELLED. */
+ASTRAL_API void astral_debugger_cancel(astral_debugger *debugger);
+
+/* Where it is and why it is there. */
+ASTRAL_API astral_stop astral_debugger_stop_reason(const astral_debugger *debugger);
+/* What happened, said the way it would be shown to a person. Caller frees. */
+ASTRAL_API char *astral_debugger_reason(const astral_debugger *debugger);
+ASTRAL_API uint64_t astral_debugger_address(const astral_debugger *debugger);
+/* The name of whatever contains that address, empty when it has none. Caller
+ * frees. */
+ASTRAL_API char *astral_debugger_function(const astral_debugger *debugger);
+ASTRAL_API uint64_t astral_debugger_steps(const astral_debugger *debugger);
+/* Zero once it has finished or faulted: nothing more will happen. */
+ASTRAL_API int astral_debugger_is_live(const astral_debugger *debugger);
+/* What it wrote since the last stop. Caller frees. */
+ASTRAL_API char *astral_debugger_output(const astral_debugger *debugger);
+/* The library calls made since the last stop, one per line. Caller frees. */
+ASTRAL_API char *astral_debugger_calls(const astral_debugger *debugger);
+
+/* Whether to keep a line for every instruction executed from here on. Off
+ * unless asked for: a line per instruction is millions of them on anything the
+ * size of a real program. */
+ASTRAL_API astral_status astral_debugger_set_trace(astral_debugger *debugger, int on);
+/* Every instruction recorded since tracing was turned on, one per line, in the
+ * order they ran. Caller frees. */
+ASTRAL_API char *astral_debugger_trace(const astral_debugger *debugger);
+
+ASTRAL_API astral_status astral_debugger_add_breakpoint(astral_debugger *debugger,
+                                                        uint64_t address);
+ASTRAL_API astral_status astral_debugger_remove_breakpoint(astral_debugger *debugger,
+                                                           uint64_t address);
+ASTRAL_API void astral_debugger_clear_breakpoints(astral_debugger *debugger);
+ASTRAL_API int astral_debugger_breakpoint_count(const astral_debugger *debugger);
+ASTRAL_API uint64_t astral_debugger_breakpoint(const astral_debugger *debugger, int index);
+
+/* Stops when any byte in the range is written. */
+ASTRAL_API astral_status astral_debugger_add_watchpoint(astral_debugger *debugger,
+                                                        uint64_t address, uint64_t size);
+ASTRAL_API astral_status astral_debugger_remove_watchpoint(astral_debugger *debugger,
+                                                           uint64_t address);
+ASTRAL_API void astral_debugger_clear_watchpoints(astral_debugger *debugger);
+
+/* Every register the architecture names, one "name value" pair per line.
+ * Caller frees. */
+ASTRAL_API char *astral_debugger_registers(const astral_debugger *debugger);
+/* One register by name. Returns ASTRAL_ERR_NO_SUCH_ADDRESS when there is none. */
+ASTRAL_API astral_status astral_debugger_register(const astral_debugger *debugger,
+                                                  const char *name, uint64_t *out);
+ASTRAL_API astral_status astral_debugger_set_register(astral_debugger *debugger, const char *name,
+                                                      uint64_t value);
+
+/* Reads what the program can see. Returns how many bytes were copied; a short
+ * count means the range leaves the memory it has. */
+ASTRAL_API size_t astral_debugger_read(const astral_debugger *debugger, uint64_t address,
+                                       void *out, size_t size);
+ASTRAL_API astral_status astral_debugger_write(astral_debugger *debugger, uint64_t address,
+                                               const void *bytes, size_t size);
+/* The NUL-terminated text at an address, as the program holds it. Caller
+ * frees. */
+ASTRAL_API char *astral_debugger_read_text(const astral_debugger *debugger, uint64_t address);
+
+/* The call stack, innermost first, one frame per line as
+ * "0xaddress 0xframe name". Best effort: the walk stops rather than inventing
+ * frames. Caller frees. */
+ASTRAL_API char *astral_debugger_stack(const astral_debugger *debugger);
+
+/* Runs one function with these arguments and hands back what it answered,
+ * leaving the debugger where it was. This is what makes a single recovered
+ * function testable without running the program around it.
+ *
+ * `arguments` is a NULL-terminated array. An argument written as a number
+ * ("42", "0x2a") is passed as that number; anything else is written into memory
+ * the call can reach and passed as a pointer to it. `output` may be NULL;
+ * otherwise it receives what the call wrote, and the caller frees it. */
+ASTRAL_API astral_status astral_debugger_call(astral_debugger *debugger, uint64_t address,
+                                              const char *const *arguments, uint64_t step_limit,
+                                              uint64_t *result, char **output);
+
+/* Everything the machine holds, so a run can be wound back and tried again with
+ * something changed. The bytes are opaque. Call with `out` NULL to learn the
+ * size, then again with a buffer that big; the return is the size needed. */
+ASTRAL_API size_t astral_debugger_snapshot(const astral_debugger *debugger, void *out,
+                                           size_t size);
+ASTRAL_API astral_status astral_debugger_restore(astral_debugger *debugger, const void *bytes,
+                                                 size_t size);
 
 /* P-code listing for `count` instructions starting at `address`. Caller frees. */
 ASTRAL_API char *astral_pcode(astral_program *program, uint64_t address, int count);

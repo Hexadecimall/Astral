@@ -47,6 +47,21 @@ pub struct astral_function {
 }
 
 #[repr(C)]
+pub struct astral_debugger {
+    _private: [u8; 0],
+}
+
+pub const ASTRAL_STOP_NOT_STARTED: c_int = 0;
+pub const ASTRAL_STOP_STEPPED: c_int = 1;
+pub const ASTRAL_STOP_BREAKPOINT: c_int = 2;
+pub const ASTRAL_STOP_WATCHPOINT: c_int = 3;
+pub const ASTRAL_STOP_RETURNED: c_int = 4;
+pub const ASTRAL_STOP_FINISHED: c_int = 5;
+pub const ASTRAL_STOP_STEP_LIMIT: c_int = 6;
+pub const ASTRAL_STOP_FAULT: c_int = 7;
+pub const ASTRAL_STOP_CANCELLED: c_int = 8;
+
+#[repr(C)]
 pub struct astral_contribution {
     _private: [u8; 0],
 }
@@ -272,6 +287,92 @@ extern "C" {
         count: c_int,
     ) -> *mut c_char;
     pub fn astral_pcode(program: *mut astral_program, address: u64, count: c_int) -> *mut c_char;
+    pub fn astral_readable_trace(program: *mut astral_program, raw: *const c_char)
+        -> *mut c_char;
+
+    pub fn astral_debugger_open(
+        program: *mut astral_program,
+        entry: u64,
+        arguments: *const *const c_char,
+        input: *const c_char,
+        step_limit: u64,
+    ) -> *mut astral_debugger;
+    pub fn astral_debugger_free(debugger: *mut astral_debugger);
+    pub fn astral_debugger_start(debugger: *mut astral_debugger) -> c_int;
+    pub fn astral_debugger_step(debugger: *mut astral_debugger) -> c_int;
+    pub fn astral_debugger_step_over(debugger: *mut astral_debugger) -> c_int;
+    pub fn astral_debugger_step_out(debugger: *mut astral_debugger) -> c_int;
+    pub fn astral_debugger_run_to(debugger: *mut astral_debugger, address: u64) -> c_int;
+    pub fn astral_debugger_go(debugger: *mut astral_debugger) -> c_int;
+    pub fn astral_debugger_cancel(debugger: *mut astral_debugger);
+    pub fn astral_debugger_stop_reason(debugger: *const astral_debugger) -> c_int;
+    pub fn astral_debugger_reason(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_address(debugger: *const astral_debugger) -> u64;
+    pub fn astral_debugger_function(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_steps(debugger: *const astral_debugger) -> u64;
+    pub fn astral_debugger_is_live(debugger: *const astral_debugger) -> c_int;
+    pub fn astral_debugger_output(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_calls(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_set_trace(debugger: *mut astral_debugger, on: c_int) -> c_int;
+    pub fn astral_debugger_trace(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_add_breakpoint(debugger: *mut astral_debugger, address: u64) -> c_int;
+    pub fn astral_debugger_remove_breakpoint(debugger: *mut astral_debugger, address: u64) -> c_int;
+    pub fn astral_debugger_clear_breakpoints(debugger: *mut astral_debugger);
+    pub fn astral_debugger_breakpoint_count(debugger: *const astral_debugger) -> c_int;
+    pub fn astral_debugger_breakpoint(debugger: *const astral_debugger, index: c_int) -> u64;
+    pub fn astral_debugger_add_watchpoint(
+        debugger: *mut astral_debugger,
+        address: u64,
+        size: u64,
+    ) -> c_int;
+    pub fn astral_debugger_remove_watchpoint(debugger: *mut astral_debugger, address: u64) -> c_int;
+    pub fn astral_debugger_clear_watchpoints(debugger: *mut astral_debugger);
+    pub fn astral_debugger_registers(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_register(
+        debugger: *const astral_debugger,
+        name: *const c_char,
+        out: *mut u64,
+    ) -> c_int;
+    pub fn astral_debugger_set_register(
+        debugger: *mut astral_debugger,
+        name: *const c_char,
+        value: u64,
+    ) -> c_int;
+    pub fn astral_debugger_read(
+        debugger: *const astral_debugger,
+        address: u64,
+        out: *mut c_void,
+        size: usize,
+    ) -> usize;
+    pub fn astral_debugger_write(
+        debugger: *mut astral_debugger,
+        address: u64,
+        bytes: *const c_void,
+        size: usize,
+    ) -> c_int;
+    pub fn astral_debugger_read_text(
+        debugger: *const astral_debugger,
+        address: u64,
+    ) -> *mut c_char;
+    pub fn astral_debugger_stack(debugger: *const astral_debugger) -> *mut c_char;
+    pub fn astral_debugger_call(
+        debugger: *mut astral_debugger,
+        address: u64,
+        arguments: *const *const c_char,
+        step_limit: u64,
+        result: *mut u64,
+        output: *mut *mut c_char,
+    ) -> c_int;
+    pub fn astral_debugger_snapshot(
+        debugger: *const astral_debugger,
+        out: *mut c_void,
+        size: usize,
+    ) -> usize;
+    pub fn astral_debugger_restore(
+        debugger: *mut astral_debugger,
+        bytes: *const c_void,
+        size: usize,
+    ) -> c_int;
     pub fn astral_string_free(string: *mut c_char);
 
     pub fn astral_emit_c(

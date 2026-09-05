@@ -10,6 +10,7 @@
 #include "session.hh"
 #include "source_learn.hh"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -724,6 +725,16 @@ char *astral_disassemble_readable(astral_program *program, uint64_t address, int
     return copy_string(out);
 }
 
+char *astral_readable_trace(astral_program *program, const char *raw)
+{
+    if (program == nullptr || raw == nullptr) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+        return nullptr;
+    }
+    clear_error();
+    return copy_string(program->session->readable_trace(raw));
+}
+
 char *astral_pcode(astral_program *program, uint64_t address, int count)
 {
     if (program == nullptr) {
@@ -1038,4 +1049,416 @@ char *astral_program_run(astral_program *program, uint64_t entry, const char *co
     report << '\n';
     clear_error();
     return copy_string(report.str());
+}
+
+/* --- Debugging ----------------------------------------------------------- */
+
+struct astral_debugger {
+    std::unique_ptr<astral_internal::emulator::Debugger> value;
+};
+
+namespace {
+
+using astral_internal::emulator::Debugger;
+
+// An argument written as a number is passed as that number; anything else is a
+// string, which is what most functions worth calling by hand take.
+bool argument_is_number(const char *text, uint64_t &value)
+{
+    if (text == nullptr || *text == '\0')
+        return false;
+    char *end = nullptr;
+    const int base = (text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) ? 16 : 10;
+    const unsigned long long parsed = std::strtoull(text, &end, base);
+    if (end == text || *end != '\0')
+        return false;
+    value = parsed;
+    return true;
+}
+
+std::string lines_from(const std::vector<std::string> &all)
+{
+    std::string out;
+    for (const std::string &one : all) {
+        out += one;
+        out += '\n';
+    }
+    return out;
+}
+
+} // namespace
+
+astral_debugger *astral_debugger_open(astral_program *program, uint64_t entry,
+                                      const char *const *arguments, const char *input,
+                                      uint64_t step_limit)
+{
+    if (program == nullptr) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+        return nullptr;
+    }
+    astral_internal::emulator::RunOptions options;
+    options.entry = entry;
+    if (arguments != nullptr)
+        for (const char *const *one = arguments; *one != nullptr; ++one)
+            options.arguments.push_back(*one);
+    if (input != nullptr)
+        options.input = input;
+    if (step_limit != 0)
+        options.step_limit = step_limit;
+
+    std::string error;
+    std::unique_ptr<Debugger> made = program->session->debug(options, error);
+    if (!made) {
+        fail(ASTRAL_ERR_INTERNAL, error.empty() ? "this program cannot be debugged" : error);
+        return nullptr;
+    }
+    auto *handle = new (std::nothrow) astral_debugger();
+    if (handle == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    handle->value = std::move(made);
+    clear_error();
+    return handle;
+}
+
+void astral_debugger_free(astral_debugger *debugger) { delete debugger; }
+
+astral_status astral_debugger_start(astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->start();
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_step(astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->step();
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_step_over(astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->step_over();
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_step_out(astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->step_out();
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_run_to(astral_debugger *debugger, uint64_t address)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->run_to(address);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_go(astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->go();
+    clear_error();
+    return ASTRAL_OK;
+}
+
+void astral_debugger_cancel(astral_debugger *debugger)
+{
+    if (debugger != nullptr)
+        debugger->value->cancel();
+}
+
+astral_stop astral_debugger_stop_reason(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return ASTRAL_STOP_NOT_STARTED;
+    return static_cast<astral_stop>(debugger->value->state().stop);
+}
+
+char *astral_debugger_reason(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    return copy_string(debugger->value->state().reason);
+}
+
+uint64_t astral_debugger_address(const astral_debugger *debugger)
+{
+    return debugger == nullptr ? 0 : debugger->value->state().address;
+}
+
+char *astral_debugger_function(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    return copy_string(debugger->value->state().function);
+}
+
+uint64_t astral_debugger_steps(const astral_debugger *debugger)
+{
+    return debugger == nullptr ? 0 : debugger->value->state().steps;
+}
+
+int astral_debugger_is_live(const astral_debugger *debugger)
+{
+    return debugger != nullptr && debugger->value->state().live ? 1 : 0;
+}
+
+char *astral_debugger_output(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    return copy_string(debugger->value->state().output);
+}
+
+char *astral_debugger_calls(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    return copy_string(lines_from(debugger->value->state().calls));
+}
+
+astral_status astral_debugger_set_trace(astral_debugger *debugger, int on)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->set_trace(on != 0);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+char *astral_debugger_trace(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    return copy_string(lines_from(debugger->value->outcome().trace));
+}
+
+astral_status astral_debugger_add_breakpoint(astral_debugger *debugger, uint64_t address)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->add_breakpoint(address);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_remove_breakpoint(astral_debugger *debugger, uint64_t address)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->remove_breakpoint(address);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+void astral_debugger_clear_breakpoints(astral_debugger *debugger)
+{
+    if (debugger != nullptr)
+        debugger->value->clear_breakpoints();
+}
+
+int astral_debugger_breakpoint_count(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return 0;
+    return static_cast<int>(debugger->value->breakpoints().size());
+}
+
+uint64_t astral_debugger_breakpoint(const astral_debugger *debugger, int index)
+{
+    if (debugger == nullptr || index < 0)
+        return 0;
+    const std::vector<uint64_t> all = debugger->value->breakpoints();
+    if (static_cast<size_t>(index) >= all.size())
+        return 0;
+    return all[static_cast<size_t>(index)];
+}
+
+astral_status astral_debugger_add_watchpoint(astral_debugger *debugger, uint64_t address,
+                                             uint64_t size)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->add_watchpoint(address, size);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_debugger_remove_watchpoint(astral_debugger *debugger, uint64_t address)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    debugger->value->remove_watchpoint(address);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+void astral_debugger_clear_watchpoints(astral_debugger *debugger)
+{
+    if (debugger != nullptr)
+        debugger->value->clear_watchpoints();
+}
+
+char *astral_debugger_registers(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    std::string out;
+    char line[64];
+    for (const Debugger::Register &one : debugger->value->registers()) {
+        std::snprintf(line, sizeof line, " 0x%llx\n", static_cast<unsigned long long>(one.value));
+        out += one.name;
+        out += line;
+    }
+    return copy_string(out);
+}
+
+astral_status astral_debugger_register(const astral_debugger *debugger, const char *name,
+                                       uint64_t *out)
+{
+    if (debugger == nullptr || name == nullptr || out == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger, name or result");
+    for (const Debugger::Register &one : debugger->value->registers()) {
+        if (one.name == name) {
+            *out = one.value;
+            clear_error();
+            return ASTRAL_OK;
+        }
+    }
+    return fail(ASTRAL_ERR_NO_SUCH_ADDRESS, std::string("this architecture has no register ") + name);
+}
+
+astral_status astral_debugger_set_register(astral_debugger *debugger, const char *name,
+                                           uint64_t value)
+{
+    if (debugger == nullptr || name == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger or name");
+    std::string error;
+    if (!debugger->value->set_register(name, value, error))
+        return fail(ASTRAL_ERR_NO_SUCH_ADDRESS, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+size_t astral_debugger_read(const astral_debugger *debugger, uint64_t address, void *out,
+                            size_t size)
+{
+    if (debugger == nullptr || out == nullptr)
+        return 0;
+    const std::vector<uint8_t> bytes = debugger->value->read(address, size);
+    std::memcpy(out, bytes.data(), bytes.size());
+    return bytes.size();
+}
+
+astral_status astral_debugger_write(astral_debugger *debugger, uint64_t address, const void *bytes,
+                                    size_t size)
+{
+    if (debugger == nullptr || (bytes == nullptr && size != 0))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger or bytes");
+    const uint8_t *from = static_cast<const uint8_t *>(bytes);
+    std::string error;
+    if (!debugger->value->write(address, std::vector<uint8_t>(from, from + size), error))
+        return fail(ASTRAL_ERR_NO_SUCH_ADDRESS, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+char *astral_debugger_read_text(const astral_debugger *debugger, uint64_t address)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    std::string out;
+    for (uint64_t i = 0; i < 4096; ++i) {
+        const std::vector<uint8_t> one = debugger->value->read(address + i, 1);
+        if (one.empty() || one[0] == 0)
+            break;
+        out.push_back(static_cast<char>(one[0]));
+    }
+    return copy_string(out);
+}
+
+char *astral_debugger_stack(const astral_debugger *debugger)
+{
+    if (debugger == nullptr)
+        return nullptr;
+    std::string out;
+    char line[80];
+    for (const Debugger::Frame &frame : debugger->value->stack()) {
+        std::snprintf(line, sizeof line, "0x%llx 0x%llx ",
+                      static_cast<unsigned long long>(frame.address),
+                      static_cast<unsigned long long>(frame.frame_pointer));
+        out += line;
+        out += frame.function;
+        out += '\n';
+    }
+    return copy_string(out);
+}
+
+astral_status astral_debugger_call(astral_debugger *debugger, uint64_t address,
+                                   const char *const *arguments, uint64_t step_limit,
+                                   uint64_t *result, char **output)
+{
+    if (debugger == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger");
+    std::vector<Debugger::Argument> given;
+    if (arguments != nullptr) {
+        for (const char *const *one = arguments; *one != nullptr; ++one) {
+            Debugger::Argument argument;
+            if (argument_is_number(*one, argument.value)) {
+                argument.is_text = false;
+            } else {
+                argument.is_text = true;
+                argument.text = *one;
+            }
+            given.push_back(argument);
+        }
+    }
+    const Debugger::CallResult answer = debugger->value->call(address, given, step_limit);
+    if (!answer.ok)
+        return fail(ASTRAL_ERR_INTERNAL, answer.error);
+    if (result != nullptr)
+        *result = answer.result;
+    if (output != nullptr)
+        *output = copy_string(answer.output);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+size_t astral_debugger_snapshot(const astral_debugger *debugger, void *out, size_t size)
+{
+    if (debugger == nullptr)
+        return 0;
+    const std::vector<uint8_t> bytes = debugger->value->snapshot();
+    if (out != nullptr && size >= bytes.size())
+        std::memcpy(out, bytes.data(), bytes.size());
+    return bytes.size();
+}
+
+astral_status astral_debugger_restore(astral_debugger *debugger, const void *bytes, size_t size)
+{
+    if (debugger == nullptr || bytes == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null debugger or snapshot");
+    const uint8_t *from = static_cast<const uint8_t *>(bytes);
+    std::string error;
+    if (!debugger->value->restore(std::vector<uint8_t>(from, from + size), error))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
+    clear_error();
+    return ASTRAL_OK;
 }

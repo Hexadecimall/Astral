@@ -8,6 +8,7 @@
 // path, so there is nothing to keep in step and nothing to lose.
 
 mod contribute;
+mod debug;
 mod help;
 mod knowledge;
 mod learn;
@@ -51,13 +52,16 @@ fn dispatch(arguments: &[String]) -> i32 {
         }
         "update" => update::run_command(rest),
         "sleigh" => sleigh::run(rest),
+        "debug" => debug::run(rest),
         "knowledge" => knowledge::run(rest),
         "learn" => learn::run(rest),
         "patch" => patch::run(rest),
         // Con-Tri-Bute, for anyone who types it often.
         "contribute" | "ctb" => contribute::run(rest),
         "info" => with_binary(Command::Info, rest),
-        "run" => with_binary(Command::Run, rest),
+        // `run` was a second way to say `debug` with nothing to stop for. Left
+        // here rather than deleted in case it is wanted back.
+        // "run" => with_binary(Command::Run, rest),
         "decompile" => with_binary(Command::Decompile, rest),
         "disassemble" | "dis" => with_binary(Command::Disassemble, rest),
         "languages" => with_binary(Command::Languages, rest),
@@ -73,6 +77,8 @@ fn topic(wanted: &str) -> i32 {
         "decompile" => help::decompile(Stream::Out),
         "info" => help::info(Stream::Out),
         "disassemble" | "dis" => help::disassemble(Stream::Out),
+        // "run" => help::run(Stream::Out),
+        "debug" => help::debug(Stream::Out),
         "languages" => help::languages(Stream::Out),
         "version" => help::version(Stream::Out),
         "knowledge" => knowledge::usage(),

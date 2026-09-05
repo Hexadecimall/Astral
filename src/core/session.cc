@@ -621,6 +621,12 @@ emulator::RunResult Session::run(const emulator::RunOptions &options)
     return emulator::run(arch_, image_, options);
 }
 
+std::unique_ptr<emulator::Debugger> Session::debug(const emulator::RunOptions &options,
+                                                   std::string &error)
+{
+    return emulator::Debugger::create(arch_, image_, options, error);
+}
+
 bool Session::disassemble(uint64_t address, int count, std::string &out, std::string &error)
 {
     if (count <= 0) {
@@ -671,6 +677,56 @@ bool Session::disassemble_readable(uint64_t address, int count, std::string &out
     }
     out = readable_listing_text(raw, image_, address, last);
     return true;
+}
+
+std::string Session::readable_trace(const std::string &raw)
+{
+    // The listing needs to know which addresses are inside what it is showing,
+    // so a branch within the trace reads as a target rather than a stranger.
+    uint64_t first = UINT64_MAX;
+    uint64_t last = 0;
+    {
+        std::istringstream in(raw);
+        std::string line;
+        while (std::getline(in, line)) {
+            const size_t colon = line.find(": ");
+            if (colon == std::string::npos)
+                continue;
+            const uint64_t at = std::strtoull(line.substr(0, colon).c_str(), nullptr, 16);
+            first = std::min(first, at);
+            last = std::max(last, at);
+        }
+    }
+    if (first == UINT64_MAX)
+        return std::string();
+
+    // Both bounds are the same address so nothing is given a label. In a
+    // listing a label says where a branch comes back to; in a trace the answer
+    // is always the next line, so a label would name what is already there.
+    (void)last;
+
+    std::ostringstream out;
+    std::string previous;
+    for (const ListingLine &line : readable_listing(raw, image_, first, first)) {
+        if (line.is_label)
+            continue;
+        // A call is answered at the stub it branched to, which is a second line
+        // saying the name the branch above it already said. Worth keeping when
+        // the branch was indirect and said no name at all; noise otherwise.
+        if (line.text.compare(0, 5, "call ") == 0 && previous.size() >= line.text.size() - 5 &&
+            previous.compare(previous.size() - (line.text.size() - 5), std::string::npos,
+                             line.text.substr(5)) == 0)
+            continue;
+        previous = line.text;
+        char address[24];
+        std::snprintf(address, sizeof address, "0x%012llx",
+                      static_cast<unsigned long long>(line.address));
+        out << "  " << address << "  " << line.text;
+        if (!line.comment.empty())
+            out << "    ; " << line.comment;
+        out << '\n';
+    }
+    return out.str();
 }
 
 bool Session::pcode(uint64_t address, int count, std::string &out, std::string &error)

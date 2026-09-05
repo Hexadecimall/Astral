@@ -18,7 +18,7 @@ pub mod sys;
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::marker::PhantomData;
-use std::os::raw::{c_char, c_int, c_uint};
+use std::os::raw::{c_char, c_int, c_uint, c_void};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -519,6 +519,17 @@ impl Program {
         Self::take_string(text, Status::NoSuchAddress)
     }
 
+    /// A trace, as the debugger recorded it, written the way a readable listing
+    /// is: calls and branches by name, and what a loaded address holds.
+    pub fn readable_trace(&self, raw: &str) -> Result<String> {
+        let raw = std::ffi::CString::new(raw).map_err(|_| Error {
+            status: Status::InvalidArgument,
+            message: "the trace contains a zero byte".to_string(),
+        })?;
+        let text = unsafe { sys::astral_readable_trace(self.handle, raw.as_ptr()) };
+        Self::take_string(text, Status::InvalidArgument)
+    }
+
     /// Runs the program, stepping its instructions as p-code over memory Astral
     /// owns. Nothing is handed to the operating system: a call into the C
     /// library is answered by Astral, so a binary that cannot run here still
@@ -1015,5 +1026,348 @@ impl Function {
 impl Drop for Function {
     fn drop(&mut self) {
         unsafe { sys::astral_function_free(self.handle) };
+    }
+}
+
+/// Why a debugged program is not running just now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    NotStarted,
+    Stepped,
+    Breakpoint,
+    Watchpoint,
+    Returned,
+    Finished,
+    StepLimit,
+    Fault,
+    Cancelled,
+}
+
+impl From<c_int> for Stop {
+    fn from(code: c_int) -> Self {
+        match code {
+            sys::ASTRAL_STOP_STEPPED => Stop::Stepped,
+            sys::ASTRAL_STOP_BREAKPOINT => Stop::Breakpoint,
+            sys::ASTRAL_STOP_WATCHPOINT => Stop::Watchpoint,
+            sys::ASTRAL_STOP_RETURNED => Stop::Returned,
+            sys::ASTRAL_STOP_FINISHED => Stop::Finished,
+            sys::ASTRAL_STOP_STEP_LIMIT => Stop::StepLimit,
+            sys::ASTRAL_STOP_FAULT => Stop::Fault,
+            sys::ASTRAL_STOP_CANCELLED => Stop::Cancelled,
+            _ => Stop::NotStarted,
+        }
+    }
+}
+
+/// Where a debugged program is and why it is there.
+#[derive(Debug, Clone)]
+pub struct State {
+    pub stop: Stop,
+    pub reason: String,
+    pub address: u64,
+    pub function: String,
+    pub steps: u64,
+    pub live: bool,
+    /// What it wrote and which library calls it made, since the last stop.
+    pub output: String,
+    pub calls: Vec<String>,
+}
+
+/// One frame of a recovered call stack.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub address: u64,
+    pub frame_pointer: u64,
+    pub function: String,
+}
+
+/// A program stopped where it was told, with everything it holds readable and
+/// changeable while it is stopped.
+///
+/// Nothing here touches the operating system: the process being debugged is not
+/// a process, so a program for another architecture debugs the same as a native
+/// one and nothing that happens can escape.
+pub struct Debugger {
+    handle: *mut sys::astral_debugger,
+}
+
+impl Program {
+    /// Opens the program on the emulator and holds it still. `entry` of zero is
+    /// the program's own entry point.
+    pub fn debug(
+        &mut self,
+        entry: u64,
+        arguments: &[String],
+        input: &str,
+        step_limit: u64,
+    ) -> Result<Debugger> {
+        let held: Vec<CString> = arguments
+            .iter()
+            .map(|one| to_cstring(one))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pointers: Vec<*const c_char> = held.iter().map(|one| one.as_ptr()).collect();
+        pointers.push(std::ptr::null());
+        let text = to_cstring(input)?;
+        let handle = unsafe {
+            sys::astral_debugger_open(
+                self.handle,
+                entry,
+                pointers.as_ptr(),
+                text.as_ptr(),
+                step_limit,
+            )
+        };
+        if handle.is_null() {
+            return Err(last_error(Status::Internal));
+        }
+        Ok(Debugger { handle })
+    }
+}
+
+impl Debugger {
+    fn owned(text: *mut c_char) -> String {
+        if text.is_null() {
+            return String::new();
+        }
+        let result = unsafe { cstr(text) };
+        unsafe { sys::astral_string_free(text) };
+        result
+    }
+
+    fn lines(text: String) -> Vec<String> {
+        text.lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Where it is and why it is there.
+    pub fn state(&self) -> State {
+        State {
+            stop: Stop::from(unsafe { sys::astral_debugger_stop_reason(self.handle) }),
+            reason: Self::owned(unsafe { sys::astral_debugger_reason(self.handle) }),
+            address: unsafe { sys::astral_debugger_address(self.handle) },
+            function: Self::owned(unsafe { sys::astral_debugger_function(self.handle) }),
+            steps: unsafe { sys::astral_debugger_steps(self.handle) },
+            live: unsafe { sys::astral_debugger_is_live(self.handle) } != 0,
+            output: Self::owned(unsafe { sys::astral_debugger_output(self.handle) }),
+            calls: Self::lines(Self::owned(unsafe {
+                sys::astral_debugger_calls(self.handle)
+            })),
+        }
+    }
+
+    /// Whether to keep a line for every instruction executed from here on. Off
+    /// unless asked for: a line per instruction is millions of them on anything
+    /// the size of a real program.
+    pub fn set_trace(&mut self, on: bool) -> Result<()> {
+        check(unsafe { sys::astral_debugger_set_trace(self.handle, on as c_int) })?;
+        Ok(())
+    }
+
+    /// Every instruction recorded since tracing was turned on, in the order
+    /// they ran.
+    pub fn trace(&self) -> Vec<String> {
+        Self::lines(Self::owned(unsafe { sys::astral_debugger_trace(self.handle) }))
+    }
+
+    /// Puts it at the first instruction with nothing executed yet.
+    pub fn start(&mut self) -> Result<State> {
+        check(unsafe { sys::astral_debugger_start(self.handle) })?;
+        Ok(self.state())
+    }
+
+    /// One instruction, entering any call it makes.
+    pub fn step(&mut self) -> Result<State> {
+        check(unsafe { sys::astral_debugger_step(self.handle) })?;
+        Ok(self.state())
+    }
+
+    /// One instruction, running any call it makes to completion.
+    pub fn step_over(&mut self) -> Result<State> {
+        check(unsafe { sys::astral_debugger_step_over(self.handle) })?;
+        Ok(self.state())
+    }
+
+    /// Until the current frame returns.
+    pub fn step_out(&mut self) -> Result<State> {
+        check(unsafe { sys::astral_debugger_step_out(self.handle) })?;
+        Ok(self.state())
+    }
+
+    /// Until it reaches `address`, a breakpoint, or the end.
+    pub fn run_to(&mut self, address: u64) -> Result<State> {
+        check(unsafe { sys::astral_debugger_run_to(self.handle, address) })?;
+        Ok(self.state())
+    }
+
+    /// Until a breakpoint, or the end.
+    pub fn go(&mut self) -> Result<State> {
+        check(unsafe { sys::astral_debugger_go(self.handle) })?;
+        Ok(self.state())
+    }
+
+    /// Asks a run in progress to stop.
+    pub fn cancel(&self) {
+        unsafe { sys::astral_debugger_cancel(self.handle) };
+    }
+
+    pub fn add_breakpoint(&mut self, address: u64) -> Result<()> {
+        check(unsafe { sys::astral_debugger_add_breakpoint(self.handle, address) })
+    }
+
+    pub fn remove_breakpoint(&mut self, address: u64) -> Result<()> {
+        check(unsafe { sys::astral_debugger_remove_breakpoint(self.handle, address) })
+    }
+
+    pub fn clear_breakpoints(&mut self) {
+        unsafe { sys::astral_debugger_clear_breakpoints(self.handle) };
+    }
+
+    pub fn breakpoints(&self) -> Vec<u64> {
+        let count = unsafe { sys::astral_debugger_breakpoint_count(self.handle) };
+        (0..count)
+            .map(|index| unsafe { sys::astral_debugger_breakpoint(self.handle, index) })
+            .collect()
+    }
+
+    /// Stops when any byte in the range is written.
+    pub fn add_watchpoint(&mut self, address: u64, size: u64) -> Result<()> {
+        check(unsafe { sys::astral_debugger_add_watchpoint(self.handle, address, size) })
+    }
+
+    pub fn remove_watchpoint(&mut self, address: u64) -> Result<()> {
+        check(unsafe { sys::astral_debugger_remove_watchpoint(self.handle, address) })
+    }
+
+    /// Every register the architecture names, with what it holds.
+    pub fn registers(&self) -> Vec<(String, u64)> {
+        Self::lines(Self::owned(unsafe {
+            sys::astral_debugger_registers(self.handle)
+        }))
+        .into_iter()
+        .filter_map(|line| {
+            let (name, value) = line.rsplit_once(' ')?;
+            let digits = value.strip_prefix("0x").unwrap_or(value);
+            Some((name.to_string(), u64::from_str_radix(digits, 16).ok()?))
+        })
+        .collect()
+    }
+
+    pub fn register(&self, name: &str) -> Result<u64> {
+        let name = to_cstring(name)?;
+        let mut value = 0u64;
+        check(unsafe { sys::astral_debugger_register(self.handle, name.as_ptr(), &mut value) })?;
+        Ok(value)
+    }
+
+    pub fn set_register(&mut self, name: &str, value: u64) -> Result<()> {
+        let name = to_cstring(name)?;
+        check(unsafe { sys::astral_debugger_set_register(self.handle, name.as_ptr(), value) })
+    }
+
+    /// Reads what the program can see. A short result means the range leaves
+    /// the memory it has.
+    pub fn read(&self, address: u64, size: usize) -> Vec<u8> {
+        let mut buffer = vec![0u8; size];
+        let got = unsafe {
+            sys::astral_debugger_read(
+                self.handle,
+                address,
+                buffer.as_mut_ptr() as *mut c_void,
+                size,
+            )
+        };
+        buffer.truncate(got);
+        buffer
+    }
+
+    pub fn write(&mut self, address: u64, bytes: &[u8]) -> Result<()> {
+        check(unsafe {
+            sys::astral_debugger_write(
+                self.handle,
+                address,
+                bytes.as_ptr() as *const c_void,
+                bytes.len(),
+            )
+        })
+    }
+
+    /// The NUL-terminated text at an address, as the program holds it.
+    pub fn read_text(&self, address: u64) -> String {
+        Self::owned(unsafe { sys::astral_debugger_read_text(self.handle, address) })
+    }
+
+    /// Innermost first. Best effort: the walk stops rather than inventing
+    /// frames.
+    pub fn stack(&self) -> Vec<Frame> {
+        Self::lines(Self::owned(unsafe {
+            sys::astral_debugger_stack(self.handle)
+        }))
+        .into_iter()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let address = parts.next()?.trim_start_matches("0x");
+            let frame = parts.next()?.trim_start_matches("0x");
+            Some(Frame {
+                address: u64::from_str_radix(address, 16).ok()?,
+                frame_pointer: u64::from_str_radix(frame, 16).ok()?,
+                function: parts.next().unwrap_or("").to_string(),
+            })
+        })
+        .collect()
+    }
+
+    /// Runs one function and hands back what it answered, leaving the debugger
+    /// where it was. An argument written as a number is passed as that number;
+    /// anything else is written into memory the call can reach and passed as a
+    /// pointer to it.
+    pub fn call(&mut self, address: u64, arguments: &[String]) -> Result<(u64, String)> {
+        let held: Vec<CString> = arguments
+            .iter()
+            .map(|one| to_cstring(one))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pointers: Vec<*const c_char> = held.iter().map(|one| one.as_ptr()).collect();
+        pointers.push(std::ptr::null());
+        let mut result = 0u64;
+        let mut output: *mut c_char = std::ptr::null_mut();
+        check(unsafe {
+            sys::astral_debugger_call(
+                self.handle,
+                address,
+                pointers.as_ptr(),
+                0,
+                &mut result,
+                &mut output,
+            )
+        })?;
+        Ok((result, Self::owned(output)))
+    }
+
+    /// Everything the machine holds, so a run can be wound back and tried again
+    /// with something changed. The bytes are opaque.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let size = unsafe { sys::astral_debugger_snapshot(self.handle, std::ptr::null_mut(), 0) };
+        let mut buffer = vec![0u8; size];
+        unsafe {
+            sys::astral_debugger_snapshot(self.handle, buffer.as_mut_ptr() as *mut c_void, size)
+        };
+        buffer
+    }
+
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<()> {
+        check(unsafe {
+            sys::astral_debugger_restore(
+                self.handle,
+                bytes.as_ptr() as *const c_void,
+                bytes.len(),
+            )
+        })
+    }
+}
+
+impl Drop for Debugger {
+    fn drop(&mut self) {
+        unsafe { sys::astral_debugger_free(self.handle) };
     }
 }

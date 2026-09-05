@@ -10,6 +10,7 @@
 #include <functional>
 #include <condition_variable>
 #include "machine.hh"
+#include "emulator/debug.hh"
 
 #include <set>
 #include <thread>
@@ -117,10 +118,22 @@ public:
     // library is answered here rather than by the real one.
     emulator::RunResult run(const emulator::RunOptions &options);
 
+    // The same machine held still, so it can be watched an instruction at a
+    // time rather than only reported on afterwards. Returns null and fills
+    // `error` when the program cannot be set up. The debugger reads this
+    // session's image, so it must not outlive the session.
+    std::unique_ptr<emulator::Debugger> debug(const emulator::RunOptions &options,
+                                              std::string &error);
+
     bool disassemble(uint64_t address, int count, std::string &out, std::string &error);
     // The same instructions, written to be read: calls and branches by name,
     // labels where a branch comes back to, and what a loaded address holds.
     bool disassemble_readable(uint64_t address, int count, std::string &out, std::string &error);
+    // A trace, as the emulator recorded it, written the same way. The lines are
+    // in the order they ran rather than the order they sit in memory, so no
+    // labels are put on them: a branch target in a trace is simply the next
+    // line, and naming it twice would say less, not more.
+    std::string readable_trace(const std::string &raw);
     bool pcode(uint64_t address, int count, std::string &out, std::string &error);
 
     bool decompile(uint64_t address, const std::string &name, FunctionResult &out,

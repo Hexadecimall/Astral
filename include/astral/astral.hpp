@@ -91,6 +91,8 @@ struct COptions {
     unsigned to_flags() const;
 };
 
+class Debugger;
+
 // One decompiled function.
 class Function {
 public:
@@ -234,11 +236,116 @@ public:
     // whose signature no longer covers its bytes.
     void write_patched(const std::string &out_path) const;
 
+    // --- Debugging --------------------------------------------------------
+    // Opens the program on the emulator and holds it still. `entry` of zero is
+    // the program's own entry point. The debugger reads this program, so it
+    // must not outlive it.
+    Debugger debug(uint64_t entry = 0, const std::vector<std::string> &arguments = {},
+                   const std::string &input = std::string(), uint64_t step_limit = 0);
+
 private:
     explicit Program(astral_program *handle) noexcept;
     void reset();
 
     astral_program *handle_ = nullptr;
+};
+
+// A program stopped where it was told, with everything it holds readable and
+// changeable while it is stopped. Nothing here touches the operating system.
+class Debugger {
+public:
+    Debugger() = default;
+    explicit Debugger(astral_debugger *handle) noexcept;
+    ~Debugger();
+
+    Debugger(Debugger &&other) noexcept;
+    Debugger &operator=(Debugger &&other) noexcept;
+    Debugger(const Debugger &) = delete;
+    Debugger &operator=(const Debugger &) = delete;
+
+    explicit operator bool() const noexcept { return handle_ != nullptr; }
+
+    // Why it is not running just now, and where it is.
+    struct State {
+        astral_stop stop = ASTRAL_STOP_NOT_STARTED;
+        std::string reason;
+        uint64_t address = 0;
+        std::string function;
+        uint64_t steps = 0;
+        bool live = true;
+        // What it wrote and which library calls it made, since the last stop.
+        std::string output;
+        std::vector<std::string> calls;
+    };
+
+    State start();
+    State step();
+    State step_over();
+    State step_out();
+    State run_to(uint64_t address);
+    State go();
+    // Safe to call from another thread while a run is in progress.
+    void cancel();
+    State state() const;
+
+    // Whether to keep a line for every instruction executed from here on. Off
+    // unless asked for: a line per instruction is millions of them on anything
+    // the size of a real program.
+    void set_trace(bool on);
+    // Every instruction recorded since, in the order they ran.
+    std::vector<std::string> trace() const;
+
+    void add_breakpoint(uint64_t address);
+    void remove_breakpoint(uint64_t address);
+    void clear_breakpoints();
+    std::vector<uint64_t> breakpoints() const;
+
+    // Stops when any byte in the range is written.
+    void add_watchpoint(uint64_t address, uint64_t size);
+    void remove_watchpoint(uint64_t address);
+    void clear_watchpoints();
+
+    struct Register {
+        std::string name;
+        uint64_t value = 0;
+    };
+    std::vector<Register> registers() const;
+    uint64_t register_value(const std::string &name) const;
+    void set_register(const std::string &name, uint64_t value);
+
+    // A short result means the range leaves the memory the program has.
+    std::vector<uint8_t> read(uint64_t address, size_t size) const;
+    void write(uint64_t address, const std::vector<uint8_t> &bytes);
+    // The NUL-terminated text at an address, as the program holds it.
+    std::string read_text(uint64_t address) const;
+
+    struct Frame {
+        uint64_t address = 0;
+        uint64_t frame_pointer = 0;
+        std::string function;
+    };
+    // Innermost first. Best effort: the walk stops rather than inventing frames.
+    std::vector<Frame> stack() const;
+
+    struct CallResult {
+        uint64_t result = 0;
+        std::string output;
+    };
+    // Runs one function and hands back what it answered, leaving the debugger
+    // where it was. An argument written as a number is passed as that number;
+    // anything else is written into memory the call can reach and passed as a
+    // pointer to it.
+    CallResult call(uint64_t address, const std::vector<std::string> &arguments = {},
+                    uint64_t step_limit = 0);
+
+    // Opaque bytes: registers, and the memory pages that have been written.
+    std::vector<uint8_t> snapshot() const;
+    void restore(const std::vector<uint8_t> &bytes);
+
+private:
+    void reset();
+
+    astral_debugger *handle_ = nullptr;
 };
 
 } // namespace astral

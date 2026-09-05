@@ -12,6 +12,8 @@ pub enum Command {
     Info,
     Decompile,
     Disassemble,
+    // Kept while the `run` command is commented out in main.rs.
+    #[allow(dead_code)]
     Run,
     Languages,
 }

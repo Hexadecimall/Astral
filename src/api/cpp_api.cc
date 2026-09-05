@@ -1,6 +1,8 @@
 // The C++ interface, compiled into the library so consumers need only -lAstral.
 #include "astral/astral.hpp"
 
+#include <cstdlib>
+
 namespace astral {
 namespace {
 
@@ -431,6 +433,257 @@ std::string Program::patch_text() const
 void Program::write_patched(const std::string &out_path) const
 {
     check(astral_program_write_patched(handle_, out_path.c_str()));
+}
+
+
+// --- Debugging -------------------------------------------------------------
+
+namespace {
+
+// Splits a report the C API returns one item per line.
+std::vector<std::string> lines_of(const std::string &text)
+{
+    std::vector<std::string> out;
+    size_t at = 0;
+    while (at < text.size()) {
+        const size_t stop = text.find('\n', at);
+        const size_t end = stop == std::string::npos ? text.size() : stop;
+        if (end > at)
+            out.push_back(text.substr(at, end - at));
+        if (stop == std::string::npos)
+            break;
+        at = stop + 1;
+    }
+    return out;
+}
+
+std::vector<const char *> pointers_to(const std::vector<std::string> &all)
+{
+    std::vector<const char *> out;
+    out.reserve(all.size() + 1);
+    for (const std::string &one : all)
+        out.push_back(one.c_str());
+    out.push_back(nullptr);
+    return out;
+}
+
+} // namespace
+
+Debugger Program::debug(uint64_t entry, const std::vector<std::string> &arguments,
+                        const std::string &input, uint64_t step_limit)
+{
+    const std::vector<const char *> argv = pointers_to(arguments);
+    astral_debugger *handle = astral_debugger_open(handle_, entry, argv.data(),
+                                                   input.empty() ? nullptr : input.c_str(),
+                                                   step_limit);
+    if (handle == nullptr)
+        raise(ASTRAL_ERR_INTERNAL);
+    return Debugger(handle);
+}
+
+Debugger::Debugger(astral_debugger *handle) noexcept : handle_(handle) {}
+
+Debugger::~Debugger() { reset(); }
+
+Debugger::Debugger(Debugger &&other) noexcept : handle_(other.handle_) { other.handle_ = nullptr; }
+
+Debugger &Debugger::operator=(Debugger &&other) noexcept
+{
+    if (this != &other) {
+        reset();
+        handle_ = other.handle_;
+        other.handle_ = nullptr;
+    }
+    return *this;
+}
+
+void Debugger::reset()
+{
+    if (handle_ != nullptr) {
+        astral_debugger_free(handle_);
+        handle_ = nullptr;
+    }
+}
+
+Debugger::State Debugger::state() const
+{
+    State out;
+    out.stop = astral_debugger_stop_reason(handle_);
+    out.reason = take_string(astral_debugger_reason(handle_), ASTRAL_ERR_INTERNAL);
+    out.address = astral_debugger_address(handle_);
+    out.function = take_string(astral_debugger_function(handle_), ASTRAL_ERR_INTERNAL);
+    out.steps = astral_debugger_steps(handle_);
+    out.live = astral_debugger_is_live(handle_) != 0;
+    out.output = take_string(astral_debugger_output(handle_), ASTRAL_ERR_INTERNAL);
+    out.calls = lines_of(take_string(astral_debugger_calls(handle_), ASTRAL_ERR_INTERNAL));
+    return out;
+}
+
+Debugger::State Debugger::start()
+{
+    check(astral_debugger_start(handle_));
+    return state();
+}
+
+Debugger::State Debugger::step()
+{
+    check(astral_debugger_step(handle_));
+    return state();
+}
+
+Debugger::State Debugger::step_over()
+{
+    check(astral_debugger_step_over(handle_));
+    return state();
+}
+
+Debugger::State Debugger::step_out()
+{
+    check(astral_debugger_step_out(handle_));
+    return state();
+}
+
+Debugger::State Debugger::run_to(uint64_t address)
+{
+    check(astral_debugger_run_to(handle_, address));
+    return state();
+}
+
+Debugger::State Debugger::go()
+{
+    check(astral_debugger_go(handle_));
+    return state();
+}
+
+void Debugger::cancel() { astral_debugger_cancel(handle_); }
+
+void Debugger::set_trace(bool on) { check(astral_debugger_set_trace(handle_, on ? 1 : 0)); }
+
+std::vector<std::string> Debugger::trace() const
+{
+    return lines_of(take_string(astral_debugger_trace(handle_), ASTRAL_ERR_INTERNAL));
+}
+
+void Debugger::add_breakpoint(uint64_t address)
+{
+    check(astral_debugger_add_breakpoint(handle_, address));
+}
+
+void Debugger::remove_breakpoint(uint64_t address)
+{
+    check(astral_debugger_remove_breakpoint(handle_, address));
+}
+
+void Debugger::clear_breakpoints() { astral_debugger_clear_breakpoints(handle_); }
+
+std::vector<uint64_t> Debugger::breakpoints() const
+{
+    std::vector<uint64_t> out;
+    const int count = astral_debugger_breakpoint_count(handle_);
+    for (int i = 0; i < count; ++i)
+        out.push_back(astral_debugger_breakpoint(handle_, i));
+    return out;
+}
+
+void Debugger::add_watchpoint(uint64_t address, uint64_t size)
+{
+    check(astral_debugger_add_watchpoint(handle_, address, size));
+}
+
+void Debugger::remove_watchpoint(uint64_t address)
+{
+    check(astral_debugger_remove_watchpoint(handle_, address));
+}
+
+void Debugger::clear_watchpoints() { astral_debugger_clear_watchpoints(handle_); }
+
+std::vector<Debugger::Register> Debugger::registers() const
+{
+    std::vector<Register> out;
+    for (const std::string &line :
+         lines_of(take_string(astral_debugger_registers(handle_), ASTRAL_ERR_INTERNAL))) {
+        const size_t gap = line.rfind(' ');
+        if (gap == std::string::npos)
+            continue;
+        Register one;
+        one.name = line.substr(0, gap);
+        one.value = std::strtoull(line.c_str() + gap + 1, nullptr, 0);
+        out.push_back(one);
+    }
+    return out;
+}
+
+uint64_t Debugger::register_value(const std::string &name) const
+{
+    uint64_t value = 0;
+    check(astral_debugger_register(handle_, name.c_str(), &value));
+    return value;
+}
+
+void Debugger::set_register(const std::string &name, uint64_t value)
+{
+    check(astral_debugger_set_register(handle_, name.c_str(), value));
+}
+
+std::vector<uint8_t> Debugger::read(uint64_t address, size_t size) const
+{
+    std::vector<uint8_t> out(size);
+    out.resize(astral_debugger_read(handle_, address, out.data(), size));
+    return out;
+}
+
+void Debugger::write(uint64_t address, const std::vector<uint8_t> &bytes)
+{
+    check(astral_debugger_write(handle_, address, bytes.data(), bytes.size()));
+}
+
+std::string Debugger::read_text(uint64_t address) const
+{
+    return take_string(astral_debugger_read_text(handle_, address), ASTRAL_ERR_INTERNAL);
+}
+
+std::vector<Debugger::Frame> Debugger::stack() const
+{
+    std::vector<Frame> out;
+    for (const std::string &line :
+         lines_of(take_string(astral_debugger_stack(handle_), ASTRAL_ERR_INTERNAL))) {
+        Frame frame;
+        const char *at = line.c_str();
+        char *end = nullptr;
+        frame.address = std::strtoull(at, &end, 0);
+        frame.frame_pointer = std::strtoull(end, &end, 0);
+        while (*end == ' ')
+            ++end;
+        frame.function = end;
+        out.push_back(frame);
+    }
+    return out;
+}
+
+Debugger::CallResult Debugger::call(uint64_t address, const std::vector<std::string> &arguments,
+                                    uint64_t step_limit)
+{
+    const std::vector<const char *> argv = pointers_to(arguments);
+    CallResult out;
+    char *output = nullptr;
+    check(astral_debugger_call(handle_, address, argv.data(), step_limit, &out.result, &output));
+    if (output != nullptr) {
+        out.output = output;
+        astral_string_free(output);
+    }
+    return out;
+}
+
+std::vector<uint8_t> Debugger::snapshot() const
+{
+    std::vector<uint8_t> out(astral_debugger_snapshot(handle_, nullptr, 0));
+    astral_debugger_snapshot(handle_, out.data(), out.size());
+    return out;
+}
+
+void Debugger::restore(const std::vector<uint8_t> &bytes)
+{
+    check(astral_debugger_restore(handle_, bytes.data(), bytes.size()));
 }
 
 } // namespace astral

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 2.0.0 LANGUAGES CXX)
+project(Astral VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -269,6 +269,16 @@ add_test(NAME emulator_debug COMMAND astral_emulator_debug_test
          $<TARGET_FILE:astral_emulator_crackme>)
 set_tests_properties(emulator_debug PROPERTIES
     ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+
+# And the command on top of it, driven from a script rather than a terminal:
+# the same debugger reached through the C API, the Rust binding and the command.
+if(TARGET astral_cli)
+    add_test(NAME emulator_debug_cli
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/engine/emulator/tests/debug_cli.sh
+                ${ASTRAL_CLI} $<TARGET_FILE:astral_emulator_crackme>)
+    set_tests_properties(emulator_debug_cli PROPERTIES
+        ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+endif()
 
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)

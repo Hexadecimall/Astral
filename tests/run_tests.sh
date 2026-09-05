@@ -525,18 +525,22 @@ check "bad language reported" "unknown language id" \
 # system, so what it prints has to match what the real program prints, and it
 # has to stop for the same reason.
 if [ -f "$work/host" ]; then
-    ran=$("$astral" run "$work/host" --arg "$work/host" 2>&1)
-    check "a program runs at all"        "instructions" "$ran"
-    check "and says why it stopped"      "returned"     "$ran"
+    ran=$("$astral" debug "$work/host" --arg "$work/host" \
+        --command continue --command quit 2>&1)
+    check "a program runs at all"        "0x"       "$ran"
+    check "and says why it stopped"      "returned" "$ran"
 fi
 
 corpus_one=$(ls "$(dirname "$0")/../testing/build/bin/"* 2>/dev/null | head -1)
 if [ -n "$corpus_one" ] && [ -x "$corpus_one" ]; then
     real_say=$("$corpus_one" wrongkey 2>&1)
     real_code=$?
-    emu=$("$astral" run "$corpus_one" --arg "$corpus_one" --arg wrongkey 2>&1)
-    emu_say=$(printf '%s' "$emu" | sed '/^-- /d')
-    emu_code=$(printf '%s' "$emu" | sed -n 's/.*returned with \([0-9-]*\).*/\1/p' | head -1)
+    emu=$("$astral" debug "$corpus_one" --arg "$corpus_one" --arg wrongkey \
+        --command continue --command quit 2>&1)
+    # What the program itself wrote: not the debugger's own lines, and not the
+    # banner or the instruction it stopped on.
+    emu_say=$(printf '%s' "$emu" | sed -e '/^-- /d' -e '/^astral debug /d' -e '/^  0x/d')
+    emu_code=$(printf '%s' "$emu" | sed -n 's/.*it returned \([0-9-]*\).*/\1/p' | head -1)
     check "what it prints is what the program prints" "$real_say" "$emu_say"
     check "and it ends the same way"                  "$real_code" "$emu_code"
     check "the calls it made are reported"            "called:" "$emu"
