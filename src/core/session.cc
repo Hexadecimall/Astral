@@ -275,7 +275,16 @@ std::string type_text(ghidra::Datatype *type)
         return "void";
     std::ostringstream s;
     type->printRaw(s);
-    return s.str();
+    std::string text = s.str();
+
+    // A function type prints as `code()`, which C has no way of writing where a
+    // type is expected: `code() *` is not a declaration, it is a syntax error.
+    // It becomes `void`, so a pointer to one is `void *` - which any function
+    // pointer converts to, and which nothing will try to call through.
+    for (size_t at = text.find("code()"); at != std::string::npos;
+         at = text.find("code()", at))
+        text.replace(at, 6, "void");
+    return text;
 }
 
 // An integer type wide enough for a varnode of this many bytes.
@@ -1310,6 +1319,10 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
             }
         }
 
+        // The user's own names go on last, so nothing the engine chose can
+        // overwrite them.
+        apply_local_renames(fd, out);
+
         realize_c(out);
         collect_externals(out, fd);
         return true;
@@ -1728,6 +1741,100 @@ int Session::learn_symbols(std::string &error)
     return learned;
 }
 
+bool Session::rename_local(uint64_t function_address, const std::string &from,
+                           const std::string &to, std::string &error)
+{
+    if (from.empty() || to.empty()) {
+        error = "a rename needs both the old name and the new one";
+        return false;
+    }
+    if (!is_c_identifier(to)) {
+        error = to + " is not a name C accepts";
+        return false;
+    }
+    auto &chosen = local_renames_[function_address];
+    // Renaming a value that already carries a chosen name rewrites that entry.
+    // The key has to stay the name a fresh decompilation produces, or the
+    // choice stops being found the next time the function is analysed.
+    for (auto &pair : chosen) {
+        if (pair.second == from || pair.first == from) {
+            pair.second = to;
+            return true;
+        }
+    }
+    chosen.emplace_back(from, to);
+    return true;
+}
+
+std::vector<std::pair<std::string, std::string>>
+Session::local_renames(uint64_t function_address) const
+{
+    auto found = local_renames_.find(function_address);
+    if (found == local_renames_.end())
+        return {};
+    return found->second;
+}
+
+void Session::apply_local_renames(void *funcdata, FunctionResult &out)
+{
+    auto found = local_renames_.find(out.address);
+    if (found == local_renames_.end() || found->second.empty())
+        return;
+
+    ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
+    ghidra::Scope *locals = fd->getScopeLocal();
+    bool applied = false;
+    for (const auto &chosen : found->second) {
+        ghidra::Symbol *symbol = nullptr;
+        for (ghidra::MapIterator it = locals->begin(); it != locals->end(); ++it) {
+            const ghidra::SymbolEntry *entry = *it;
+            if (entry == nullptr || entry->isPiece())
+                continue;
+            if (entry->getSymbol() != nullptr && entry->getSymbol()->getName() == chosen.first) {
+                symbol = entry->getSymbol();
+                break;
+            }
+        }
+        if (symbol == nullptr)
+            continue;
+        try {
+            locals->renameSymbol(symbol, chosen.second);
+        } catch (ghidra::LowlevelError &) {
+            continue; // A name the scope will not accept is simply not applied.
+        }
+        applied = true;
+        for (std::string &name : out.local_names)
+            if (name == chosen.first)
+                name = chosen.second;
+        for (std::string &name : out.parameter_names)
+            if (name == chosen.first)
+                name = chosen.second;
+        out.applied_renames.push_back(chosen);
+    }
+    if (!applied)
+        return;
+
+    // The signature names the parameters, so it is written out again from the
+    // names as they now stand rather than left describing the old ones.
+    std::ostringstream sig;
+    sig << out.return_type << ' ' << out.name << '(';
+    for (size_t i = 0; i < out.parameter_names.size(); ++i) {
+        if (i != 0)
+            sig << ", ";
+        if (i < out.parameter_types.size())
+            sig << out.parameter_types[i] << ' ';
+        sig << out.parameter_names[i];
+    }
+    if (out.parameter_names.empty())
+        sig << "void";
+    sig << ')';
+    out.signature = sig.str();
+
+    // Renaming a value changes nothing the analysis depends on, so printing
+    // again is all it takes for the new names to appear throughout.
+    print_function(funcdata, out.c_code, out.c_code_pseudo);
+}
+
 bool Session::rename(uint64_t address, const std::string &name, bool learn, std::string &error)
 {
     if (name.empty()) {
@@ -1738,20 +1845,36 @@ bool Session::rename(uint64_t address, const std::string &name, bool learn, std:
         ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
         ghidra::Scope *global = arch_->symboltab->getGlobalScope();
         ghidra::Funcdata *fd = global->queryFunction(addr);
+        bool is_function = fd != nullptr;
+        for (const Symbol &symbol : image_.symbols)
+            if (symbol.address == address && symbol.is_function)
+                is_function = true;
         if (fd != nullptr) {
             // A function caches its own name, and so does every call site that
             // refers to it, so the old one is discarded and rebuilt rather than
             // relabelled. The next decompilation analyses it under its name.
             global->removeSymbol(fd->getSymbol());
         }
-        global->addFunction(addr, name);
+        if (is_function) {
+            global->addFunction(addr, name);
+        } else {
+            // The address holds data. Naming it as a function would invent one
+            // where the program has none, so the data symbol is what changes.
+            ghidra::SymbolEntry *entry = global->queryContainer(addr, 1, ghidra::Address());
+            if (entry != nullptr && entry->getSymbol() != nullptr)
+                global->renameSymbol(entry->getSymbol(), name);
+            else
+                global->addSymbol(name, arch_->types->getBase(pointer_size(), ghidra::TYPE_UNKNOWN),
+                                  addr, ghidra::Address());
+        }
         globals_valid_ = false;
 
         for (Symbol &symbol : image_.symbols)
             if (symbol.address == address)
                 symbol.name = name;
 
-        if (learn) {
+        // Only a body can be recognised elsewhere; data has nothing to match.
+        if (learn && is_function) {
             // Remember the body, not the address: the same code in another
             // program should come back with the name the user chose.
             uint64_t size = fd != nullptr ? static_cast<uint64_t>(fd->getSize()) : 0;
@@ -2090,6 +2213,10 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
     std::map<std::string, int> slug_counts;
     std::map<std::string, std::string> string_names; // text -> the global holding it
     std::ostringstream defs;
+    // Collected rather than written straight out: a definition is only worth
+    // emitting if something still refers to it once the addresses have been
+    // rewritten, and that is not known until afterwards.
+    std::vector<std::pair<std::string, std::string>> definitions;
     // Where each referenced address ends up: the array that covers it, and how
     // far into that array it sits.
     std::map<uint64_t, std::pair<std::string, uint64_t>> placement;
@@ -2123,7 +2250,8 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
             sname = n == 0 ? slug : slug + std::to_string(n + 1);
             ++n;
             string_names.emplace(text, sname);
-            defs << "static const char " << sname << "[] = " << text << ";\n";
+            definitions.emplace_back(sname,
+                                     "static const char " + sname + "[] = " + text + ";\n");
         }
         placement.emplace(address, std::make_pair(sname, 0));
     }
@@ -2150,15 +2278,41 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
         const size_t size = static_cast<size_t>(end - base);
         std::vector<uint8_t> bytes(size, 0);
         image.read(base, bytes.data(), bytes.size());
-        defs << "static unsigned char " << name << "[" << size << "] = {";
-        for (size_t b = 0; b < bytes.size(); ++b) {
-            if (b % 16 == 0)
-                defs << "\n  ";
-            char byte[8];
-            std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
-            defs << byte;
+        // The window is a guess: eight kilobytes opened around an address the
+        // code mentioned, in case it reads further in. What the code actually
+        // reaches is known, though - it is the offsets placed into this array
+        // just below - so the bytes are written up to the last of them and a
+        // little past, and the rest is left for C to zero. A handle that is
+        // only ever passed by address stops being eight thousand lines of
+        // bytes nobody reads.
+        const uint64_t kContext = 256;
+        uint64_t furthest = 0;
+        for (size_t k = i; k < j; ++k)
+            furthest = std::max(furthest, remaining[k] - base);
+        size_t written = static_cast<size_t>(
+            std::min<uint64_t>(bytes.size(), furthest + kContext));
+
+        // C fills the rest of an array with zeroes, so the zeroes at the end
+        // say nothing and are not written either. A region that is all zeroes
+        // - which is what .bss is - becomes one line.
+        while (written > 0 && bytes[written - 1] == 0)
+            --written;
+
+        std::ostringstream one;
+        one << "static unsigned char " << name << "[" << size << "] = {";
+        if (written == 0) {
+            one << "0};\n";
+        } else {
+            for (size_t b = 0; b < written; ++b) {
+                if (b % 16 == 0)
+                    one << "\n  ";
+                char byte[8];
+                std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
+                one << byte;
+            }
+            one << "\n};\n";
         }
-        defs << "\n};\n";
+        definitions.emplace_back(name, one.str());
         for (size_t k = i; k < j; ++k)
             placement.emplace(remaining[k], std::make_pair(std::string(name), remaining[k] - base));
         i = j;
@@ -2194,6 +2348,28 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
             at += to.size();
         }
     }
+    // Only what the code still refers to. A window is opened around every
+    // address the decompiler mentions, and rewriting can leave a table that
+    // nothing reads - which is thousands of lines of bytes saying nothing.
+    for (const auto &definition : definitions) {
+        const std::string &name = definition.first;
+        bool used = false;
+        for (size_t at = out.find(name); at != std::string::npos;
+             at = out.find(name, at + name.size())) {
+            const bool left =
+                at > 0 && (std::isalnum((unsigned char)out[at - 1]) || out[at - 1] == '_');
+            const size_t end = at + name.size();
+            const bool right = end < out.size() &&
+                               (std::isalnum((unsigned char)out[end]) || out[end] == '_');
+            if (!left && !right) {
+                used = true;
+                break;
+            }
+        }
+        if (used)
+            defs << definition.second;
+    }
+
     // Place the definitions after the last #include so they precede all code.
     size_t inc = out.rfind("#include");
     size_t at = inc == std::string::npos ? 0 : out.find('\n', inc) + 1;

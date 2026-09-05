@@ -335,21 +335,24 @@ const char *piece_type(int bytes)
 // from every shape of function there is.
 std::string rewrite_code_calls(const std::string &source)
 {
-    static const std::regex declared(R"(\bcode\s*\*+\s*([A-Za-z_][A-Za-z0-9_]*)\s*[;,)])");
-    std::set<std::string> pointers;
-    for (auto it = std::sregex_iterator(source.begin(), source.end(), declared);
-         it != std::sregex_iterator(); ++it)
-        pointers.insert((*it)[1].str());
-    if (pointers.empty())
+    // Every `(*name)(...)` is a call through a pointer, whatever the pointer
+    // was declared as. Looking for the declaration first missed the ones that
+    // carry an initialiser and the ones declared somewhere else in the file,
+    // and left a dereference of a plain pointer being called - which is not C.
+    static const std::regex indirect(R"(\(\*([A-Za-z_][A-Za-z0-9_]*)\)\()");
+    std::string out;
+    auto begin = std::sregex_iterator(source.begin(), source.end(), indirect);
+    auto end = std::sregex_iterator();
+    if (begin == end)
         return source;
-
-    std::string out = source;
-    for (const std::string &name : pointers) {
-        const std::string call = "(*" + name + ")(";
-        const std::string cast = "((long long (*)())" + name + ")(";
-        for (size_t at = out.find(call); at != std::string::npos; at = out.find(call, at))
-            out.replace(at, call.size(), cast);
+    size_t last = 0;
+    for (auto it = begin; it != end; ++it) {
+        const std::smatch &match = *it;
+        out.append(source, last, static_cast<size_t>(match.position()) - last);
+        out += "((long long (*)())" + match[1].str() + ")(";
+        last = static_cast<size_t>(match.position()) + match.length();
     }
+    out.append(source, last, std::string::npos);
     return out;
 }
 
