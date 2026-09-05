@@ -148,9 +148,7 @@ else
     case "$summary" in
         *"0 failed"*) ok "$summary" ;;
         "")           skip "cat could not be checked" ;;
-        # The two that fail are a known gap in numbering lines across several
-        # files, not a break, so this is said rather than counted against.
-        *)            printf '    %sgap%s  %s\n' "$dim" "$plain" "$summary" ;;
+        *)            bad "$summary" ;;
     esac
 fi
 

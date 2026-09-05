@@ -43,5 +43,4 @@ b=$(cd "$work" && printf 'x\ny\n' | "$real" f1 -)
 
 echo
 echo "$pass passed, $fail failed"
-# Numbering across several files is a known gap; do not fail the run for it.
-[ "$fail" -le 2 ]
+[ "$fail" -eq 0 ]
