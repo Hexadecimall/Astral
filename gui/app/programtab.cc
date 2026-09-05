@@ -4,7 +4,6 @@
 #include "views/decompilerview.hh"
 #include "views/hexpane.hh"
 #include "views/hexview.hh"
-#include "model/patchbuilder.hh"
 #include "model/settings.hh"
 
 #include <QCoreApplication>
@@ -33,7 +32,6 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
     for (DecompilerView *view : {decompiler_, pseudo_})
         connect(view->codeView(), &CodeView::contextMenuAboutToShow, this,
                 [this](QMenu *menu, const QString &word) { Q_EMIT contextActionsWanted(menu, word); });
-    connect(decompiler_, &DecompilerView::compileRequested, this, [this] { compileCurrent(); });
     auto placeholder = [](const QString &text) {
         auto *label = new QLabel(text);
         label->setAlignment(Qt::AlignCenter);
@@ -179,52 +177,6 @@ void ProgramTab::refreshCurrent()
 void ProgramTab::replaceCodeText(const QString &text)
 {
     decompiler_->setText(text);
-}
-
-void ProgramTab::compileCurrent()
-{
-    // Astral has no C compiler of its own, so this one path runs another
-    // program. The settings file says whether that is wanted.
-    if (!Settings::instance().boolValue(QStringLiteral("patch.useCCompiler"), true)) {
-        Q_EMIT logMessage(tr("patch refused: patching from C needs a C compiler, and "
-                             "patch.useCCompiler is off in %1").arg(Settings::path()));
-        decompiler_->showRefused(tr("patch.useCCompiler is off"));
-        return;
-    }
-    const auto entry = document_->functionAt(current_);
-    const auto cachedFunction = document_->cached(current_);
-    QString name = cachedFunction ? cachedFunction->name : entry ? entry->name : QString();
-    if (name.isEmpty()) {
-        Q_EMIT logMessage(tr("patch: no function is shown"));
-        return;
-    }
-    // The signature line names the function as emitted, which is what the
-    // object will define; the symbol table may know it by an older name.
-    static const QRegularExpression signatureName(QStringLiteral(R"(\b([A-Za-z_][A-Za-z0-9_]*)\s*\()"));
-    if (cachedFunction) {
-        const auto m = signatureName.match(cachedFunction->signature);
-        if (m.hasMatch())
-            name = m.captured(1);
-    }
-    const quint64 span = cachedFunction ? cachedFunction->size : entry ? entry->size : 0;
-    decompiler_->showPatching();
-    auto *builder = new PatchBuilder(document_.get(), this);
-    builder->build(decompiler_->text(), name, current_, span, [this, builder, name](const PatchOutcome &outcome) {
-        builder->deleteLater();
-        if (outcome.ok) {
-            Q_EMIT logMessage(tr("patch %1").arg(outcome.report));
-            decompiler_->showPatchQueued();
-            Q_EMIT patchApplied();
-            return;
-        }
-        if (!outcome.diagnostics.isEmpty())
-            Q_EMIT logMessage(tr("patch %1:\n%2").arg(name, outcome.diagnostics));
-        else
-            Q_EMIT logMessage(tr("patch refused: %1").arg(outcome.report));
-        decompiler_->showCompileResult(false, outcome.errors > 0 ? outcome.errors : 1);
-        if (outcome.diagnostics.isEmpty())
-            decompiler_->showRefused(outcome.report);
-    });
 }
 
 ProgramTab::View ProgramTab::view() const

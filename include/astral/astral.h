@@ -309,6 +309,11 @@ ASTRAL_API astral_status astral_program_set_option(astral_program *program, cons
 /* Disassembled text for `count` instructions starting at `address`. Caller frees. */
 ASTRAL_API char *astral_disassemble(astral_program *program, uint64_t address, int count);
 
+/* The same instructions written to be read: calls and branches by name, labels
+ * where a branch comes back to, and what a loaded address holds. Caller frees. */
+ASTRAL_API char *astral_disassemble_readable(astral_program *program, uint64_t address,
+                                             int count);
+
 /* P-code listing for `count` instructions starting at `address`. Caller frees. */
 ASTRAL_API char *astral_pcode(astral_program *program, uint64_t address, int count);
 

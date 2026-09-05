@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.15.0 LANGUAGES CXX)
+project(Astral VERSION 0.16.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,6 +96,7 @@ set(ASTRAL_LIB_SRC
     src/format/loader_macho.cc
     src/core/langmap.cc
     src/emit/libc_protos.cc
+    src/core/listing.cc
     src/core/session.cc
     src/api/capi.cc
     engine/assembler/assembler.cc

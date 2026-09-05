@@ -1,7 +1,5 @@
 #include "views/listingpane.hh"
-#include "model/assembler.hh"
 #include "model/programdocument.hh"
-#include "model/settings.hh"
 
 #include <QRegularExpression>
 
@@ -172,48 +170,7 @@ void ListingPane::assemble()
 {
     if (!editing_ || busy_ || document_ == nullptr)
         return;
-
-    // Astral assembles its own instructions. Reaching for the system
-    // toolchain is a choice the settings file records, not a default.
-    if (Settings::instance().stringValue(QStringLiteral("patch.assembler"),
-                                         QStringLiteral("engine"))
-        != QStringLiteral("toolchain")) {
-        assembleWithEngine();
-        return;
-    }
-
-    const quint64 available = span();
-    if (available == 0) {
-        Q_EMIT logMessage(tr("assemble refused: the listing's extent could not be measured"));
-        status_->setText(tr("no measurable extent"));
-        return;
-    }
-    busy_ = true;
-    status_->setText(tr("assembling..."));
-    updateButtons();
-    auto *assembler = new Assembler(document_, this);
-    assembler->assemble(view_->toPlainText(), address_, available,
-                        [this, assembler](const AssembleOutcome &outcome) {
-                            assembler->deleteLater();
-                            busy_ = false;
-                            if (outcome.ok) {
-                                Q_EMIT logMessage(tr("assemble 0x%1: %2").arg(address_, 0, 16).arg(outcome.report));
-                                status_->setText(tr("queued %1 bytes").arg(outcome.bytes.size()));
-                                // The patch refreshes every view; leave edit
-                                // mode so the re-read disassembly is shown.
-                                editButton_->setChecked(false);
-                                setEditing(false);
-                                Q_EMIT patchApplied();
-                                return;
-                            }
-                            if (!outcome.diagnostics.isEmpty())
-                                Q_EMIT logMessage(tr("assemble refused: %1\n%2")
-                                                      .arg(outcome.report, outcome.diagnostics));
-                            else
-                                Q_EMIT logMessage(tr("assemble refused: %1").arg(outcome.report));
-                            status_->setText(outcome.report);
-                            updateButtons();
-                        });
+    assembleWithEngine();
 }
 
 void ListingPane::assembleWithEngine()

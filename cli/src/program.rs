@@ -163,8 +163,10 @@ pub fn disassemble(options: &Options) -> i32 {
     };
     let text = if as_pcode {
         program.pcode(start, count)
-    } else {
+    } else if options.raw_listing {
         program.disassemble(start, count)
+    } else {
+        program.disassemble_readable(start, count)
     };
     match text {
         Ok(text) => {

@@ -170,6 +170,9 @@ public:
     void set_option(const std::string &name, const std::string &value);
 
     std::string disassemble(uint64_t address, int count) const;
+    // The same instructions written to be read: calls and branches by name,
+    // labels where a branch comes back to, and what a loaded address holds.
+    std::string disassemble_readable(uint64_t address, int count) const;
     std::string pcode(uint64_t address, int count) const;
 
     Function decompile(uint64_t address, const std::string &name = std::string()) const;

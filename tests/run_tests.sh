@@ -518,6 +518,37 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
+# ---------------------------------------------------------------- listing
+#
+# A listing is meant to be read and then edited, so a call says where it goes,
+# a branch that comes back says where to, and the address stays in a form that
+# can be pasted straight into a patch.
+if [ -f "$work/host" ]; then
+    host_entry=$("$astral" info "$work/host" 2>/dev/null | sed -n 's/^entry *//p' | head -1)
+    listing=$("$astral" disassemble -a "$host_entry" -d 60 "$work/host" 2>/dev/null)
+    check "the listing keeps a pasteable address" "0x0001" "$listing"
+    # A call is only worth naming where there is one; the fixture's entry is
+    # two instructions long, so this asks a real program instead.
+    corpus=$(ls "$(dirname "$0")/../testing/build/bin/"* 2>/dev/null | head -1)
+    if [ -n "$corpus" ]; then
+        corpus_entry=$("$astral" info "$corpus" 2>/dev/null | sed -n 's/^entry *//p' | head -1)
+        called=$("$astral" disassemble -a "$corpus_entry" -d 40 "$corpus" 2>/dev/null |
+                 awk '$2 == "bl" {print $3; exit}')
+        check "a call says where it goes rather than to what address" "yes" \
+            "$(case "$called" in 0x*) echo no;; "") echo no;; *) echo yes;; esac)"
+    fi
+    plain=$("$astral" disassemble --raw-listing -a "$host_entry" -d 8 "$work/host" 2>/dev/null)
+    check "the plain listing is still there" ": " "$plain"
+
+    # Whatever the listing named, patching that same address has to work: the
+    # two halves have to agree about where an instruction is.
+    first=$(printf '%s' "$listing" | awk '/^  0x/ {print $1; exit}')
+    check "an address from the listing can be patched" "nop" \
+        "$("$astral" patch "$work/host" --asm "$first=nop" -o "$work/from_listing" >/dev/null 2>&1 &&
+           "$astral" disassemble -a "$first" -d 1 "$work/from_listing" 2>/dev/null |
+           awk '{print $2}')"
+fi
+
 # ---------------------------------------------------------------- assembler
 #
 # A listing is only editable if what someone writes turns back into the right

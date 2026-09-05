@@ -315,6 +315,12 @@ std::string Program::disassemble(uint64_t address, int count) const
     return take_string(astral_disassemble(handle_, address, count), ASTRAL_ERR_NO_SUCH_ADDRESS);
 }
 
+std::string Program::disassemble_readable(uint64_t address, int count) const
+{
+    return take_string(astral_disassemble_readable(handle_, address, count),
+                       ASTRAL_ERR_NO_SUCH_ADDRESS);
+}
+
 std::string Program::pcode(uint64_t address, int count) const
 {
     return take_string(astral_pcode(handle_, address, count), ASTRAL_ERR_NO_SUCH_ADDRESS);

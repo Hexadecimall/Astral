@@ -487,6 +487,14 @@ impl Program {
         Self::take_string(text, Status::NoSuchAddress)
     }
 
+    /// The same instructions written to be read: calls and branches by name,
+    /// labels where a branch comes back to, and what a loaded address holds.
+    pub fn disassemble_readable(&self, address: u64, count: usize) -> Result<String> {
+        let text =
+            unsafe { sys::astral_disassemble_readable(self.handle, address, count as c_int) };
+        Self::take_string(text, Status::NoSuchAddress)
+    }
+
     /// Byte length of the instruction at `address`, or 0 if it will not decode.
     pub fn instruction_length(&self, address: u64) -> usize {
         let len = unsafe { sys::astral_program_instruction_length(self.handle, address) };

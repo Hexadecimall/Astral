@@ -307,35 +307,6 @@ void MainWindow::openPath(const QString &path)
     });
 }
 
-void MainWindow::runEditHook(const QString &sourceFile, const QString &outPath)
-{
-    ProgramTab *tab = currentTab();
-    if (!tab || !tab->document()->cached(tab->currentAddress())) {
-        // Opening and the first decompile are asynchronous; try again shortly.
-        QTimer::singleShot(250, this, [this, sourceFile, outPath] { runEditHook(sourceFile, outPath); });
-        return;
-    }
-    QFile file(sourceFile);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
-    tab->replaceCodeText(QString::fromUtf8(file.readAll()));
-    connect(tab->document(), &ProgramDocument::patchesChanged, this, [this, tab, outPath] {
-        if (!outPath.isEmpty()) {
-            QString error;
-            if (!tab->document()->writePatched(outPath, error))
-                appendLog(error);
-        }
-        QTimer::singleShot(outPath.isEmpty() ? 3000 : 400, qApp, &QCoreApplication::quit);
-    });
-    tab->compileCurrent();
-    // Reproduces a view switch while the compiler runs.
-    if (qEnvironmentVariableIsSet("ASTRAL_GUI_SWITCH"))
-        for (int ms = 20; ms < 1500; ms += 45)
-            QTimer::singleShot(ms, this, [this, ms] {
-                selectView((ms / 45) % 2 ? QStringLiteral("pseudo") : QStringLiteral("code"));
-            });
-}
-
 void MainWindow::runExportHook(const QString &outPath)
 {
     ProgramTab *tab = currentTab();

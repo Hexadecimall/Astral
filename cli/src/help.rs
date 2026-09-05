@@ -129,6 +129,7 @@ pub fn disassemble(stream: Stream) -> i32 {
         "  -a, --address <hex>    where to start\n",
         "  -d, --disassemble <n>  how many instructions (default 20)\n",
         "  -p, --pcode <n>        p-code for n instructions instead\n",
+        "      --raw-listing      the plain listing, without names or labels\n",
         "      --color <mode>     auto (a terminal), always, never\n",
         "  -l, --language <id>    force a language\n",
         "  -r, --raw <hex>        treat the file as a flat image at this address\n",

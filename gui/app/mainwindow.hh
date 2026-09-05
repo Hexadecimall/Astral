@@ -50,7 +50,6 @@ public:
     void dumpListing();
     void runAssembleHook(const QString &edit, const QString &outPath);
     // Developer hooks used by the automated run: edit, patch, write, quit.
-    void runEditHook(const QString &sourceFile, const QString &outPath);
     void runAnalyzeHook();
     void runExportHook(const QString &outPath);
 

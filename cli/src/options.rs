@@ -54,6 +54,8 @@ pub struct Options {
     pub c_options: astral::COptions,
     /// Threads for whole-program decompilation. None means one per core.
     pub threads: Option<i32>,
+    /// Print the plain listing instead of the readable one.
+    pub raw_listing: bool,
     pub disassemble: usize,
     pub pcode: usize,
 }
@@ -77,6 +79,7 @@ impl Default for Options {
             raw_names: false,
             c_options: astral::COptions::default(),
             threads: None,
+            raw_listing: false,
             disassemble: 0,
             pcode: 0,
         }
@@ -170,6 +173,7 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
             "--no-color" | "--no-colour" => options.color = ColorMode::Never,
             "--why" => options.why = true,
             "--raw-names" => options.raw_names = true,
+            "--raw-listing" => options.raw_listing = true,
             "--runtime-include" => options.c_options.self_contained = false,
             "--no-comments" => options.c_options.comments = false,
             "-l" | "--language" => options.language = Some(value("--language", &mut index)?),

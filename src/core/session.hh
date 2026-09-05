@@ -111,6 +111,9 @@ public:
     bool set_option(const std::string &name, const std::string &value, std::string &error);
 
     bool disassemble(uint64_t address, int count, std::string &out, std::string &error);
+    // The same instructions, written to be read: calls and branches by name,
+    // labels where a branch comes back to, and what a loaded address holds.
+    bool disassemble_readable(uint64_t address, int count, std::string &out, std::string &error);
     bool pcode(uint64_t address, int count, std::string &out, std::string &error);
 
     bool decompile(uint64_t address, const std::string &name, FunctionResult &out,

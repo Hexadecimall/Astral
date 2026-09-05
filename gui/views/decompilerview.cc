@@ -35,21 +35,6 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
     status_->setObjectName(QStringLiteral("muted"));
     headerLayout->addWidget(status_);
     headerLayout->addWidget(detail_);
-    // The code is a document to work in: edit it, check that it still
-    // compiles against Astral's runtime, or go back to what was recovered.
-    revert_ = new QToolButton;
-    revert_->setObjectName(QStringLiteral("headerButton"));
-    revert_->setText(tr("Revert"));
-    revert_->setEnabled(false);
-    compile_ = new QToolButton;
-    compile_->setObjectName(QStringLiteral("headerButton"));
-    compile_->setText(tr("Patch"));
-    compile_->setToolTip(tr("Compile this C for the program and write it over the function"));
-    headerLayout->addSpacing(8);
-    headerLayout->addWidget(revert_);
-    headerLayout->addWidget(compile_);
-    connect(compile_, &QToolButton::clicked, this, [this] { Q_EMIT compileRequested(code_->toPlainText()); });
-    connect(revert_, &QToolButton::clicked, this, [this] { render(); });
     layout->addWidget(headerRow);
 
     code_ = new CodeView;
@@ -72,7 +57,6 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
         busy_->move((code_->width() - busy_->width()) / 2, 24);
     });
     connect(code_->document(), &QTextDocument::modificationChanged, this, [this](bool modified) {
-        revert_->setEnabled(modified);
         status_->setText(modified ? tr("edited") : QString());
         Q_EMIT modifiedChanged(modified);
     });
@@ -125,9 +109,6 @@ void DecompilerView::setPseudo(bool pseudo)
     // Both views are documents to work in. The engine's listing names types by
     // width, so patching from it usually needs those spellings replaced first;
     // the attempt says so plainly rather than the button being missing.
-    compile_->setToolTip(pseudo ? tr("Compile this listing for the program and write it over the "
-                                     "function. The listing's own type names have to be real C first.")
-                                : tr("Compile this C for the program and write it over the function"));
     code_->setEditable(true);
     render();
 }

@@ -8,6 +8,7 @@
 
 #include "assembler.hh"
 #include "creal.hh"
+#include "listing.hh"
 #include "cxx_idioms.hh"
 #include "langmap.hh"
 #include "knowledge.hh"
@@ -640,6 +641,29 @@ bool Session::disassemble(uint64_t address, int count, std::string &out, std::st
         }
     }
     out = s.str();
+    return true;
+}
+
+bool Session::disassemble_readable(uint64_t address, int count, std::string &out,
+                                   std::string &error)
+{
+    std::string raw;
+    if (!disassemble(address, count, raw, error))
+        return false;
+    // The last instruction's address bounds what counts as a local branch: a
+    // target beyond it belongs to some other function, and is named rather than
+    // labelled.
+    uint64_t last = address;
+    {
+        std::istringstream in(raw);
+        std::string line;
+        while (std::getline(in, line)) {
+            const size_t colon = line.find(": ");
+            if (colon != std::string::npos)
+                last = std::strtoull(line.substr(0, colon).c_str(), nullptr, 16);
+        }
+    }
+    out = readable_listing_text(raw, image_, address, last);
     return true;
 }
 

@@ -251,6 +251,11 @@ extern "C" {
         value: *const c_char,
     ) -> c_int;
 
+    pub fn astral_disassemble_readable(
+        program: *mut astral_program,
+        address: u64,
+        count: c_int,
+    ) -> *mut c_char;
     pub fn astral_disassemble(
         program: *mut astral_program,
         address: u64,

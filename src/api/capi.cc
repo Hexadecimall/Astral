@@ -701,6 +701,22 @@ char *astral_disassemble(astral_program *program, uint64_t address, int count)
     return copy;
 }
 
+char *astral_disassemble_readable(astral_program *program, uint64_t address, int count)
+{
+    if (program == nullptr) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+        return nullptr;
+    }
+    std::string out;
+    std::string error;
+    if (!program->session->disassemble_readable(address, count, out, error)) {
+        fail(ASTRAL_ERR_NO_SUCH_ADDRESS, error);
+        return nullptr;
+    }
+    clear_error();
+    return copy_string(out);
+}
+
 char *astral_pcode(astral_program *program, uint64_t address, int count)
 {
     if (program == nullptr) {
