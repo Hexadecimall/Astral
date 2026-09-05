@@ -1,0 +1,14 @@
+# Where this file is, is where the install is: an archive unpacked anywhere
+# still answers for itself, which a prefix written in at build time would not.
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+includedir=${prefix}/include
+libdir=${prefix}/@ASTRAL_DYNAMIC_LIB_DIR@
+specdir=${prefix}/share/astral/specs
+
+Name: astral
+Description: A decompiler that emits C which compiles
+URL: https://github.com/@ASTRAL_PROJECT@
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: -L${libdir} -lAstral

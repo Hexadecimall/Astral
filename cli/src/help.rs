@@ -74,6 +74,7 @@ pub fn usage(stream: Stream) -> i32 {
         "├─ update  Rebuild and reinstall Astral\n",
         "│  ├─ install                build and install into the system location\n",
         "│  ├─ --check                installed against the latest release\n",
+        "│  ├─ --source               build from source rather than download a build\n",
         "│  ├─ --ghidra <version>     vendor that release, then rebuild\n",
         "│  ├─ --languages <list>     processors to compile specs for, or ALL\n",
         "│  └─ --prefix <dir>         install somewhere else\n",

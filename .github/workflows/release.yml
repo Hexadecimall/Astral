@@ -1,0 +1,107 @@
+# Building the releases people actually install.
+#
+# A tag produces one archive per platform, each holding everything an install
+# puts down: the command, the application, the libraries, the headers and the
+# compiled processor specifications. The update command picks the archive that
+# matches the machine it is running on, so the names here are the contract.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runner: macos-14
+          - name: macos-x86_64
+            runner: macos-13
+          - name: linux-x86_64
+            runner: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install what the build needs (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake qt@6
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix qt@6)" >> "$GITHUB_ENV"
+
+      - name: Install what the build needs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake ninja-build \
+            qt6-base-dev qt6-svg-dev libgl1-mesa-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Check it works before shipping it
+        run: |
+          ./build/astral --version
+          ASTRAL=$PWD/build/astral ./tests/run_tests.sh
+          ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: cmake --build build --target package
+
+      - name: Record what each archive hashes to
+        run: |
+          cd build
+          for archive in astral-*.tar.gz; do
+            shasum -a 256 "$archive" > "$archive.sha256"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            build/astral-*.tar.gz
+            build/astral-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+          merge-multiple: true
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          ls -l archives
+          gh release create "$tag" \
+            --title "Astral $tag" \
+            --generate-notes \
+            --verify-tag \
+            archives/* \
+            || gh release upload "$tag" archives/* --clobber

@@ -100,6 +100,7 @@ set(ASTRAL_LIB_SRC
     src/core/listing.cc
     src/core/session.cc
     src/api/capi.cc
+    engine/decompiler/printastral.cc
     engine/assembler/assembler.cc
     engine/assembler/text.cc
     engine/assembler/arm64.cc
@@ -358,3 +359,44 @@ install(DIRECTORY ${SPEC_STAGE}/ DESTINATION share/astral/specs
 install(DIRECTORY bindings/rust/ DESTINATION share/astral/rust)
 install(FILES engine/LICENSE engine/NOTICE
         DESTINATION share/astral)
+
+# So another project can find the library without knowing where it went.
+set(ASTRAL_PROJECT "Hexadecimall/Astral")
+configure_file(cmake/astral.pc.in ${CMAKE_BINARY_DIR}/astral.pc @ONLY)
+install(FILES ${CMAKE_BINARY_DIR}/astral.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+
+# ---------------------------------------------------------------- packaging
+#
+# What a release is: one archive per platform holding everything an install
+# puts down, named for the platform it was built on so the update command can
+# pick the right one without being told.
+if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(ASTRAL_PLATFORM "macos")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(ASTRAL_PLATFORM "linux")
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_NAME}" ASTRAL_PLATFORM)
+endif()
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+    set(ASTRAL_MACHINE "arm64")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    set(ASTRAL_MACHINE "x86_64")
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" ASTRAL_MACHINE)
+endif()
+set(ASTRAL_RELEASE_NAME "astral-${PROJECT_VERSION}-${ASTRAL_PLATFORM}-${ASTRAL_MACHINE}")
+
+# `cmake --build . --target package` stages an install into a directory of its
+# own and rolls it up, so the archive holds exactly what an install would.
+add_custom_target(package
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}/stage
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/stage
+    COMMAND ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR}
+            --prefix ${CMAKE_BINARY_DIR}/stage/${ASTRAL_RELEASE_NAME}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${CMAKE_BINARY_DIR}/stage
+            ${CMAKE_COMMAND} -E tar czf
+            ${CMAKE_BINARY_DIR}/${ASTRAL_RELEASE_NAME}.tar.gz
+            ${ASTRAL_RELEASE_NAME}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "packaging ${ASTRAL_RELEASE_NAME}.tar.gz"
+    VERBATIM)

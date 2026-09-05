@@ -210,16 +210,25 @@ side, plus the parts it has no answer for, live in `src/`:
 
 | Piece | Where | Replaces |
 |---|---|---|
-| ELF reader | `src/loader_elf.cc` | `ElfLoader` and friends |
-| PE/COFF reader | `src/loader_pe.cc` | `PeLoader`, export and import parsing |
-| Mach-O reader | `src/loader_macho.cc` | `MachoLoader`, universal binaries, import stubs |
-| Language selection | `src/langmap.cc` | the processor `.opinion` files |
-| Image model | `src/image.cc` | `Memory`, `MemoryBlock` |
-| Decompiler session | `src/session.cc` | `DecompInterface` |
-| Library prototypes | `src/libc_protos.cc` | Ghidra's data-type archives |
-| Real-C emitter | `src/creal.cc` | nothing upstream; this is new |
-| C ABI | `src/capi.cc` | — |
-| C++ API | `src/cpp_api.cc` | — |
+| ELF reader | `src/format/loader_elf.cc` | `ElfLoader` and friends |
+| PE/COFF reader | `src/format/loader_pe.cc` | `PeLoader`, export and import parsing |
+| Mach-O reader | `src/format/loader_macho.cc` | `MachoLoader`, universal binaries, import stubs |
+| .NET reader | `src/format/dotnet.cc` | nothing upstream; CIL recovered as C |
+| Image model | `src/format/image.cc` | `Memory`, `MemoryBlock` |
+| Language selection | `src/core/langmap.cc` | the processor `.opinion` files |
+| Decompiler session | `src/core/session.cc` | `DecompInterface` |
+| Readable listing | `src/core/listing.cc` | nothing upstream; a listing meant to be edited |
+| Library prototypes | `src/emit/libc_protos.cc` | Ghidra's data-type archives |
+| Real-C emitter | `src/emit/creal.cc` | nothing upstream; this is new |
+| Naming and knowledge | `src/knowledge/` | nothing upstream |
+| Patching and re-signing | `src/patch/` | nothing upstream |
+| C ABI | `src/api/capi.cc` | — |
+| C++ API | `src/api/cpp_api.cc` | — |
+
+Two more subsystems live beside the engine rather than in `src/`: the assembler
+in `engine/assembler/`, which turns an edited listing back into bytes for arm64,
+arm32, Thumb, x86 and x86-64, and the emulator in `engine/emulator/`, which runs
+a program as p-code over memory Astral owns and is what `astral debug` drives.
 
 Each loader turns a file into the same `BinaryImage`: segments, symbols, entry
 points and an architecture hint. The session binds that image to a
@@ -244,12 +253,18 @@ already writable.
 
 ```
 <prefix>/
-  bin/       astral - one program; the interface is linked into it
+  bin/       astral      - one program; the interface is linked into it
+             astral-gui  - the desktop application, as a single file
   include/   astral/astral.h, astral/astral.hpp, astral/decompiled.h
   lib/astral/dynamic-libs/   libAstral.dylib
   lib/astral/static-libs/    libAstral.a
-  share/astral/             specs, and the Rust crate
+  lib/pkgconfig/astral.pc    so other projects can find it
+  share/astral/              specs, and the Rust crate
+  share/astral/applications/ Astral.app, on macOS
 ```
+
+Once installed, `pkg-config --cflags --libs astral` answers for any build
+system that speaks it.
 
 Or drive CMake yourself:
 
@@ -264,18 +279,51 @@ ships.
 
 ## Installing and updating
 
-`astral update` downloads the newest release, builds it and installs it. No
-source tree is needed: the one this copy was built from may not exist on the
-machine at all, and no path is compiled in.
+Every release carries a build for each platform it was made for. `astral update`
+downloads the one that matches the machine it is running on and puts it in
+place, so updating needs no compiler, no cargo and no source tree: the tree this
+copy was built from may not exist on the machine at all, and no path is compiled
+in.
 
 ```sh
-astral update                      # fetch the newest release and install it
+astral update                      # the build made for this machine
 astral update install              # into /usr/local rather than over this copy
 astral update --check              # what is installed against what is newest
 astral update --release v2.0.0     # a particular release
+astral update --source             # build from source rather than download one
 astral update --local              # build a source tree you are standing in
 astral update --ghidra 12.1.3      # vendor that Ghidra release first
 astral update --languages ALL      # every processor's specs
+```
+
+Each archive is published with the SHA-256 it hashes to, and the download is
+checked against it before anything is written. Where a release has no build for
+the platform asking — or with `--source` — it falls back to fetching the source
+and building it, which is what the Ghidra and language options are for.
+
+## Releases
+
+A tag starting `v` builds one archive per platform and attaches them to a GitHub
+release:
+
+| Archive | Built on |
+|---|---|
+| `astral-<version>-macos-arm64.tar.gz` | macOS 14, Apple silicon |
+| `astral-<version>-macos-x86_64.tar.gz` | macOS 13, Intel |
+| `astral-<version>-linux-x86_64.tar.gz` | Ubuntu 22.04 |
+
+Each holds exactly what an install puts down — the command, the application, the
+libraries, the headers and the compiled specifications — under a single
+directory named for the platform, so it can be unpacked over a prefix directly.
+Nothing is published that did not pass the test suite on the machine that built
+it.
+
+The same archive can be made anywhere:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+cmake --build build --target package      # build/astral-<version>-<platform>.tar.gz
 ```
 
 The `install` subcommand targets `/usr/local` and checks each destination
@@ -320,6 +368,10 @@ Handles are move-only; failures raise `astral::Error`.
 astral = { path = "/usr/local/share/astral/rust" }
 ```
 
+The crate ships inside the install, so the path above is wherever the prefix
+went. Nothing else is needed: the library it links against is in the same
+install.
+
 ```rust
 let _library = astral::Library::new(None)?;
 let program = astral::Program::open("./a.out", None)?;
@@ -355,9 +407,18 @@ astral learn --source ./src            # prototypes, from the source
 astral learn delete --all              # forget everything you taught it
 astral ctb database                    # offer it back to the project
 astral sleigh in.slaspec out.sla       # compile a processor specification
-astral update                          # fetch and install the newest release
+astral debug ./a.out --arg ./a.out      # watch it run, an instruction at a time
+astral patch ./a.out --nop 0x100003f20 # write an edit back into the binary
+astral update                          # install the newest release
 astral version
 ```
+
+`astral debug` runs the program on Astral's own emulator rather than handing it
+to the operating system, so a binary for another processor debugs the same as a
+native one and nothing it does escapes. Breakpoints, watchpoints, stepping in
+and over, the call stack, reading and writing registers and memory, calling one
+recovered function on its own, and `trace` for a listing of everything that
+ran.
 
 Compilable C is what `decompile` produces. `-p` or `--pseudo-c` gives the
 decompiler's raw listing, which reads as C but does not build.
@@ -393,6 +454,9 @@ looks hung, and the terminal is restored even if the process is killed.
 
 ```sh
 tests/run_tests.sh              # against ./build
+ctest --test-dir build          # the engine and application tests
+testing/build.sh && testing/run.sh    # the corpus, in C
+testing/rust/build.sh                 # the corpus, in Rust
 ```
 
 The suite generates ELF and PE fixtures with `tests/make_fixtures.py`, compiles
@@ -401,6 +465,14 @@ recovery, decompilation, raw mode, p-code and error reporting for each. The
 real-C checks go further: they compile the emitted unit, link and run it against
 the behaviour of the original source, and rebuild a whole program from its own
 decompilation to confirm it still prints what it printed before.
+
+Beside it is a corpus of small programs written to be hard in specific ways —
+xored keys, rolling checksums, generated tables, flattened control flow, a
+bytecode interpreter — each measured on three questions: did it decompile, did
+the C compile, and does the rebuilt program behave as the original did. There is
+a second corpus in Rust, which asks harder questions again: a slice carries its
+length rather than writing it down, an iterator chain with a closure in it
+leaves nothing behind to call, and every name is v0 mangled.
 
 ## Licensing
 

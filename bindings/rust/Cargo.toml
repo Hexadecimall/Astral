@@ -2,9 +2,19 @@
 name = "astral"
 version = "2.1.0"
 edition = "2021"
-description = "Ghidra's decompiler as a Rust library, with no JVM and no Ghidra installation"
+description = "A decompiler that emits C which compiles, as a Rust library, with no JVM and no Ghidra installation"
 license = "Apache-2.0"
 build = "build.rs"
+repository = "https://github.com/Hexadecimall/Astral"
+homepage = "https://github.com/Hexadecimall/Astral"
+documentation = "https://docs.rs/astral"
+readme = "README.md"
+keywords = ["decompiler", "reverse-engineering", "disassembler", "binary", "ghidra"]
+categories = ["development-tools", "api-bindings"]
+rust-version = "1.70"
+# The crate links against a library built from this repository rather than
+# vendored here, so only what the binding itself needs is published.
+exclude = ["target/", "*.h"]
 
 [lib]
 name = "astral"

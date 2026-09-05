@@ -1,9 +1,12 @@
 //! Updating Astral.
 //!
 //! Most people who run this installed a release and have no source tree, so the
-//! default is to fetch one: the newest release of the project, built and
-//! installed here. A local tree is used only when asked for, and is found by
-//! looking around rather than by a path written in at build time.
+//! default is to fetch one. A release carries a build for each platform it was
+//! made for, so the normal path downloads the one that matches this machine and
+//! puts it in place; building from source is what happens when there is no such
+//! build, or when it is asked for. A local tree is used only when asked for,
+//! and is found by looking around rather than by a path written in at build
+//! time.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -17,12 +20,17 @@ const GHIDRA_REPO: &str = "https://github.com/NationalSecurityAgency/ghidra";
 const HELP: &str = concat!(
     "usage: astral update [install] [options]\n",
     "\n",
-    "Downloads the newest release of Astral, builds it, and installs it.\n",
+    "Installs the newest release of Astral. A release carries a build for\n",
+    "each platform, so this normally downloads the one made for this machine\n",
+    "and puts it in place; with --source, or where no such build exists, it\n",
+    "builds from source instead.\n",
     "\n",
     "  install              install into /usr/local rather than over the\n",
     "                       copy that is running\n",
     "      --check          compare what is installed against the newest\n",
     "      --release <tag>  a particular release rather than the newest\n",
+    "      --source         build from source rather than take the build\n",
+    "                       that was made for this machine\n",
     "      --local          build a source tree here, rather than download\n",
     "      --ghidra <ver>   vendor that Ghidra release first\n",
     "      --languages <l>  processors to compile specs for, or ALL\n",
@@ -168,6 +176,152 @@ fn latest_ghidra_version() -> String {
         Some(end) => rest[..end].to_string(),
         None => String::new(),
     }
+}
+
+// ---- the build made for this machine ------------------------------------
+
+/// What this machine's archive is called in a release. The name is decided at
+/// build time by the CMake that made the archive, and read here the same way,
+/// so the two agree without anything having to be looked up.
+fn platform() -> Option<&'static str> {
+    let system = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        return None;
+    };
+    let machine = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else {
+        return None;
+    };
+    Some(match (system, machine) {
+        ("macos", "arm64") => "macos-arm64",
+        ("macos", _) => "macos-x86_64",
+        (_, "arm64") => "linux-arm64",
+        _ => "linux-x86_64",
+    })
+}
+
+/// Every file attached to a release, by the URL it is downloaded from.
+fn assets(json: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let marker = "\"browser_download_url\"";
+    let mut rest = json;
+    while let Some(at) = rest.find(marker) {
+        rest = &rest[at + marker.len()..];
+        let Some(open) = rest.find('"') else { break };
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else { break };
+        found.push(after[..close].to_string());
+        rest = &after[close..];
+    }
+    found
+}
+
+/// The archive built for this machine, and the file saying what it hashes to.
+fn prebuilt(tag: &str) -> Option<(String, Option<String>)> {
+    let platform = platform()?;
+    let json = if tag.is_empty() {
+        fetch(&format!(
+            "https://api.github.com/repos/{PROJECT}/releases/latest"
+        ))
+    } else {
+        fetch(&format!(
+            "https://api.github.com/repos/{PROJECT}/releases/tags/{tag}"
+        ))
+    };
+    let urls = assets(&json);
+    let wanted = format!("-{platform}.tar.gz");
+    let archive = urls.iter().find(|url| url.ends_with(&wanted))?.clone();
+    let checksum = format!("{archive}.sha256");
+    let has_checksum = urls.iter().any(|url| *url == checksum);
+    Some((archive, if has_checksum { Some(checksum) } else { None }))
+}
+
+/// What a file hashes to, asked of whichever tool this system has.
+fn sha256_of(path: &str) -> String {
+    let text = if have("shasum") {
+        capture("shasum", &["-a", "256", path])
+    } else if have("sha256sum") {
+        capture("sha256sum", &[path])
+    } else {
+        String::new()
+    };
+    text.split_whitespace().next().unwrap_or("").to_string()
+}
+
+/// Downloads the build made for this machine and puts it in place. Returns None
+/// when there is no such build, which is not a failure: it means build instead.
+fn install_prebuilt(tag: &str, prefix: &Path, work: &Path, keep: bool) -> Option<i32> {
+    let (archive, checksum) = prebuilt(tag)?;
+    let name = archive.rsplit('/').next().unwrap_or("astral.tar.gz").to_string();
+
+    let work_text = work.to_string_lossy().into_owned();
+    if run("mkdir", &["-p", &work_text]) != 0 {
+        return Some(1);
+    }
+    let downloaded = format!("{work_text}/{name}");
+    Sink::new(Stream::Err).write(&format!("fetching {name}\n"));
+    if run(
+        "curl",
+        &["-sSL", "--fail", "--max-time", "1800", "-o", &downloaded, &archive],
+    ) != 0
+    {
+        Sink::new(Stream::Err).write("astral update: could not download the release\n");
+        return Some(1);
+    }
+
+    // A build is only worth installing if it is the build that was published.
+    if let Some(checksum) = checksum {
+        let published = capture("curl", &["-sSL", "--fail", "--max-time", "60", &checksum]);
+        let published = published.split_whitespace().next().unwrap_or("").to_string();
+        let actual = sha256_of(&downloaded);
+        if published.is_empty() || actual.is_empty() {
+            Sink::new(Stream::Err)
+                .write("note: the download could not be checked against its hash\n");
+        } else if published != actual {
+            Sink::new(Stream::Err).write(
+                "astral update: the download does not match its published hash; \
+                 nothing was installed\n",
+            );
+            return Some(1);
+        }
+    }
+
+    let opened = format!("{work_text}/opened");
+    if run("rm", &["-rf", &opened]) != 0 || run("mkdir", &["-p", &opened]) != 0 {
+        return Some(1);
+    }
+    if run("tar", &["xzf", &downloaded, "-C", &opened, "--strip-components=1"]) != 0 {
+        Sink::new(Stream::Err).write("astral update: the archive could not be opened\n");
+        return Some(1);
+    }
+
+    let prefix_text = prefix.to_string_lossy().into_owned();
+    let from = format!("{opened}/.");
+    let placed = if install_tree_writable(prefix) {
+        run("mkdir", &["-p", &prefix_text]);
+        run("cp", &["-R", &from, &prefix_text])
+    } else {
+        Sink::new(Stream::Err).write(&format!(
+            "\n{prefix_text} is not writable by this user; installing with sudo\n"
+        ));
+        run("sudo", &["mkdir", "-p", &prefix_text]);
+        run("sudo", &["cp", "-R", &from, &prefix_text])
+    };
+    if placed != 0 {
+        return Some(1);
+    }
+
+    if !keep {
+        run("rm", &["-rf", &work_text]);
+    }
+    print(&format!("\ninstalled to {prefix_text}\n"));
+    Some(0)
 }
 
 // ---- finding and fetching a source tree ---------------------------------
@@ -337,6 +491,7 @@ pub fn run_command(arguments: &[String]) -> i32 {
     let mut jobs = String::new();
     let mut check = false;
     let mut local = false;
+    let mut from_source = false;
     let mut keep = false;
 
     let mut index = 0;
@@ -359,6 +514,7 @@ pub fn run_command(arguments: &[String]) -> i32 {
         match argument {
             "--check" => check = true,
             "--local" => local = true,
+            "--source" | "--from-source" => from_source = true,
             "--keep" => keep = true,
             "--release" => match value("--release", &mut index) {
                 Some(tag) => release_tag = tag,
@@ -423,6 +579,20 @@ pub fn run_command(arguments: &[String]) -> i32 {
         return 0;
     }
 
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+
+    // The build made for this machine, when there is one and nothing said to
+    // build instead. Nothing here needs a compiler, so this is the path that
+    // works on a machine with no toolchain at all.
+    if !local && !from_source {
+        let work = PathBuf::from(&home).join(".astral/update");
+        if let Some(code) = install_prebuilt(&release_tag, &prefix, &work, keep) {
+            return code;
+        }
+        Sink::new(Stream::Err)
+            .write("no build was published for this machine; building from source\n");
+    }
+
     // Downloading is the normal path: a machine that installed a release has no
     // tree at all, and one that does may have moved on from this copy.
     let mut work = PathBuf::new();
@@ -439,8 +609,7 @@ pub fn run_command(arguments: &[String]) -> i32 {
         }
     } else {
         let release = newest_release(&release_tag);
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        work = PathBuf::from(home).join(".astral/update");
+        work = PathBuf::from(&home).join(".astral/update");
         match download(&release, &work) {
             Some(root) => root,
             None => return 1,
@@ -512,4 +681,42 @@ pub fn run_command(arguments: &[String]) -> i32 {
 
     print(&format!("\ninstalled to {prefix_text}\n"));
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_attached_file_is_found() {
+        let json = concat!(
+            r#"{"assets":[{"name":"a","browser_download_url":"https://x/astral-2.1.0-macos-arm64.tar.gz"},"#,
+            r#"{"name":"b","browser_download_url":"https://x/astral-2.1.0-macos-arm64.tar.gz.sha256"},"#,
+            r#"{"name":"c","browser_download_url":"https://x/astral-2.1.0-linux-x86_64.tar.gz"}]}"#
+        );
+        let found = assets(json);
+        assert_eq!(found.len(), 3);
+        assert!(found[0].ends_with("macos-arm64.tar.gz"));
+        assert!(found[2].ends_with("linux-x86_64.tar.gz"));
+    }
+
+    #[test]
+    fn nothing_is_found_where_nothing_is_attached() {
+        assert!(assets("{}").is_empty());
+        assert!(assets("").is_empty());
+    }
+
+    #[test]
+    fn this_machine_names_itself_the_way_the_archive_does() {
+        // The name has to be one CMake also produces, or no release will ever
+        // match the machine asking for it.
+        let name = platform().expect("this is a platform releases are made for");
+        assert!(
+            matches!(
+                name,
+                "macos-arm64" | "macos-x86_64" | "linux-arm64" | "linux-x86_64"
+            ),
+            "unexpected platform name {name}"
+        );
+    }
 }

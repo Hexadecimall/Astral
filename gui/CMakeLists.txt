@@ -54,12 +54,16 @@ set(GUI_SOURCES
     model/project.cc
     model/functionlistmodel.cc
     model/settings.cc
+    model/debugsession.cc
     model/patchbuilder.cc
+    model/literalspace.cc
+    model/sourcepatcher.cc
     model/assembler.cc
     views/codeview.cc
     views/decompilerview.cc
     views/listingview.cc
     views/hexview.cc
+    views/debuggerpane.cc
     views/hexpane.cc
     views/listingpane.cc
     theme/theme.cc
@@ -75,7 +79,10 @@ endif()
 add_library(astral_gui_objs OBJECT ${GUI_SOURCES})
 set_target_properties(astral_gui_objs PROPERTIES
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-target_include_directories(astral_gui_objs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# The engine's own headers, so the application reaches the compiler and the
+# assembler built into it rather than running anything else.
+target_include_directories(astral_gui_objs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${ASTRAL_ENGINE_INCLUDE_DIRS})
 target_compile_definitions(astral_gui_objs PRIVATE
     ASTRAL_GUI_VERSION="${PROJECT_VERSION}"
     QT_NO_KEYWORDS
@@ -93,6 +100,27 @@ set_target_properties(astral_gui_bin PROPERTIES
     OUTPUT_NAME astral-gui
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_link_libraries(astral_gui_bin PRIVATE Qt6::Widgets Qt6::Svg astral_static astral_gui_sqlite)
+
+# The single file is what gets handed to someone else, so it is built for
+# speed and carries nothing it does not need to run: no debugging tables, no
+# symbol names beyond the ones the dynamic linker reads.
+target_compile_options(astral_gui_bin PRIVATE -O3)
+if(APPLE)
+    target_link_options(astral_gui_bin PRIVATE -Wl,-dead_strip)
+    # -x -S and an ad-hoc signature are both Apple's: the linker there refuses
+    # an unsigned binary, and the flags mean nothing to GNU strip.
+    add_custom_command(TARGET astral_gui_bin POST_BUILD
+        COMMAND strip -x -S $<TARGET_FILE:astral_gui_bin>
+        COMMAND codesign --force --sign - $<TARGET_FILE:astral_gui_bin>
+        COMMENT "stripping the single-file application"
+        VERBATIM)
+else()
+    target_link_options(astral_gui_bin PRIVATE -Wl,--gc-sections)
+    add_custom_command(TARGET astral_gui_bin POST_BUILD
+        COMMAND strip --strip-unneeded $<TARGET_FILE:astral_gui_bin>
+        COMMENT "stripping the single-file application"
+        VERBATIM)
+endif()
 # gui/specs for the plain binary: the library looks beside the executable.
 add_custom_command(TARGET astral_gui_bin POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E create_symlink ${CMAKE_BINARY_DIR}/specs
@@ -231,7 +259,7 @@ target_compile_definitions(astral_gui_hexedit_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_hexedit_test PRIVATE Qt6::Widgets Qt6::Test)
 add_test(NAME gui_hexedit COMMAND astral_gui_hexedit_test -platform offscreen)
 
-add_executable(astral_gui_patch_test tests/patch_test.cc model/patchbuilder.cc model/programdocument.cc)
+add_executable(astral_gui_patch_test tests/patch_test.cc model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)
 set_target_properties(astral_gui_patch_test PROPERTIES
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(astral_gui_patch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -244,7 +272,7 @@ add_test(NAME gui_patch COMMAND astral_gui_patch_test -platform offscreen)
 # the records that go through them are all it touches.
 
 add_executable(astral_gui_assemble_test tests/assemble_test.cc model/assembler.cc
-               model/patchbuilder.cc model/programdocument.cc)
+               model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)
 set_target_properties(astral_gui_assemble_test PROPERTIES
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(astral_gui_assemble_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -254,17 +282,48 @@ add_test(NAME gui_assemble COMMAND astral_gui_assemble_test -platform offscreen)
 
 # The hex view's byte model: what typing does to it and what it refuses.
 
-add_executable(astral_gui_patchflow tests/patchflow_test.cc model/patchbuilder.cc model/programdocument.cc)
+add_executable(astral_gui_patchflow tests/patchflow_test.cc model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)
 set_target_properties(astral_gui_patchflow PROPERTIES
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(astral_gui_patchflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(astral_gui_patchflow PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_patchflow PRIVATE Qt6::Core astral_static)
 
+add_executable(astral_gui_sourcepatch_test tests/sourcepatch_test.cc
+    model/sourcepatcher.cc model/literalspace.cc model/programdocument.cc)
+set_target_properties(astral_gui_sourcepatch_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF AUTOMOC ON)
+target_include_directories(astral_gui_sourcepatch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${ASTRAL_ENGINE_INCLUDE_DIRS})
+target_compile_definitions(astral_gui_sourcepatch_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_sourcepatch_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
+add_test(NAME gui_sourcepatch COMMAND astral_gui_sourcepatch_test -platform offscreen)
+
+# The whole loop, run for real: recover C, edit it, patch, write, run.
+add_executable(astral_gui_sourcepatchflow tests/sourcepatchflow_test.cc
+    model/sourcepatcher.cc model/literalspace.cc model/programdocument.cc)
+set_target_properties(astral_gui_sourcepatchflow PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF AUTOMOC ON)
+target_include_directories(astral_gui_sourcepatchflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    ${ASTRAL_ENGINE_INCLUDE_DIRS})
+target_compile_definitions(astral_gui_sourcepatchflow PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_sourcepatchflow PRIVATE Qt6::Core astral_static)
+add_test(NAME gui_sourcepatchflow COMMAND astral_gui_sourcepatchflow)
+
 add_executable(astral_gui_asmflow tests/asmflow_test.cc model/assembler.cc
-               model/patchbuilder.cc model/programdocument.cc)
+               model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)
 set_target_properties(astral_gui_asmflow PROPERTIES
     CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(astral_gui_asmflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(astral_gui_asmflow PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_asmflow PRIVATE Qt6::Core astral_static)
+
+# ---------------------------------------------------------------- install
+#
+# The single file is what someone else runs, so that is what goes into bin. The
+# bundle goes beside it on macOS, where an application that is not a bundle
+# cannot be opened from the Finder.
+install(TARGETS astral_gui_bin RUNTIME DESTINATION bin)
+if(APPLE)
+    install(TARGETS astral_gui BUNDLE DESTINATION share/astral/applications)
+endif()
