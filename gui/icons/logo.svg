@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Disk: a tilted ring, a core, and three stars that escaped it. -->
+  <ellipse cx="32" cy="32" rx="24" ry="9" transform="rotate(-24 32 32)" fill="none" stroke="#4d8dff" stroke-width="2.2"/>
+  <circle cx="32" cy="32" r="4.5" fill="#ffffff"/>
+  <g fill="#4d8dff">
+    <path d="M53.20 14.00 L50.72 14.72 L50.00 17.20 L49.28 14.72 L46.80 14.00 L49.28 13.28 L50.00 10.80 L50.72 13.28 Z"/>
+    <path d="M15.40 49.00 L13.54 49.54 L13.00 51.40 L12.46 49.54 L10.60 49.00 L12.46 48.46 L13.00 46.60 L13.54 48.46 Z"/>
+    <path d="M53.80 44.00 L52.41 44.41 L52.00 45.80 L51.59 44.41 L50.20 44.00 L51.59 43.59 L52.00 42.20 L52.41 43.59 Z"/>
+  </g>
+</svg>

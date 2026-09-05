@@ -1,0 +1,38 @@
+# Astral dark theme. One colour per line, `key = #rrggbb`.
+# Keys not listed keep the built-in value; an unknown key is an error.
+
+# Surfaces, darkest to lightest
+background        = #1b1c1f
+panel             = #222428
+panelRaised       = #2a2d32
+border            = #35383e
+editorBackground  = #1e1f23
+editorLine        = #26282d
+selection         = #2d4a7a
+selectionInactive = #2a3140
+hover             = #2f333a
+
+# Text
+text              = #d6d9df
+textMuted         = #8b909a
+textDisabled      = #5d626b
+accent            = #4d8dff
+accentText        = #ffffff
+warning           = #e3b341
+error             = #f0645f
+success           = #6fcf7a
+
+# Code tokens, shared by the decompiler and the listing
+token.keyword     = #c792ea
+token.type        = #82aaff
+token.function    = #ffcb6b
+token.variable    = #d6d9df
+token.parameter   = #f5b8d0
+token.global      = #89ddff
+token.number      = #f78c6c
+token.string      = #c3e88d
+token.comment     = #6b7280
+token.label       = #e3b341
+token.address     = #5d626b
+token.mnemonic    = #82aaff
+token.register    = #f5b8d0

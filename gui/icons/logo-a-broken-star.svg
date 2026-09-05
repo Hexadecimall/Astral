@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Broken star: a four-point star whose top arm is split into three slices,
+       as if it had been taken apart and is snapping back together. -->
+  <g fill="#4d8dff">
+    <path d="M37 27 L58 32 L37 37 L32 58 L27 37 L6 32 L27 27 Z"/>
+    <path d="M32 6 L33.67 13 L30.33 13 Z"/>
+    <path d="M29.86 15 L34.14 15 L35.33 20 L28.67 20 Z"/>
+    <path d="M28.19 22 L35.81 22 L37 27 L27 27 Z"/>
+  </g>
+</svg>

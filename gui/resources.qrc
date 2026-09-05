@@ -1,0 +1,9 @@
+<!DOCTYPE RCC><RCC version="1.0">
+<qresource prefix="/">
+    <file>theme/dark.astraltheme</file>
+    <file>icons/logo.svg</file>
+    <file>icons/logo-small.svg</file>
+    <file>icons/close.svg</file>
+    <file>icons/close-hover.svg</file>
+</qresource>
+</RCC>

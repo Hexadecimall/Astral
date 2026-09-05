@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Constellation braces: stars joined into { } with a brighter star between
+       them. A star map that is also source code. -->
+  <g fill="none" stroke="#4d8dff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 10 C19 10 20 16 20 22 L20 28 C20 31 17 32 14 32 C17 32 20 33 20 36 L20 42 C20 48 19 54 25 54"/>
+    <path d="M39 10 C45 10 44 16 44 22 L44 28 C44 31 47 32 50 32 C47 32 44 33 44 36 L44 42 C44 48 45 54 39 54"/>
+  </g>
+  <g fill="#4d8dff">
+    <circle cx="25" cy="10" r="2.4"/><circle cx="20" cy="22" r="2"/><circle cx="14" cy="32" r="2.8"/>
+    <circle cx="20" cy="42" r="2"/><circle cx="25" cy="54" r="2.4"/>
+    <circle cx="39" cy="10" r="2.4"/><circle cx="44" cy="22" r="2"/><circle cx="50" cy="32" r="2.8"/>
+    <circle cx="44" cy="42" r="2"/><circle cx="39" cy="54" r="2.4"/>
+  </g>
+  <path fill="#ffffff" d="M32 22 L33.8 30.2 L42 32 L33.8 33.8 L32 42 L30.2 33.8 L22 32 L30.2 30.2 Z"/>
+</svg>
