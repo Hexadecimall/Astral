@@ -1559,6 +1559,19 @@ std::string Session::apply_naming(void *funcdata, FunctionResult &out)
 
     NamingResult naming = analyse(out.c_code, out.name, out.callee_names, out.local_names,
                                   out.parameter_names, knowledge);
+
+    // The program's entry point is main, and that is not inferred. Every other
+    // name here comes from what a function calls or says, and main calls
+    // everything a program does, so whichever idiom happens to be looked at
+    // first finds something to claim it with. Naming it from evidence is how a
+    // listing ends up with a main called after the least important thing in it.
+    if (knowledge.is_placeholder(out.name) &&
+        std::find(image_.entry_points.begin(), image_.entry_points.end(), out.address) !=
+            image_.entry_points.end()) {
+        naming.function_name = "main";
+        naming.function_reason = "it is the program's entry point";
+    }
+
     if (!learned.empty()) {
         naming.function_name = learned;
         naming.function_reason = "you named this body before";

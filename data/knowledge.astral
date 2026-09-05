@@ -1296,3 +1296,211 @@ const socket:0 0xa        AF_INET6
 const socket:1 0x1        SOCK_STREAM
 const socket:1 0x2        SOCK_DGRAM
 const socket:1 0x3        SOCK_RAW
+
+# ---------------------------------------------------------------------------
+# The BSD and Apple userland.
+#
+# What separates a Mac or a BSD command from a portable one is not its logic
+# but the library it reaches for. ls does not call opendir and readdir; it
+# hands the whole job to fts, and the flags it passes decide what the listing
+# is. Without these the tools read as calls into nothing, which is why the
+# names, the prototypes and the flag words are all recorded together.
+
+# The file tree walk. This is what a directory-listing program is built on:
+# fts_open takes the paths, fts_read hands back one entry at a time, and
+# fts_set says what to do about the one just handed over.
+hdr fts_open             fts.h
+hdr fts_read             fts.h
+hdr fts_children         fts.h
+hdr fts_set              fts.h
+hdr fts_close            fts.h
+proto fts_open           extern void *fts_open(char **paths, int4 options, void *compare);
+proto fts_read           extern void *fts_read(void *tree);
+proto fts_children       extern void *fts_children(void *tree, int4 options);
+proto fts_set            extern int4 fts_set(void *tree, void *entry, int4 instruction);
+proto fts_close          extern int4 fts_close(void *tree);
+verb fts_open            openTree
+verb fts_read            readEntry
+verb fts_children        readChildren
+verb fts_set             markEntry
+verb fts_close           closeTree
+idiom fts_open+fts_read      walkTree
+idiom fts_open+fts_children  listDirectory
+idiom fts_read+fts_set       walkTreeSkipping
+
+# How the walk is asked to behave.
+const fts_open:1 0x1      FTS_COMFOLLOW
+const fts_open:1 0x2      FTS_LOGICAL
+const fts_open:1 0x4      FTS_NOCHDIR
+const fts_open:1 0x8      FTS_NOSTAT
+const fts_open:1 0x10     FTS_PHYSICAL
+const fts_open:1 0x20     FTS_SEEDOT
+const fts_open:1 0x40     FTS_XDEV
+# And what fts_set is being told to do with an entry.
+const fts_set:2 0x1       FTS_AGAIN
+const fts_set:2 0x2       FTS_FOLLOW
+const fts_set:2 0x4       FTS_SKIP
+
+# Access control lists, which on Apple are what the trailing + on a mode means.
+hdr acl_get_link_np      sys/acl.h
+hdr acl_get_file         sys/acl.h
+hdr acl_get_entry        sys/acl.h
+hdr acl_get_tag_type     sys/acl.h
+hdr acl_get_qualifier    sys/acl.h
+hdr acl_get_permset      sys/acl.h
+hdr acl_get_perm_np      sys/acl.h
+hdr acl_get_flagset_np   sys/acl.h
+hdr acl_get_flag_np      sys/acl.h
+hdr acl_free             sys/acl.h
+proto acl_get_link_np    extern void *acl_get_link_np(char *path, int4 type);
+proto acl_get_file       extern void *acl_get_file(char *path, int4 type);
+proto acl_get_entry      extern int4 acl_get_entry(void *acl, int4 which, void *entry);
+proto acl_get_tag_type   extern int4 acl_get_tag_type(void *entry, void *tag);
+proto acl_get_qualifier  extern void *acl_get_qualifier(void *entry);
+proto acl_get_permset    extern int4 acl_get_permset(void *entry, void *permset);
+proto acl_get_perm_np    extern int4 acl_get_perm_np(void *permset, int4 perm);
+proto acl_get_flagset_np extern int4 acl_get_flagset_np(void *entry, void *flagset);
+proto acl_get_flag_np    extern int4 acl_get_flag_np(void *flagset, int4 flag);
+proto acl_free           extern int4 acl_free(void *acl);
+verb acl_get_link_np     readAccessList
+verb acl_get_file        readAccessList
+verb acl_get_entry       readAccessEntry
+verb acl_free            freeAccessList
+yields acl_get_link_np   accessList
+yields acl_get_file      accessList
+yields acl_get_entry     entry
+yields acl_get_qualifier owner
+
+# Extended attributes, which on Apple are what the trailing @ on a mode means.
+hdr getxattr             sys/xattr.h
+hdr listxattr            sys/xattr.h
+hdr setxattr             sys/xattr.h
+hdr removexattr          sys/xattr.h
+proto getxattr           extern WORD getxattr(char *path, char *name, void *value, WORD size, int4 position, int4 options);
+proto listxattr          extern WORD listxattr(char *path, char *names, WORD size, int4 options);
+proto setxattr           extern int4 setxattr(char *path, char *name, void *value, WORD size, int4 position, int4 options);
+proto removexattr        extern int4 removexattr(char *path, char *name, int4 options);
+verb getxattr            readAttribute
+verb listxattr           listAttributes
+verb setxattr            writeAttribute
+verb removexattr         removeAttribute
+yields getxattr          attributeSize
+yields listxattr         attributeNames
+
+# The permission string a listing prints, and the file flags beside it.
+hdr strmode              string.h
+proto strmode            extern void strmode(int4 mode, char *text);
+verb strmode             formatMode
+verb fflagstostr         formatFlags
+verb strtofflags         parseFlags
+yields strmode           modeText
+yields fflagstostr       flagText
+yields humanize_number   sizeText
+
+# The terminal database, which is how a program learns to move the cursor
+# without knowing which terminal it is talking to.
+hdr tgetent              termcap.h
+hdr tgetstr              termcap.h
+hdr tgetnum              termcap.h
+hdr tgetflag             termcap.h
+hdr tgoto                termcap.h
+hdr tputs                termcap.h
+proto tgetent            extern int4 tgetent(char *buffer, char *name);
+proto tgetstr            extern char *tgetstr(char *capability, char **area);
+proto tgetnum            extern int4 tgetnum(char *capability);
+proto tgetflag           extern int4 tgetflag(char *capability);
+proto tgoto              extern char *tgoto(char *capability, int4 column, int4 row);
+proto tputs              extern int4 tputs(char *text, int4 lines, void *putc);
+verb tgetent             loadTerminal
+verb tgetstr             terminalCapability
+verb tgoto               terminalMoveTo
+verb tputs               writeTerminal
+idiom tgetent+tgetstr    readTerminalCapabilities
+yields tgetstr           capability
+yields tgoto             cursorMove
+
+# Identifiers, printed rather than computed with.
+hdr uuid_unparse         uuid/uuid.h
+hdr uuid_unparse_upper   uuid/uuid.h
+hdr uuid_unparse_lower   uuid/uuid.h
+hdr uuid_generate        uuid/uuid.h
+hdr uuid_parse           uuid/uuid.h
+proto uuid_unparse       extern void uuid_unparse(void *uuid, char *text);
+proto uuid_unparse_upper extern void uuid_unparse_upper(void *uuid, char *text);
+proto uuid_unparse_lower extern void uuid_unparse_lower(void *uuid, char *text);
+proto uuid_generate      extern void uuid_generate(void *uuid);
+proto uuid_parse         extern int4 uuid_parse(char *text, void *uuid);
+verb uuid_unparse_upper  formatIdentifier
+verb uuid_unparse_lower  formatIdentifier
+verb uuid_unparse        formatIdentifier
+verb uuid_parse          parseIdentifier
+yields uuid_unparse_upper identifierText
+
+# Who a numeric owner is. Apple resolves through membership rather than only
+# the password file, so the translation call belongs beside the others.
+hdr mbr_identifier_translate  membership.h
+hdr mbr_uid_to_uuid           membership.h
+hdr mbr_gid_to_uuid           membership.h
+hdr mbr_uuid_to_id            membership.h
+proto mbr_identifier_translate extern int4 mbr_identifier_translate(int4 fromType, void *from, WORD size, int4 toType, void **to, WORD *toSize);
+proto mbr_uid_to_uuid          extern int4 mbr_uid_to_uuid(int4 user, void *uuid);
+proto mbr_gid_to_uuid          extern int4 mbr_gid_to_uuid(int4 group, void *uuid);
+verb mbr_uid_to_uuid           userIdentifier
+verb mbr_gid_to_uuid           groupIdentifier
+yields mbr_uid_to_uuid         identifier
+yields mbr_gid_to_uuid         identifier
+
+# Reading the kernel's own variables, the BSD way.
+hdr sysctl               sys/sysctl.h
+hdr sysctlnametomib      sys/sysctl.h
+proto sysctl             extern int4 sysctl(int4 *name, WORD length, void *old, WORD *oldSize, void *new, WORD newSize);
+proto sysctlnametomib    extern int4 sysctlnametomib(char *name, int4 *mib, WORD *size);
+verb sysctl              readSetting
+verb sysctlnametomib     lookupSetting
+yields sysctl            setting
+
+# Mounted filesystems, which is how df and ls -l on a mount point answer.
+hdr statfs               sys/mount.h
+hdr fstatfs              sys/mount.h
+hdr getmntinfo           sys/mount.h
+hdr getfsstat            sys/mount.h
+proto statfs             extern int4 statfs(char *path, void *buffer);
+proto fstatfs            extern int4 fstatfs(int4 file, void *buffer);
+proto getmntinfo         extern int4 getmntinfo(void *list, int4 flags);
+proto getfsstat          extern int4 getfsstat(void *buffer, int4 size, int4 flags);
+verb statfs              readFilesystem
+verb getmntinfo          listFilesystems
+yields statfs            filesystem
+yields getmntinfo        filesystems
+
+# Sorting text the way the user's language sorts it, rather than by byte.
+verb strcoll             compareLocalized
+verb strxfrm             collationKey
+verb setlocale           setLanguage
+yields strcoll           order
+yields setlocale         locale
+hdr strcoll              string.h
+hdr strxfrm              string.h
+proto strcoll            extern int4 strcoll(char *left, char *right);
+proto strxfrm            extern WORD strxfrm(char *out, char *in, WORD size);
+
+# Apple's own internals, which are not API but turn up in every binary it
+# builds. Naming them is what stops a listing reading as calls into nothing.
+proto __error            extern int4 *__error(void);
+proto __errno_location   extern int4 *__errno_location(void);
+proto __maskrune         extern int4 __maskrune(int4 character, WORD mask);
+proto __tolower          extern int4 __tolower(int4 character);
+proto __toupper          extern int4 __toupper(int4 character);
+proto __assert_rtn       extern void __assert_rtn(char *function, char *file, int4 line, char *expression);
+proto __stack_chk_fail   extern void __stack_chk_fail(void);
+verb __error             errnoLocation
+verb __errno_location    errnoLocation
+verb __maskrune          characterClass
+verb __tolower           toLower
+verb __toupper           toUpper
+yields __error           errnoAddress
+yields __maskrune        characterClass
+noreturn __assert_rtn
+noreturn __stack_chk_fail
+noreturn errx
+noreturn err
