@@ -28,10 +28,32 @@ set(ASTRAL_EXTRA
 # The SLEIGH specification compiler.
 set(ASTRAL_SLACOMP slgh_compile slghparse slghscan)
 
+# The engine is kept in folders that say what each part is for; the sets above
+# say which folder each name lives in.
+set(ASTRAL_ENGINE_DIRS core decompiler sleigh runtime assembler upstream)
+
+# Every folder is on the include path, so a header is included by its own name
+# whichever part of the engine reaches for it.
+set(ASTRAL_ENGINE_INCLUDE_DIRS "")
+foreach(_dir ${ASTRAL_ENGINE_DIRS})
+    list(APPEND ASTRAL_ENGINE_INCLUDE_DIRS ${ASTRAL_DECOMP_DIR}/${_dir})
+endforeach()
+
+# Finds each named unit wherever it sits.
 function(astral_expand out_var)
     set(_acc "")
     foreach(_n ${ARGN})
-        list(APPEND _acc ${ASTRAL_DECOMP_DIR}/${_n}.cc)
+        set(_found "")
+        foreach(_dir ${ASTRAL_ENGINE_DIRS})
+            if(EXISTS ${ASTRAL_DECOMP_DIR}/${_dir}/${_n}.cc)
+                set(_found ${ASTRAL_DECOMP_DIR}/${_dir}/${_n}.cc)
+                break()
+            endif()
+        endforeach()
+        if(_found STREQUAL "")
+            message(FATAL_ERROR "engine source ${_n}.cc is not in any of ${ASTRAL_ENGINE_DIRS}")
+        endif()
+        list(APPEND _acc ${_found})
     endforeach()
     set(${out_var} ${_acc} PARENT_SCOPE)
 endfunction()

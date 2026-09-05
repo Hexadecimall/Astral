@@ -27,15 +27,22 @@ astral_expand(_core_src ${ASTRAL_CORE} ${ASTRAL_DECCORE} ${ASTRAL_SLEIGH} ${ASTR
 astral_expand(_slacomp_src ${ASTRAL_SLACOMP})
 
 add_library(astral_vendor OBJECT ${_core_src} ${_slacomp_src})
-target_include_directories(astral_vendor PUBLIC ${ASTRAL_DECOMP_DIR})
+target_include_directories(astral_vendor PUBLIC ${ASTRAL_ENGINE_INCLUDE_DIRS})
 target_link_libraries(astral_vendor PUBLIC ZLIB::ZLIB)
 # slgh_compile.cc carries the stand-alone `sleigh` tool entry point; rename it away
 # so the same unmodified source can live inside the library.
-set_source_files_properties(${ASTRAL_DECOMP_DIR}/slgh_compile.cc
+set_source_files_properties(${ASTRAL_DECOMP_DIR}/sleigh/slgh_compile.cc
     PROPERTIES COMPILE_DEFINITIONS "main=astral_sleigh_tool_main_unused")
 target_compile_options(astral_vendor PRIVATE -w)
 
 # ---------------------------------------------------------------- library proper
+# The library is kept in folders that say what each part is for. Each is on the
+# include path, so a header is included by its own name from anywhere.
+set(ASTRAL_LIBRARY_DIRS api core format emit knowledge patch)
+set(ASTRAL_LIBRARY_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src)
+foreach(_dir ${ASTRAL_LIBRARY_DIRS})
+    list(APPEND ASTRAL_LIBRARY_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/src/${_dir})
+endforeach()
 set(KNOWLEDGE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/data/knowledge.astral)
 set(KNOWLEDGE_CONTRIB ${CMAKE_CURRENT_SOURCE_DIR}/contrib/databases)
 set(KNOWLEDGE_COMBINED ${CMAKE_BINARY_DIR}/generated/knowledge.astral)
@@ -69,32 +76,32 @@ add_custom_command(OUTPUT ${RUNTIME_EMBEDDED}
 set(ASTRAL_LIB_SRC
     ${RUNTIME_EMBEDDED}
     ${KNOWLEDGE_EMBEDDED}
-    src/knowledge.cc
-    src/naming.cc
-    src/paths.cc
-    src/contribute.cc
-    src/source_learn.cc
-    src/creal.cc
-    src/cpp_api.cc
-    src/error.cc
-    src/image.cc
-    src/demangle.cc
-    src/cxx_idioms.cc
-    src/patch.cc
-    src/sha256.cc
-    src/macho_sign.cc
-    src/loader_elf.cc
-    src/loader_pe.cc
-    src/loader_macho.cc
-    src/langmap.cc
-    src/libc_protos.cc
-    src/session.cc
-    src/capi.cc)
+    src/knowledge/knowledge.cc
+    src/knowledge/naming.cc
+    src/core/paths.cc
+    src/knowledge/contribute.cc
+    src/knowledge/source_learn.cc
+    src/emit/creal.cc
+    src/api/cpp_api.cc
+    src/api/error.cc
+    src/format/image.cc
+    src/emit/demangle.cc
+    src/emit/cxx_idioms.cc
+    src/patch/patch.cc
+    src/patch/sha256.cc
+    src/patch/macho_sign.cc
+    src/format/loader_elf.cc
+    src/format/loader_pe.cc
+    src/format/loader_macho.cc
+    src/core/langmap.cc
+    src/emit/libc_protos.cc
+    src/core/session.cc
+    src/api/capi.cc)
 
 add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${ASTRAL_DECOMP_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS} ${ASTRAL_LIBRARY_INCLUDE_DIRS})
 # No path is written into the library. Where things are is worked out while
 # running, so a binary never names the machine that built it and never breaks
 # when an install is moved.

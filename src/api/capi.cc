@@ -1,0 +1,918 @@
+// The C ABI. Every entry point is noexcept: C++ exceptions are converted into
+// status codes plus a thread-local message.
+#include "astral/astral.h"
+
+#include "error.hh"
+#include "image.hh"
+#include "contribute.hh"
+#include "knowledge.hh"
+#include "session.hh"
+#include "source_learn.hh"
+
+#include <cstdlib>
+#include <cstring>
+#include <memory>
+#include <new>
+#include <string>
+#include <vector>
+
+using namespace astral_internal;
+
+struct astral_program {
+    std::unique_ptr<Session> session;
+    std::string language_id;
+    std::string compiler_spec;
+    std::string format_name;
+};
+
+struct astral_function {
+    FunctionResult result;
+};
+
+struct astral_contribution {
+    Contribution value;
+    ContributionPolicy policy;
+    Submission submission;
+};
+
+namespace {
+
+const char *cstr(const std::string &s) { return s.c_str(); }
+
+char *copy_string(const std::string &s)
+{
+    char *copy = static_cast<char *>(std::malloc(s.size() + 1));
+    if (copy != nullptr)
+        std::memcpy(copy, s.c_str(), s.size() + 1);
+    return copy;
+}
+
+template <typename T>
+const char *element(const std::vector<T> &v, int index)
+{
+    if (index < 0 || static_cast<size_t>(index) >= v.size())
+        return nullptr;
+    return v[static_cast<size_t>(index)].c_str();
+}
+
+astral_program *finish_open(BinaryImage image, const char *language_id)
+{
+    std::string error;
+    std::string override_id = language_id != nullptr ? language_id : "";
+    std::unique_ptr<Session> session = Session::create(std::move(image), override_id, error);
+    if (!session) {
+        set_error(error.empty() ? "could not build an architecture for this image" : error);
+        return nullptr;
+    }
+    auto *program = new (std::nothrow) astral_program();
+    if (program == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    program->language_id = session->language_id();
+    program->compiler_spec = session->compiler_spec();
+    program->format_name = session->image().format_name;
+    program->session = std::move(session);
+    clear_error();
+    return program;
+}
+
+} // namespace
+
+extern "C" {
+
+const char *astral_last_error(void) { return last_error(); }
+
+const char *astral_version(void) { return ASTRAL_VERSION; }
+
+const char *astral_upstream_version(void) { return ASTRAL_GHIDRA_VERSION; }
+
+astral_status astral_init(const char *spec_root)
+{
+    try {
+        astral_status status = initialize(spec_root);
+        if (status != ASTRAL_OK)
+            return fail(status, "no SLEIGH specifications found; build the specs or set "
+                                "ASTRAL_SPECS to a directory of compiled language files");
+        clear_error();
+        return ASTRAL_OK;
+    } catch (const std::exception &e) {
+        return fail(ASTRAL_ERR_INTERNAL, e.what());
+    } catch (...) {
+        return fail(ASTRAL_ERR_INTERNAL, "unknown failure during initialization");
+    }
+}
+
+void astral_shutdown(void)
+{
+    try {
+        terminate();
+    } catch (...) {
+    }
+}
+
+int astral_language_count(void) { return language_count(); }
+
+const char *astral_language_id(int index) { return language_id_at(index); }
+
+const char *astral_language_description(int index) { return language_description_at(index); }
+
+astral_status astral_compile_sleigh(const char *slaspec_path, const char *sla_path)
+{
+    if (slaspec_path == nullptr || sla_path == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null path");
+    std::string error;
+    if (!compile_sleigh(slaspec_path, sla_path, error))
+        return fail(ASTRAL_ERR_IO, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_program *astral_program_open(const char *path, const char *language_id)
+{
+    if (path == nullptr) {
+        set_error("null path");
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes;
+    std::string error;
+    if (!read_file(path, bytes, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    BinaryImage image;
+    image.path = path;
+    if (!load_any(bytes, image, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    return finish_open(std::move(image), language_id);
+}
+
+astral_program *astral_program_open_memory(const void *data, size_t size, const char *language_id)
+{
+    if (data == nullptr && size != 0) {
+        set_error("null buffer");
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes(static_cast<const uint8_t *>(data),
+                               static_cast<const uint8_t *>(data) + size);
+    BinaryImage image;
+    std::string error;
+    if (!load_any(bytes, image, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    return finish_open(std::move(image), language_id);
+}
+
+astral_program *astral_program_open_raw(const char *path, const char *language_id,
+                                        uint64_t base_address)
+{
+    if (path == nullptr || language_id == nullptr) {
+        set_error("a raw image needs both a path and a language id");
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes;
+    std::string error;
+    if (!read_file(path, bytes, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    BinaryImage image = make_raw_image(bytes, base_address);
+    image.path = path;
+    return finish_open(std::move(image), language_id);
+}
+
+astral_program *astral_program_open_raw_memory(const void *data, size_t size,
+                                               const char *language_id, uint64_t base_address)
+{
+    if (language_id == nullptr || (data == nullptr && size != 0)) {
+        set_error("a raw image needs both a buffer and a language id");
+        return nullptr;
+    }
+    std::vector<uint8_t> bytes(static_cast<const uint8_t *>(data),
+                               static_cast<const uint8_t *>(data) + size);
+    return finish_open(make_raw_image(bytes, base_address), language_id);
+}
+
+void astral_program_close(astral_program *program) { delete program; }
+
+astral_format astral_program_format(const astral_program *program)
+{
+    return program == nullptr ? ASTRAL_FORMAT_UNKNOWN : program->session->image().format;
+}
+
+const char *astral_program_format_name(const astral_program *program)
+{
+    return program == nullptr ? nullptr : cstr(program->format_name);
+}
+
+const char *astral_program_language_id(const astral_program *program)
+{
+    return program == nullptr ? nullptr : cstr(program->language_id);
+}
+
+const char *astral_program_compiler_spec(const astral_program *program)
+{
+    return program == nullptr ? nullptr : cstr(program->compiler_spec);
+}
+
+int astral_program_is_big_endian(const astral_program *program)
+{
+    return program == nullptr ? 0 : (program->session->big_endian() ? 1 : 0);
+}
+
+int astral_program_pointer_size(const astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->pointer_size();
+}
+
+uint64_t astral_program_image_base(const astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->image().image_base;
+}
+
+int astral_program_entry_count(const astral_program *program)
+{
+    return program == nullptr ? 0 : static_cast<int>(program->session->image().entry_points.size());
+}
+
+uint64_t astral_program_entry(const astral_program *program, int index)
+{
+    if (program == nullptr)
+        return 0;
+    const auto &entries = program->session->image().entry_points;
+    if (index < 0 || static_cast<size_t>(index) >= entries.size())
+        return 0;
+    return entries[static_cast<size_t>(index)];
+}
+
+int astral_program_segment_count(const astral_program *program)
+{
+    return program == nullptr ? 0 : static_cast<int>(program->session->image().segments.size());
+}
+
+#define SEGMENT_OR(prog, idx, fallback)                                                            \
+    if ((prog) == nullptr)                                                                         \
+        return fallback;                                                                           \
+    const auto &segments = (prog)->session->image().segments;                                      \
+    if ((idx) < 0 || static_cast<size_t>(idx) >= segments.size())                                  \
+    return fallback
+
+const char *astral_program_segment_name(const astral_program *program, int index)
+{
+    SEGMENT_OR(program, index, nullptr);
+    return segments[static_cast<size_t>(index)].name.c_str();
+}
+
+uint64_t astral_program_segment_address(const astral_program *program, int index)
+{
+    SEGMENT_OR(program, index, 0);
+    return segments[static_cast<size_t>(index)].address;
+}
+
+uint64_t astral_program_segment_size(const astral_program *program, int index)
+{
+    SEGMENT_OR(program, index, 0);
+    return segments[static_cast<size_t>(index)].size;
+}
+
+int astral_program_segment_is_executable(const astral_program *program, int index)
+{
+    SEGMENT_OR(program, index, 0);
+    return segments[static_cast<size_t>(index)].executable ? 1 : 0;
+}
+
+int astral_program_segment_is_writable(const astral_program *program, int index)
+{
+    SEGMENT_OR(program, index, 0);
+    return segments[static_cast<size_t>(index)].writable ? 1 : 0;
+}
+
+#undef SEGMENT_OR
+
+#define SYMBOL_OR(prog, idx, fallback)                                                             \
+    if ((prog) == nullptr)                                                                         \
+        return fallback;                                                                           \
+    const auto &symbols = (prog)->session->image().symbols;                                        \
+    if ((idx) < 0 || static_cast<size_t>(idx) >= symbols.size())                                   \
+    return fallback
+
+int astral_program_symbol_count(const astral_program *program)
+{
+    return program == nullptr ? 0 : static_cast<int>(program->session->image().symbols.size());
+}
+
+const char *astral_program_symbol_name(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, nullptr);
+    return symbols[static_cast<size_t>(index)].name.c_str();
+}
+
+uint64_t astral_program_symbol_address(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, 0);
+    return symbols[static_cast<size_t>(index)].address;
+}
+
+uint64_t astral_program_symbol_size(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, 0);
+    return symbols[static_cast<size_t>(index)].size;
+}
+
+int astral_program_symbol_is_function(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, 0);
+    return symbols[static_cast<size_t>(index)].is_function ? 1 : 0;
+}
+
+int astral_program_symbol_is_import(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, 0);
+    return symbols[static_cast<size_t>(index)].is_import ? 1 : 0;
+}
+
+#undef SYMBOL_OR
+
+size_t astral_program_read(const astral_program *program, uint64_t address, void *out, size_t size)
+{
+    if (program == nullptr || out == nullptr)
+        return 0;
+    return program->session->image().read(address, static_cast<uint8_t *>(out), size);
+}
+
+astral_status astral_program_add_symbol(astral_program *program, uint64_t address,
+                                        const char *name, int is_function)
+{
+    if (program == nullptr || name == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or name");
+    std::string error;
+    if (!program->session->add_symbol(address, name, is_function != 0, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_rename(astral_program *program, uint64_t address, const char *name,
+                                    int learn)
+{
+    if (program == nullptr || name == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or name");
+    std::string error;
+    if (!program->session->rename(address, name, learn != 0, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+int astral_program_instruction_length(astral_program *program, uint64_t address)
+{
+    if (program == nullptr)
+        return 0;
+    return program->session->instruction_length(address);
+}
+
+astral_status astral_program_patch_bytes(astral_program *program, uint64_t address,
+                                         const void *bytes, size_t size, const char *note)
+{
+    if (program == nullptr || bytes == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or bytes");
+    const uint8_t *p = static_cast<const uint8_t *>(bytes);
+    std::vector<uint8_t> data(p, p + size);
+    std::string error;
+    if (!program->session->patch_bytes(address, data, astral_internal::PatchTier::Manual,
+                                        note != nullptr ? note : "", error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_patch_nop(astral_program *program, uint64_t address, int count)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_nop(address, count, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_patch_invert(astral_program *program, uint64_t address)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_invert_branch(address, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_patch_return(astral_program *program, uint64_t address, uint64_t value)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    if (!program->session->patch_return(address, value, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+size_t astral_program_patch_count(astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->patches().size();
+}
+
+void astral_program_patch_undo(astral_program *program)
+{
+    if (program != nullptr)
+        program->session->undo_patch();
+}
+
+void astral_program_patch_clear(astral_program *program)
+{
+    if (program != nullptr)
+        program->session->patches().clear();
+}
+
+char *astral_program_patch_serialize(astral_program *program)
+{
+    if (program == nullptr)
+        return nullptr;
+    return copy_string(program->session->patches().serialize());
+}
+
+astral_status astral_program_write_patched(astral_program *program, const char *out_path)
+{
+    if (program == nullptr || out_path == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or path");
+    std::string error;
+    if (!program->session->write_patched(out_path, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+int astral_program_learn_symbols(astral_program *program)
+{
+    if (program == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+    std::string error;
+    const int learned = program->session->learn_symbols(error);
+    if (learned == 0 && !error.empty())
+        return fail(ASTRAL_ERR_IO, error);
+    clear_error();
+    return learned;
+}
+
+namespace {
+// The policy is handed out as plain C, so its strings have to outlive the call.
+ContributionPolicy g_policy;
+} // namespace
+
+astral_status astral_contribution_ask(const char *repo, astral_contribution_policy *policy)
+{
+    if (repo == nullptr || policy == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null repository or policy");
+    g_policy = fetch_policy(repo);
+    if (!g_policy.error.empty())
+        return fail(ASTRAL_ERR_IO, g_policy.error);
+    policy->accepted = g_policy.accepted ? 1 : 0;
+    policy->method = g_policy.method.c_str();
+    policy->message = g_policy.message.c_str();
+    policy->record_limit = static_cast<int>(g_policy.record_limit);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_contribution *astral_contribution_prepare(const char *database_path,
+                                                 const astral_contribution_policy *policy)
+{
+    if (database_path == nullptr || policy == nullptr) {
+        set_error("null database path or policy");
+        return nullptr;
+    }
+    std::string error;
+    auto *contribution = new (std::nothrow) astral_contribution();
+    if (contribution == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    contribution->policy = g_policy;
+    contribution->value = prepare_contribution(database_path, contribution->policy, error);
+    if (contribution->value.records == 0) {
+        set_error(error.empty() ? "nothing to send" : error);
+        delete contribution;
+        return nullptr;
+    }
+    clear_error();
+    return contribution;
+}
+
+void astral_contribution_free(astral_contribution *contribution) { delete contribution; }
+
+int astral_contribution_records(const astral_contribution *c)
+{
+    return c == nullptr ? 0 : static_cast<int>(c->value.records);
+}
+
+int astral_contribution_withheld_kind(const astral_contribution *c)
+{
+    return c == nullptr ? 0 : static_cast<int>(c->value.withheld_kind);
+}
+
+int astral_contribution_withheld_private(const astral_contribution *c)
+{
+    return c == nullptr ? 0 : static_cast<int>(c->value.withheld_private);
+}
+
+int astral_contribution_example_count(const astral_contribution *c)
+{
+    return c == nullptr ? 0 : static_cast<int>(c->value.examples.size());
+}
+
+const char *astral_contribution_example(const astral_contribution *c, int index)
+{
+    return c == nullptr ? nullptr : element(c->value.examples, index);
+}
+
+const char *astral_contribution_send(const char *repo, astral_contribution *contribution,
+                                     const char *title)
+{
+    if (repo == nullptr || contribution == nullptr) {
+        set_error("null repository or contribution");
+        return nullptr;
+    }
+    const std::string heading =
+        title != nullptr ? title
+                         : "Database submission: " +
+                               std::to_string(contribution->value.records) + " records";
+    std::string error;
+    if (!send_contribution(repo, contribution->policy, contribution->value, heading,
+                           contribution->submission, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    clear_error();
+    return contribution->submission.url.c_str();
+}
+
+astral_delivery astral_contribution_delivery(const astral_contribution *c)
+{
+    if (c == nullptr)
+        return ASTRAL_DELIVERY_BROWSER;
+    switch (c->submission.delivery) {
+    case Delivery::Endpoint: return ASTRAL_DELIVERY_ENDPOINT;
+    case Delivery::Api: return ASTRAL_DELIVERY_API;
+    default: return ASTRAL_DELIVERY_BROWSER;
+    }
+}
+
+const char *astral_contribution_file(const astral_contribution *c)
+{
+    return c == nullptr ? nullptr : c->submission.file.c_str();
+}
+
+int astral_learn_source(const char *const *paths, int count)
+{
+    if (paths == nullptr || count <= 0)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "no source paths given");
+    std::vector<std::string> list;
+    for (int i = 0; i < count; ++i)
+        if (paths[i] != nullptr)
+            list.emplace_back(paths[i]);
+    std::string error;
+    const int learned = learn_from_source(list, error);
+    if (learned == 0 && !error.empty())
+        return fail(ASTRAL_ERR_IO, error);
+    clear_error();
+    return learned;
+}
+
+int astral_knowledge_forget(const char *name)
+{
+    if (name == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null name");
+    std::string error;
+    const int removed = Knowledge::instance().forget(name, error);
+    if (removed == 0 && !error.empty())
+        return fail(ASTRAL_ERR_IO, error);
+    clear_error();
+    return removed;
+}
+
+astral_status astral_knowledge_forget_all(void)
+{
+    std::string error;
+    if (!Knowledge::instance().forget_all(error))
+        return fail(ASTRAL_ERR_IO, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+void astral_program_set_auto_naming(astral_program *program, int enabled)
+{
+    if (program != nullptr)
+        program->session->set_auto_naming(enabled != 0);
+}
+
+void astral_program_set_threads(astral_program *program, int count)
+{
+    if (program != nullptr)
+        program->session->set_threads(count);
+}
+
+int astral_program_threads(const astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->threads();
+}
+
+int astral_program_auto_naming(const astral_program *program)
+{
+    return program == nullptr ? 0 : (program->session->auto_naming() ? 1 : 0);
+}
+
+int astral_knowledge_size(void) { return static_cast<int>(Knowledge::instance().size()); }
+
+int astral_knowledge_learned(void)
+{
+    return static_cast<int>(Knowledge::instance().learned_count());
+}
+
+const char *astral_knowledge_path(void) { return Knowledge::instance().user_path().c_str(); }
+
+astral_status astral_knowledge_reload(const char *user_path)
+{
+    try {
+        Knowledge::instance().reload(user_path != nullptr ? user_path : "");
+        clear_error();
+        return ASTRAL_OK;
+    } catch (const std::exception &e) {
+        return fail(ASTRAL_ERR_IO, e.what());
+    }
+}
+
+astral_status astral_program_set_option(astral_program *program, const char *name,
+                                        const char *value)
+{
+    if (program == nullptr || name == nullptr || value == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program, name or value");
+    std::string error;
+    if (!program->session->set_option(name, value, error))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+char *astral_disassemble(astral_program *program, uint64_t address, int count)
+{
+    if (program == nullptr) {
+        set_error("null program");
+        return nullptr;
+    }
+    std::string text, error;
+    if (!program->session->disassemble(address, count, text, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    char *copy = static_cast<char *>(std::malloc(text.size() + 1));
+    if (copy == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    std::memcpy(copy, text.c_str(), text.size() + 1);
+    clear_error();
+    return copy;
+}
+
+char *astral_pcode(astral_program *program, uint64_t address, int count)
+{
+    if (program == nullptr) {
+        set_error("null program");
+        return nullptr;
+    }
+    std::string text, error;
+    if (!program->session->pcode(address, count, text, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    char *copy = static_cast<char *>(std::malloc(text.size() + 1));
+    if (copy == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    std::memcpy(copy, text.c_str(), text.size() + 1);
+    clear_error();
+    return copy;
+}
+
+void astral_string_free(char *string) { std::free(string); }
+
+namespace {
+
+char *emit_c_impl(astral_program *program, const std::vector<uint64_t> &addresses,
+                  unsigned options)
+{
+    std::string text, error;
+    const bool self_contained = (options & ASTRAL_C_INCLUDE_RUNTIME) == 0;
+    const bool comments = (options & ASTRAL_C_NO_COMMENTS) == 0;
+    const bool explain = (options & ASTRAL_C_EXPLAIN) != 0;
+    if (!program->session->emit_c(addresses, self_contained, comments, explain, text, error)) {
+        set_error(error);
+        return nullptr;
+    }
+    char *copy = static_cast<char *>(std::malloc(text.size() + 1));
+    if (copy == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    std::memcpy(copy, text.c_str(), text.size() + 1);
+    clear_error();
+    return copy;
+}
+
+} // namespace
+
+char *astral_emit_c(astral_program *program, const uint64_t *addresses, size_t count,
+                    unsigned options)
+{
+    if (program == nullptr || (addresses == nullptr && count != 0)) {
+        set_error("null program or address list");
+        return nullptr;
+    }
+    return emit_c_impl(program, std::vector<uint64_t>(addresses, addresses + count), options);
+}
+
+char *astral_emit_c_all(astral_program *program, unsigned options)
+{
+    if (program == nullptr) {
+        set_error("null program");
+        return nullptr;
+    }
+    std::vector<uint64_t> addresses = program->session->function_addresses();
+    if (addresses.empty()) {
+        set_error("the image records no function symbols; pass addresses explicitly");
+        return nullptr;
+    }
+    return emit_c_impl(program, addresses, options);
+}
+
+astral_function *astral_decompile(astral_program *program, uint64_t address, const char *name)
+{
+    if (program == nullptr) {
+        set_error("null program");
+        return nullptr;
+    }
+    auto *function = new (std::nothrow) astral_function();
+    if (function == nullptr) {
+        set_error("out of memory");
+        return nullptr;
+    }
+    std::string error;
+    if (!program->session->decompile(address, name != nullptr ? name : "", function->result,
+                                     error)) {
+        delete function;
+        set_error(error);
+        return nullptr;
+    }
+    clear_error();
+    return function;
+}
+
+void astral_function_free(astral_function *function) { delete function; }
+
+const char *astral_function_name(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.name);
+}
+
+uint64_t astral_function_address(const astral_function *f)
+{
+    return f == nullptr ? 0 : f->result.address;
+}
+
+uint64_t astral_function_size(const astral_function *f)
+{
+    return f == nullptr ? 0 : f->result.size;
+}
+
+const char *astral_function_c_code(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.c_code);
+}
+
+const char *astral_function_signature(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.signature);
+}
+
+const char *astral_function_return_type(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.return_type);
+}
+
+const char *astral_function_calling_convention(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.calling_convention);
+}
+
+int astral_function_parameter_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.parameter_names.size());
+}
+
+const char *astral_function_parameter_name(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.parameter_names, index);
+}
+
+const char *astral_function_parameter_type(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.parameter_types, index);
+}
+
+int astral_function_local_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.local_names.size());
+}
+
+const char *astral_function_local_name(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.local_names, index);
+}
+
+const char *astral_function_local_type(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.local_types, index);
+}
+
+int astral_function_callee_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.callees.size());
+}
+
+uint64_t astral_function_callee(const astral_function *f, int index)
+{
+    if (f == nullptr || index < 0 || static_cast<size_t>(index) >= f->result.callees.size())
+        return 0;
+    return f->result.callees[static_cast<size_t>(index)];
+}
+
+const char *astral_function_callee_name(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.callee_names, index);
+}
+
+const char *astral_function_naming_reason(const astral_function *f)
+{
+    return f == nullptr ? nullptr : cstr(f->result.naming_reason);
+}
+
+int astral_function_rename_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.applied_renames.size());
+}
+
+const char *astral_function_rename_from(const astral_function *f, int index)
+{
+    if (f == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= f->result.applied_renames.size())
+        return nullptr;
+    return f->result.applied_renames[static_cast<size_t>(index)].first.c_str();
+}
+
+const char *astral_function_rename_to(const astral_function *f, int index)
+{
+    if (f == nullptr || index < 0 ||
+        static_cast<size_t>(index) >= f->result.applied_renames.size())
+        return nullptr;
+    return f->result.applied_renames[static_cast<size_t>(index)].second.c_str();
+}
+
+int astral_function_comment_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.comments.size());
+}
+
+const char *astral_function_comment(const astral_function *f, int index)
+{
+    return f == nullptr ? nullptr : element(f->result.comments, index);
+}
+
+int astral_function_block_count(const astral_function *f)
+{
+    return f == nullptr ? 0 : static_cast<int>(f->result.block_addresses.size());
+}
+
+uint64_t astral_function_block_address(const astral_function *f, int index)
+{
+    if (f == nullptr || index < 0 || static_cast<size_t>(index) >= f->result.block_addresses.size())
+        return 0;
+    return f->result.block_addresses[static_cast<size_t>(index)];
+}
+
+} // extern "C"
