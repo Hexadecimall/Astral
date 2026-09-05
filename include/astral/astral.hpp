@@ -65,6 +65,8 @@ struct Symbol {
     uint64_t address = 0;
     uint64_t size = 0;
     bool is_function = false;
+    // Named for other images to call.
+    bool is_exported = false;
 };
 
 struct Variable {

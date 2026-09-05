@@ -35,6 +35,20 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
     status_->setObjectName(QStringLiteral("muted"));
     headerLayout->addWidget(status_);
     headerLayout->addWidget(detail_);
+    // The code is a document to work in: edit it, patch the program with it,
+    // or go back to what was recovered.
+    revert_ = new QToolButton;
+    revert_->setObjectName(QStringLiteral("headerButton"));
+    revert_->setText(tr("Revert"));
+    revert_->setEnabled(false);
+    compile_ = new QToolButton;
+    compile_->setObjectName(QStringLiteral("headerButton"));
+    compile_->setText(tr("Patch"));
+    headerLayout->addSpacing(8);
+    headerLayout->addWidget(revert_);
+    headerLayout->addWidget(compile_);
+    connect(compile_, &QToolButton::clicked, this, [this] { Q_EMIT compileRequested(code_->toPlainText()); });
+    connect(revert_, &QToolButton::clicked, this, [this] { render(); });
     layout->addWidget(headerRow);
 
     code_ = new CodeView;
@@ -57,6 +71,7 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
         busy_->move((code_->width() - busy_->width()) / 2, 24);
     });
     connect(code_->document(), &QTextDocument::modificationChanged, this, [this](bool modified) {
+        revert_->setEnabled(modified);
         status_->setText(modified ? tr("edited") : QString());
         Q_EMIT modifiedChanged(modified);
     });

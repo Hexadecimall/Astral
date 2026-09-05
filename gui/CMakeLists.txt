@@ -54,6 +54,8 @@ set(GUI_SOURCES
     model/project.cc
     model/functionlistmodel.cc
     model/settings.cc
+    model/patchbuilder.cc
+    model/assembler.cc
     views/codeview.cc
     views/decompilerview.cc
     views/listingview.cc
@@ -229,3 +231,40 @@ target_compile_definitions(astral_gui_hexedit_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_hexedit_test PRIVATE Qt6::Widgets Qt6::Test)
 add_test(NAME gui_hexedit COMMAND astral_gui_hexedit_test -platform offscreen)
 
+add_executable(astral_gui_patch_test tests/patch_test.cc model/patchbuilder.cc model/programdocument.cc)
+set_target_properties(astral_gui_patch_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_patch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_patch_test PRIVATE QT_NO_KEYWORDS)
+# The static library, so the test never picks up an installed copy.
+target_link_libraries(astral_gui_patch_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
+add_test(NAME gui_patch COMMAND astral_gui_patch_test -platform offscreen)
+
+# The project store is checked without the engine: a manifest, a database and
+# the records that go through them are all it touches.
+
+add_executable(astral_gui_assemble_test tests/assemble_test.cc model/assembler.cc
+               model/patchbuilder.cc model/programdocument.cc)
+set_target_properties(astral_gui_assemble_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_assemble_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_assemble_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_assemble_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
+add_test(NAME gui_assemble COMMAND astral_gui_assemble_test -platform offscreen)
+
+# The hex view's byte model: what typing does to it and what it refuses.
+
+add_executable(astral_gui_patchflow tests/patchflow_test.cc model/patchbuilder.cc model/programdocument.cc)
+set_target_properties(astral_gui_patchflow PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_patchflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_patchflow PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_patchflow PRIVATE Qt6::Core astral_static)
+
+add_executable(astral_gui_asmflow tests/asmflow_test.cc model/assembler.cc
+               model/patchbuilder.cc model/programdocument.cc)
+set_target_properties(astral_gui_asmflow PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_asmflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_asmflow PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_asmflow PRIVATE Qt6::Core astral_static)

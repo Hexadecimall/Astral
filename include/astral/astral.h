@@ -203,6 +203,9 @@ ASTRAL_API uint64_t astral_program_symbol_size(const astral_program *program, in
 ASTRAL_API int astral_program_symbol_is_function(const astral_program *program, int index);
 /* True for a stub standing in for a function in another image, such as printf. */
 ASTRAL_API int astral_program_symbol_is_import(const astral_program *program, int index);
+/* Whether the symbol is offered to other images. A library's exports are its
+ * whole point; everything else in it is an implementation detail. */
+ASTRAL_API int astral_program_symbol_is_exported(const astral_program *program, int index);
 
 /* Read bytes out of the mapped image. Returns the number of bytes copied. */
 ASTRAL_API size_t astral_program_read(const astral_program *program, uint64_t address,

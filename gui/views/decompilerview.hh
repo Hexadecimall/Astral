@@ -40,6 +40,7 @@ public:
     void setStatus(const QString &text, const QString &kind, const QString &tip = QString());
 
 Q_SIGNALS:
+    void compileRequested(const QString &source);
     void modifiedChanged(bool modified);
 
 protected:
@@ -56,6 +57,8 @@ private:
     QLabel *busy_ = nullptr;
     QTimer *busyTimer_ = nullptr;
     int busyTick_ = 0;
+    QToolButton *compile_ = nullptr;
+    QToolButton *revert_ = nullptr;
     QLabel *header_;
     QLabel *detail_;
     CodeView *code_;

@@ -334,6 +334,12 @@ int astral_program_symbol_is_import(const astral_program *program, int index)
     return symbols[static_cast<size_t>(index)].is_import ? 1 : 0;
 }
 
+int astral_program_symbol_is_exported(const astral_program *program, int index)
+{
+    SYMBOL_OR(program, index, 0);
+    return symbols[static_cast<size_t>(index)].is_exported ? 1 : 0;
+}
+
 #undef SYMBOL_OR
 
 size_t astral_program_read(const astral_program *program, uint64_t address, void *out, size_t size)

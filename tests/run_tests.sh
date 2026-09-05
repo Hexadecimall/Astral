@@ -518,6 +518,23 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
+# ---------------------------------------------------------------- libraries
+#
+# A library has no entry point: nothing calls into it first, and what it offers
+# other images is the point of it. Asked for nothing in particular, Astral
+# recovers those.
+cat > "$work/lib.c" <<'LIBEOF'
+int addTwo(int a, int b) { return a + b; }
+static int helper(int x) { return x * 3; }
+int scale(int x) { return helper(x) + 1; }
+LIBEOF
+if cc -dynamiclib -O1 -o "$work/libtiny.dylib" "$work/lib.c" 2>/dev/null; then
+    lib_out=$("$astral" decompile "$work/libtiny.dylib" 2>/dev/null)
+    check "a library needs no entry point" "addTwo" "$lib_out"
+    check "a library gives every export"   "scale"  "$lib_out"
+    check "an export reads as source"      "return param2 + param1;" "$lib_out"
+fi
+
 # ---------------------------------------------------------------- listing
 #
 # A listing is meant to be read and then edited, so a call says where it goes,

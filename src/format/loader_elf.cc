@@ -291,6 +291,12 @@ bool load_elf(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &
             sym.size = st_size;
             const int type = st_info & 0xf;
             sym.is_function = type == STT_FUNC;
+            // The upper half of st_info is the binding: global and weak names
+            // are visible to other objects, local ones are not.
+            const int binding = st_info >> 4;
+            const int STB_GLOBAL = 1;
+            const int STB_WEAK = 2;
+            sym.is_exported = binding == STB_GLOBAL || binding == STB_WEAK;
             if (type != STT_FUNC && type != STT_OBJECT && type != 0)
                 continue;
             out.symbols.push_back(std::move(sym));

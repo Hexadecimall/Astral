@@ -41,6 +41,7 @@ public:
     // Accepts a hex address, with or without 0x, or a function name.
     bool navigateTo(const QString &target);
 
+    void compileCurrent();
     void replaceCodeText(const QString &text);
     // The word the cursor sits in, in whichever view is showing.
     QString currentWord() const;

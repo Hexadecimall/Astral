@@ -228,6 +228,8 @@ pub struct Symbol {
     pub is_function: bool,
     /// A stub standing in for a function in another image, such as `printf`.
     pub is_import: bool,
+    /// Named for other images to call.
+    pub is_exported: bool,
 }
 
 /// How [`Program::emit_c`] renders its output.
@@ -391,6 +393,7 @@ impl Program {
                     size: sys::astral_program_symbol_size(self.handle, i),
                     is_function: sys::astral_program_symbol_is_function(self.handle, i) != 0,
                     is_import: sys::astral_program_symbol_is_import(self.handle, i) != 0,
+                    is_exported: sys::astral_program_symbol_is_exported(self.handle, i) != 0,
                 }
             })
             .collect()

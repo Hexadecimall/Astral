@@ -179,6 +179,9 @@ bool load_pe(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &e
                 sym.name = r.cstr(str_off);
                 sym.address = image_base + target;
                 sym.is_function = true;
+                // Everything in the export table is offered to other images by
+                // definition; that table is what an export is.
+                sym.is_exported = true;
                 if (!sym.name.empty())
                     out.symbols.push_back(std::move(sym));
             }

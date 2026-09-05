@@ -131,6 +131,7 @@ extern "C" {
         program: *const astral_program,
         index: c_int,
     ) -> c_int;
+    pub fn astral_program_symbol_is_exported(program: *const astral_program, index: c_int) -> c_int;
     pub fn astral_program_symbol_is_import(
         program: *const astral_program,
         index: c_int,

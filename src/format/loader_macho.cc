@@ -273,6 +273,9 @@ bool parse_thin(const std::vector<uint8_t> &bytes, size_t base, BinaryImage &out
             const bool in_code =
                 n_sect >= 1 && n_sect <= section_is_code.size() && section_is_code[n_sect - 1];
             sym.is_function = !is_header_symbol && in_code;
+            // The external bit says the name is offered to other images, which
+            // is what makes it an export rather than an internal detail.
+            sym.is_exported = (n_type & 0x01) != 0;
             out.symbols.push_back(std::move(sym));
         }
     }

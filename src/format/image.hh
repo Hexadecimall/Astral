@@ -35,6 +35,9 @@ struct Symbol {
     // worth having so calls read properly, but its body is not this program's
     // code and should not be decompiled or emitted.
     bool is_import = false;
+    // Named for other images to call. A library's exports are its whole point:
+    // everything else in it is an implementation detail.
+    bool is_exported = false;
     // For a demangled C++ symbol: the original mangled name, so the rebuilt
     // unit can still link against the real thing.
     std::string linkage_name;

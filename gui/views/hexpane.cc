@@ -13,7 +13,7 @@ namespace astral::gui {
 
 HexPane::HexPane(HexView *view, QWidget *parent)
     : QWidget(parent), view_(view), editButton_(new QPushButton(tr("Edit"))),
-      applyButton_(new QPushButton(tr("Apply"))), revertButton_(new QPushButton(tr("Revert"))),
+      applyButton_(new QPushButton(tr("Patch"))), revertButton_(new QPushButton(tr("Revert"))),
       status_(new QLabel)
 {
     auto *layout = new QVBoxLayout(this);

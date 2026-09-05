@@ -74,6 +74,17 @@ fn wanted_addresses(program: &Program, options: &Options) -> Vec<u64> {
             wanted.push(*entry);
         }
     }
+    // A library has no entry point: nothing calls into it first, and its whole
+    // point is the names it offers other images. Those are what to recover when
+    // nothing else was asked for.
+    if wanted.is_empty() {
+        wanted.extend(
+            symbols
+                .iter()
+                .filter(|symbol| symbol.is_function && symbol.is_exported && !symbol.is_import)
+                .map(|symbol| symbol.address),
+        );
+    }
     wanted
 }
 

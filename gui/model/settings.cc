@@ -77,7 +77,14 @@ analysis.showRundown = true
 # How many recent projects and binaries the welcome screen remembers.
 recent.limit = 8
 
+# How an edited listing becomes bytes. `engine` uses the assembler built into
+# Astral and runs nothing else. `toolchain` runs the system assembler through
+# a C compiler, which accepts more syntax and can rewrite a whole block.
+patch.assembler = engine
 
+# Patching from edited source needs a C compiler, which Astral does not
+# contain. With this off, the source views say so instead of patching.
+patch.useCCompiler = true
 )");
 }
 
