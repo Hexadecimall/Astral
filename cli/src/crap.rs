@@ -103,8 +103,7 @@ fn to_binary(path: &str, output: Option<&str>) -> i32 {
     // Eight characters and a newline for every byte in the file, built once
     // rather than a line at a time: a real program is megabytes of this.
     let mut text = String::with_capacity(bytes.len() * 9 + 256);
-    text.push_str("# Decompiled by Astral. Every byte, in binary, in order.\n");
-    text.push_str(&format!("# {} bytes, and therefore {} lines.\n", bytes.len(), bytes.len()));
+    text.push_str("# Decompiled by Astral\n");
     for byte in &bytes {
         for bit in (0..8).rev() {
             text.push(if byte >> bit & 1 == 1 { '1' } else { '0' });
