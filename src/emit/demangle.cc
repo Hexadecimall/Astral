@@ -430,4 +430,8 @@ void demangle_symbols(BinaryImage &image)
     }
 }
 
+// The same rule the reader uses, for anyone who needs to arrive at the name a
+// binary will be shown under without having a binary in hand.
+std::string cxx_identifier(const std::string &demangled) { return to_identifier(demangled); }
+
 } // namespace astral_internal

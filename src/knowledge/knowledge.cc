@@ -110,7 +110,18 @@ void Knowledge::reload(const std::string &user_path)
 
     parse(SEED_KNOWLEDGE_TEXT, false);
 
-    user_path_ = user_path.empty() ? home_directory() + "/.astral/learned.astral" : user_path;
+    // ASTRAL_LEARNED names the database to read instead of the one in the home
+    // directory. A test run wants a database of its own: what a person has
+    // taught their own copy is theirs, and a suite whose result depends on it
+    // is measuring the machine rather than the code.
+    if (user_path.empty()) {
+        const char *chosen = std::getenv("ASTRAL_LEARNED");
+        user_path_ = chosen != nullptr && *chosen != '\0'
+                         ? std::string(chosen)
+                         : home_directory() + "/.astral/learned.astral";
+    } else {
+        user_path_ = user_path;
+    }
     std::ifstream file(user_path_);
     if (file) {
         std::ostringstream text;

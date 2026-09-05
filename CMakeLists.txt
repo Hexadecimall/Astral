@@ -99,6 +99,7 @@ set(ASTRAL_LIB_SRC
     src/core/langmap.cc
     src/emit/libc_protos.cc
     src/core/listing.cc
+    src/core/optiontable.cc
     src/core/session.cc
     src/api/capi.cc
     engine/decompiler/printastral.cc
@@ -252,7 +253,7 @@ add_dependencies(astral_compiler_codegen_test astral_compiler_crackme)
 add_test(NAME compiler_codegen COMMAND astral_compiler_codegen_test
          $<TARGET_FILE:astral_compiler_crackme>)
 set_tests_properties(compiler_codegen PROPERTIES
-    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The debugger is checked by watching a real program run rather than by
 # inspecting its own bookkeeping: every stop is compared with the disassembly of
@@ -273,7 +274,7 @@ add_dependencies(astral_emulator_debug_test astral_emulator_crackme)
 add_test(NAME emulator_debug COMMAND astral_emulator_debug_test
          $<TARGET_FILE:astral_emulator_crackme>)
 set_tests_properties(emulator_debug PROPERTIES
-    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # And the command on top of it, driven from a script rather than a terminal:
 # the same debugger reached through the C API, the Rust binding and the command.
@@ -282,7 +283,7 @@ if(TARGET astral_cli)
         COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/engine/emulator/tests/debug_cli.sh
                 ${ASTRAL_CLI} $<TARGET_FILE:astral_emulator_crackme>)
     set_tests_properties(emulator_debug_cli PROPERTIES
-        ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+        ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 endif()
 
 # The readable listing is checked on a program built for it: the subject has a
@@ -303,7 +304,7 @@ add_dependencies(astral_listing_test astral_listing_subject)
 add_test(NAME emit_listing COMMAND astral_listing_test
          $<TARGET_FILE:astral_listing_subject>)
 set_tests_properties(emit_listing PROPERTIES
-    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)

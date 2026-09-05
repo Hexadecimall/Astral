@@ -15,6 +15,9 @@ trap 'rm -rf "$work"' EXIT
 
 astral="$build/astral"
 export ASTRAL_SPECS="$build/specs"
+# A database of its own. What a person has taught their own copy is theirs, and
+# a suite whose result depends on it is measuring the machine, not the code.
+export ASTRAL_LEARNED="$work/learned.astral"
 
 passed=0
 failed=0

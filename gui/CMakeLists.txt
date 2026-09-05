@@ -54,6 +54,7 @@ set(GUI_SOURCES
     model/project.cc
     model/functionlistmodel.cc
     model/settings.cc
+    model/runconfig.cc
     model/debugsession.cc
     model/patchbuilder.cc
     model/literalspace.cc
@@ -64,6 +65,7 @@ set(GUI_SOURCES
     views/listingview.cc
     views/hexview.cc
     views/debuggerpane.cc
+    views/runconfigdialog.cc
     views/hexpane.cc
     views/listingpane.cc
     theme/theme.cc
@@ -215,7 +217,12 @@ set_target_properties(astral_gui_theme_test PROPERTIES
 target_include_directories(astral_gui_theme_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(astral_gui_theme_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_theme_test PRIVATE Qt6::Widgets Qt6::Test)
+# Each test reads a database of its own. What a person has taught their own
+# copy is theirs, and a test whose result depends on it measures the machine
+# rather than the code.
 add_test(NAME gui_theme COMMAND astral_gui_theme_test -platform offscreen)
+set_tests_properties(gui_theme PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The document is the window's whole view of the engine, so it is checked
 # against a real program rather than a stub. Any small system binary will do.
@@ -235,6 +242,8 @@ target_compile_definitions(astral_gui_document_test PRIVATE QT_NO_KEYWORDS
     ASTRAL_TEST_BINARY="${ASTRAL_GUI_TEST_BINARY}")
 target_link_libraries(astral_gui_document_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
 add_test(NAME gui_document COMMAND astral_gui_document_test -platform offscreen)
+set_tests_properties(gui_document PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The project store is checked without the engine: a manifest, a database and
 # the records that go through them are all it touches.
@@ -245,6 +254,8 @@ target_include_directories(astral_gui_project_test PRIVATE ${CMAKE_CURRENT_SOURC
 target_compile_definitions(astral_gui_project_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_project_test PRIVATE Qt6::Widgets Qt6::Test astral_gui_sqlite)
 add_test(NAME gui_project COMMAND astral_gui_project_test -platform offscreen)
+set_tests_properties(gui_project PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The assembler's text-to-bytes path: rewriting a listing, running the system
 # assembler, and refusing a block that does not fit.
@@ -258,6 +269,8 @@ target_include_directories(astral_gui_hexedit_test PRIVATE ${CMAKE_CURRENT_SOURC
 target_compile_definitions(astral_gui_hexedit_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_hexedit_test PRIVATE Qt6::Widgets Qt6::Test)
 add_test(NAME gui_hexedit COMMAND astral_gui_hexedit_test -platform offscreen)
+set_tests_properties(gui_hexedit PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 add_executable(astral_gui_patch_test tests/patch_test.cc model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)
 set_target_properties(astral_gui_patch_test PROPERTIES
@@ -267,6 +280,8 @@ target_compile_definitions(astral_gui_patch_test PRIVATE QT_NO_KEYWORDS)
 # The static library, so the test never picks up an installed copy.
 target_link_libraries(astral_gui_patch_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
 add_test(NAME gui_patch COMMAND astral_gui_patch_test -platform offscreen)
+set_tests_properties(gui_patch PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The project store is checked without the engine: a manifest, a database and
 # the records that go through them are all it touches.
@@ -279,6 +294,8 @@ target_include_directories(astral_gui_assemble_test PRIVATE ${CMAKE_CURRENT_SOUR
 target_compile_definitions(astral_gui_assemble_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_assemble_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
 add_test(NAME gui_assemble COMMAND astral_gui_assemble_test -platform offscreen)
+set_tests_properties(gui_assemble PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The hex view's byte model: what typing does to it and what it refuses.
 
@@ -298,6 +315,8 @@ target_include_directories(astral_gui_sourcepatch_test PRIVATE ${CMAKE_CURRENT_S
 target_compile_definitions(astral_gui_sourcepatch_test PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_sourcepatch_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
 add_test(NAME gui_sourcepatch COMMAND astral_gui_sourcepatch_test -platform offscreen)
+set_tests_properties(gui_sourcepatch PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 
 # The whole loop, run for real: recover C, edit it, patch, write, run.
 add_executable(astral_gui_sourcepatchflow tests/sourcepatchflow_test.cc
@@ -309,6 +328,20 @@ target_include_directories(astral_gui_sourcepatchflow PRIVATE ${CMAKE_CURRENT_SO
 target_compile_definitions(astral_gui_sourcepatchflow PRIVATE QT_NO_KEYWORDS)
 target_link_libraries(astral_gui_sourcepatchflow PRIVATE Qt6::Core astral_static)
 add_test(NAME gui_sourcepatchflow COMMAND astral_gui_sourcepatchflow)
+set_tests_properties(gui_sourcepatchflow PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
+
+# Renaming, end to end: a name given from a call site, a value and a parameter
+# renamed inside a function, and the lot read back out of a project after the
+# session that made them is gone.
+add_executable(astral_gui_renameflow tests/renameflow_test.cc
+    app/projectcontroller.cc model/programdocument.cc model/project.cc)
+set_target_properties(astral_gui_renameflow PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF AUTOMOC ON)
+target_include_directories(astral_gui_renameflow PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_renameflow PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_renameflow PRIVATE Qt6::Core astral_static astral_gui_sqlite)
+add_test(NAME gui_renameflow COMMAND astral_gui_renameflow)
 
 add_executable(astral_gui_asmflow tests/asmflow_test.cc model/assembler.cc
                model/patchbuilder.cc model/literalspace.cc model/programdocument.cc)

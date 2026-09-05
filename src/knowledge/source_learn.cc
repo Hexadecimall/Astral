@@ -11,6 +11,8 @@
 // prototype that is wrong would be worse than no prototype at all.
 #include "source_learn.hh"
 
+#include "emit/demangle.hh"
+
 #include "knowledge.hh"
 
 #include <algorithm>
@@ -243,8 +245,16 @@ std::vector<std::string> split_top_level(const std::string &text, char separator
 
 bool is_source_file(const std::string &name)
 {
+    // A file with no suffix at all, under a directory being walked, is how the
+    // standard library spells its own headers: <vector> is a file called
+    // vector. Those are exactly the ones worth reading here.
+    const size_t slash = name.find_last_of('/');
+    const std::string leaf = slash == std::string::npos ? name : name.substr(slash + 1);
+    if (!leaf.empty() && leaf[0] != '.' && leaf.find('.') == std::string::npos)
+        return true;
     static const char *const suffixes[] = {".c",   ".h",   ".cc",  ".cpp", ".cxx", ".hpp",
-                                          ".hh",  ".rs",  ".go",  ".s",   ".S",   ".asm"};
+                                          ".hh",  ".rs",  ".go",  ".s",   ".S",   ".asm",
+                                          ".hxx"};
     for (const char *suffix : suffixes) {
         const size_t length = std::strlen(suffix);
         if (name.size() > length && name.compare(name.size() - length, length, suffix) == 0)
@@ -410,7 +420,7 @@ std::vector<SourcePrototype> prototypes_in_source(const std::string &text)
 namespace {
 
 // Which language a file is written in, by the only thing a path reliably says.
-enum class Language { C, Rust, Go, Assembly };
+enum class Language { C, CxxHeader, Rust, Go, Assembly };
 
 Language language_of(const std::string &path)
 {
@@ -424,6 +434,15 @@ Language language_of(const std::string &path)
         return Language::Go;
     if (ends(".s") || ends(".S") || ends(".asm"))
         return Language::Assembly;
+    if (ends(".hpp") || ends(".hh") || ends(".hxx"))
+        return Language::CxxHeader;
+    // The standard library's own headers have no suffix at all: <string> is a
+    // file called string. Anything without a dot in its last component, under a
+    // directory, is one of those.
+    const size_t slash = path.find_last_of('/');
+    const std::string leaf = slash == std::string::npos ? path : path.substr(slash + 1);
+    if (leaf.find('.') == std::string::npos && !leaf.empty())
+        return Language::CxxHeader;
     return Language::C;
 }
 
@@ -576,6 +595,182 @@ std::vector<SourcePrototype> prototypes_in_assembly(const std::string &text)
     return found;
 }
 
+// A C++ header declares a member inside a class inside a namespace, and the
+// binary shows that member under one run-together name. Reading the header has
+// to arrive at the same name or nothing learned from it will ever be met.
+//
+// This is not a C++ parser and does not try to be. It tracks how deep the
+// braces are and what opened each level, which is enough to say that `append`
+// here is `std::basic_string::append`, and it takes only declarations whose
+// types it can say in the decompiler's own words.
+const std::map<std::string, std::string> &cxx_types()
+{
+    static const std::map<std::string, std::string> names = {
+        {"void", "void"},           {"bool", "bool"},          {"char", "int1"},
+        {"signed char", "int1"},    {"unsigned char", "uint1"}, {"short", "int2"},
+        {"unsigned short", "uint2"},{"int", "int4"},            {"unsigned", "uint4"},
+        {"unsigned int", "uint4"},  {"long", "int8"},           {"unsigned long", "uint8"},
+        {"long long", "int8"},      {"unsigned long long", "uint8"},
+        {"float", "float4"},        {"double", "float8"},
+        {"size_t", "uint8"},        {"ssize_t", "int8"},        {"ptrdiff_t", "int8"},
+        {"size_type", "uint8"},     {"difference_type", "int8"},
+        {"int8_t", "int1"},         {"uint8_t", "uint1"},       {"int16_t", "int2"},
+        {"uint16_t", "uint2"},      {"int32_t", "int4"},        {"uint32_t", "uint4"},
+        {"int64_t", "int8"},        {"uint64_t", "uint8"},
+    };
+    return names;
+}
+
+// A C++ type in the decompiler's words. Anything held by reference or pointer
+// is an address; a class held by value is not something C can be told about.
+std::string cxx_core_type(std::string text)
+{
+    text = trim(text);
+    for (const char *noise : {"_LIBCPP_CONSTEXPR_SINCE_CXX20", "_LIBCPP_CONSTEXPR",
+                              "_LIBCPP_HIDE_FROM_ABI", "_LIBCPP_INLINE_VISIBILITY",
+                              "_LIBCPP_HIDDEN", "constexpr", "inline", "static", "virtual",
+                              "explicit", "typename", "const", "volatile", "_NOEXCEPT",
+                              "noexcept", "struct", "class", "enum"}) {
+        for (size_t at = text.find(noise); at != std::string::npos; at = text.find(noise, at)) {
+            const size_t end = at + std::strlen(noise);
+            const bool left = at > 0 && is_identifier_char(text[at - 1]);
+            const bool right = end < text.size() && is_identifier_char(text[end]);
+            if (left || right) {
+                at = end;
+                continue;
+            }
+            text.erase(at, end - at);
+        }
+    }
+    text = trim(text);
+    if (text.empty())
+        return "";
+    if (text.find('*') != std::string::npos || text.find('&') != std::string::npos)
+        return "void *";
+    // A template or a qualified class name is an object, and an object is
+    // reached by address in everything a binary does with it.
+    if (text.find('<') != std::string::npos || text.find("::") != std::string::npos)
+        return "void *";
+    auto it = cxx_types().find(text);
+    if (it != cxx_types().end())
+        return it->second;
+    // A bare name that is not a builtin is a class: an address again, but only
+    // when it looks like a type rather than a leftover word.
+    for (char c : text)
+        if (!is_identifier_char(c) && c != ' ')
+            return "";
+    return text.find(' ') == std::string::npos ? std::string("void *") : std::string();
+}
+
+std::vector<SourcePrototype> prototypes_in_cxx_header(const std::string &text)
+{
+    // What opened each brace level, so a member can be told from a free
+    // function and named for the class that holds it. A level that was opened
+    // by something else - a function body, an if - holds an empty name, so the
+    // stack stays in step with the braces however deep it goes.
+    std::vector<std::string> scope;
+    std::vector<SourcePrototype> found;
+
+    static const std::regex opens(
+        R"(\b(namespace|class|struct)\s+(?:_LIBCPP_\w+\s+)?([A-Za-z_][A-Za-z0-9_]*))");
+    static const std::regex member(
+        R"(([A-Za-z_][A-Za-z0-9_]*(?:\s*[*&])?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^()]*)\)\s*(?:const\s*)?[;{])");
+    static const std::set<std::string> not_a_name = {"if",     "for",   "while", "switch",
+                                                     "return", "sizeof", "catch", "throw",
+                                                     "else",   "do",    "case"};
+
+    std::istringstream lines(text);
+    std::string line;
+    while (std::getline(lines, line)) {
+        // A line long enough to be generated is long enough to take a regex
+        // engine down with it, and holds nothing worth reading anyway.
+        if (line.size() > 300)
+            continue;
+
+        std::smatch call;
+        try {
+            if (std::regex_search(line, call, member) && not_a_name.count(call[2].str()) == 0) {
+                SourcePrototype prototype;
+                std::string qualified;
+                for (const std::string &level : scope)
+                    if (!level.empty())
+                        qualified += level + "::";
+                qualified += call[2].str();
+                prototype.name = cxx_identifier(qualified);
+                prototype.return_type = cxx_core_type(call[1].str());
+                bool usable = !prototype.name.empty() && !prototype.return_type.empty();
+                if (usable) {
+                    int unnamed = 0;
+                    for (const std::string &part : split_top_level(call[3].str(), ',')) {
+                        std::string argument = trim(part);
+                        if (argument.empty() || argument == "void")
+                            continue;
+                        const size_t equals = argument.find('=');
+                        if (equals != std::string::npos)
+                            argument = trim(argument.substr(0, equals));
+                        std::string argument_name;
+                        const size_t split = argument.find_last_of(" &*");
+                        if (split != std::string::npos && split + 1 < argument.size()) {
+                            const std::string tail = argument.substr(split + 1);
+                            bool is_name = !tail.empty();
+                            for (char c : tail)
+                                if (!is_identifier_char(c))
+                                    is_name = false;
+                            if (is_name && cxx_types().count(tail) == 0) {
+                                argument_name = tail;
+                                argument = trim(argument.substr(0, split + 1));
+                            }
+                        }
+                        const std::string type = cxx_core_type(argument);
+                        if (type.empty() || type == "void") {
+                            usable = false;
+                            break;
+                        }
+                        if (argument_name.empty())
+                            argument_name = "argument" + std::to_string(++unnamed);
+                        prototype.parameter_types.push_back(type);
+                        prototype.parameter_names.push_back(argument_name);
+                    }
+                }
+                // A member is passed the object it belongs to first, which is
+                // what the binary does and what a reader expects to see.
+                const bool inside_class =
+                    std::count_if(scope.begin(), scope.end(),
+                                  [](const std::string &n) { return !n.empty(); }) > 1;
+                if (usable && inside_class) {
+                    prototype.parameter_types.insert(prototype.parameter_types.begin(), "void *");
+                    prototype.parameter_names.insert(prototype.parameter_names.begin(), "self");
+                }
+                if (usable)
+                    found.push_back(std::move(prototype));
+            }
+        } catch (const std::regex_error &) {
+            // A line the engine will not look at is a line with nothing in it.
+        }
+
+        // The braces this line opens and closes, in order, so the stack stays
+        // level with them. What opened a level is only known for the first one
+        // a line opens, which is the only one that can be a namespace or class.
+        std::string opened_name;
+        std::smatch opener;
+        try {
+            if (std::regex_search(line, opener, opens))
+                opened_name = opener[2].str();
+        } catch (const std::regex_error &) {
+        }
+        bool first_open = true;
+        for (char c : line) {
+            if (c == '{') {
+                scope.push_back(first_open ? opened_name : std::string());
+                first_open = false;
+            } else if (c == '}' && !scope.empty()) {
+                scope.pop_back();
+            }
+        }
+    }
+    return found;
+}
+
 std::vector<SourcePrototype> prototypes_for(const std::string &path, const std::string &text)
 {
     switch (language_of(path)) {
@@ -585,6 +780,8 @@ std::vector<SourcePrototype> prototypes_for(const std::string &path, const std::
         return prototypes_in_go(text);
     case Language::Assembly:
         return prototypes_in_assembly(text);
+    case Language::CxxHeader:
+        return prototypes_in_cxx_header(text);
     case Language::C:
         break;
     }
