@@ -2051,20 +2051,60 @@ void tidy_names(std::string &out)
     struct Rule { std::regex re; std::string rep; };
     static const std::vector<Rule> rules = {
         {std::regex(R"(\b[A-Za-z]{1,4}Ram0*([0-9A-Fa-f]+)\b)"), "g$1"},
-        {std::regex(R"(\bfunc_0x0*([0-9A-Fa-f]+)\b)"), "sub$1"},
-        {std::regex(R"(\b(?:code_r|joined_r)0x0*([0-9A-Fa-f]+)\b)"), "loc$1"},
-        {std::regex(R"(\bDAT_0*([0-9A-Fa-f]+)\b)"), "dat$1"},
+        {std::regex(R"(\bfunc_?0x0*([0-9A-Fa-f]+)\b)"), "sub$1"},
+        // With the underscore and without it: the printer writes code_r0x and
+        // the pass that gives locals conventional names takes the underscore
+        // out before this is read, so a rule that only knew one spelling left
+        // every label in the program spelled the way the engine spells it.
+        {std::regex(R"(\b(?:code_?r|joined_?r)0x0*([0-9A-Fa-f]+)\b)"), "loc$1"},
+        {std::regex(R"(\b(?:switchD_?|caseD_?|LAB_?|do_)0*([0-9A-Fa-f]+)\b)"), "loc$1"},
+        {std::regex(R"(\bDAT_?0*([0-9A-Fa-f]+)\b)"), "dat$1"},
+        // No abbreviation anywhere, including in the widths the printer makes
+        // up for a value it could not size.
+        {std::regex(R"(\bunk([0-9]+)\b)"), "unknown$1"},
     };
     for (const Rule &r : rules)
         out = std::regex_replace(out, r.re, r.rep);
 
-    // Then take the addresses out of the names. An address in an identifier is
-    // a fact about where something sat in one file, not about what it is, and
-    // reading half hex and half C is nobody's idea of source.
+    // Then say what each one is, in a whole word. A name the engine wrote is
+    // two letters and a hex number; a name worth reading says which of the four
+    // kinds of thing it is and, where nothing better is known about it, keeps
+    // the address that is the only other true thing about it. No abbreviation,
+    // because `dat138c` asks the reader to know what dat means and
+    // `data0000138c` does not.
     struct Family { const char *prefix; const char *word; };
     static const Family families[] = {
-        {"g", "global"}, {"dat", "table"}, {"sub", "sub"}, {"loc", "label"},
+        {"g", "global"}, {"dat", "data"}, {"sub", "function"}, {"loc", "label"},
     };
+    // The engine's own spellings for a value it had nothing better to say
+    // about: one letter for the type, then Var and a number. The letter is a
+    // real fact - a bVar holds a truth value and a pcVar holds a pointer to
+    // code - so it is kept, as the word it stands for.
+    {
+        struct Kind { const char *letters; const char *word; };
+        static const Kind kinds[] = {
+            {"pc", "codePointer"}, {"pu", "pointer"}, {"pi", "pointer"},
+            {"pp", "pointer"},     {"pa", "pointer"}, {"pf", "pointer"},
+            {"ps", "pointer"},     {"pb", "pointer"}, {"p", "pointer"},
+            {"b", "flag"},         {"c", "character"}, {"a", "array"},
+            {"f", "number"},       {"d", "number"},   {"s", "string"},
+            {"h", "value"},        {"i", "value"},    {"u", "value"},
+            {"l", "value"},        {"x", "value"},    {"e", "value"},
+            {"in", "incoming"},    {"out", "outgoing"},
+        };
+        for (const Kind &kind : kinds) {
+            const std::string pattern =
+                std::string("\\b") + kind.letters + R"((?:Var|Arg)([0-9]+)\b)";
+            out = std::regex_replace(out, std::regex(pattern),
+                                     std::string(kind.word) + "$1");
+        }
+    }
+
+    // The two names every C program has, said in full. They are parameters of
+    // main and nothing else uses those spellings.
+    out = std::regex_replace(out, std::regex(R"(\bargc\b)"), "argumentCount");
+    out = std::regex_replace(out, std::regex(R"(\bargv\b)"), "arguments");
+
     const Knowledge &knowledge = Knowledge::instance();
     std::vector<bool> mask = literal_mask(out);
     std::set<std::string> taken;
@@ -2131,8 +2171,23 @@ void tidy_names(std::string &out)
                     }
                 }
             }
+            // The address the engine put in the name, spelled out: eight hex
+            // digits, so two of them line up when read one under the other.
+            std::string digits = name.substr(std::strlen(family.prefix));
+            for (char &digit : digits)
+                digit = static_cast<char>(std::tolower(static_cast<unsigned char>(digit)));
+            while (digits.size() < 8)
+                digits.insert(digits.begin(), '0');
+            if (chosen.empty()) {
+                const std::string candidate = std::string(family.word) + digits;
+                if (taken.count(candidate) == 0)
+                    chosen = candidate;
+            }
+            // Two addresses that shorten to the same name is not possible, but
+            // a name the program already uses is, so there is still a way out.
             while (chosen.empty()) {
-                const std::string candidate = std::string(family.word) + std::to_string(next++);
+                const std::string candidate =
+                    std::string(family.word) + digits + std::to_string(next++);
                 if (taken.count(candidate) == 0)
                     chosen = candidate;
             }
@@ -2140,6 +2195,108 @@ void tidy_names(std::string &out)
             rename_token(out, name, chosen, mask);
         }
     }
+}
+
+// An expression that produces a truth value is written inside parentheses, so
+// what is being decided is visible without reading the precedence table:
+// `return (strcmp(string, "astral") == 0);`, never the bare comparison. Applied
+// where a truth value is produced and then used as one - what a statement
+// returns, and what it stores.
+void parenthesise_truth(std::string &out)
+{
+    // The operators that produce a truth value, longest first so `<=` is not
+    // read as `<`. `=` is not among them and neither is `&`: this asks what an
+    // expression yields, not what it does.
+    auto truth_operator_at = [](const std::string &text, size_t at) {
+        static const char *const operators[] = {"==", "!=", "<=", ">=", "&&", "||"};
+        for (const char *op : operators)
+            if (text.compare(at, std::strlen(op), op) == 0)
+                return std::strlen(op);
+        if (text[at] == '<' || text[at] == '>') {
+            // Not a shift, and not the arrow of a pointer.
+            const bool doubled = at + 1 < text.size() && text[at + 1] == text[at];
+            const bool arrow = text[at] == '>' && at > 0 && text[at - 1] == '-';
+            if (!doubled && !arrow)
+                return static_cast<size_t>(1);
+        }
+        return static_cast<size_t>(0);
+    };
+
+    // Whether the expression decides something at its own level, rather than
+    // inside a call or a subscript where the parentheses are already there.
+    auto decides = [&](const std::string &expression) {
+        int depth = 0;
+        for (size_t at = 0; at < expression.size(); ++at) {
+            const char c = expression[at];
+            if (c == '"' || c == '\'') {
+                const char quote = c;
+                for (++at; at < expression.size() && expression[at] != quote; ++at)
+                    if (expression[at] == '\\')
+                        ++at;
+                continue;
+            }
+            if (c == '(' || c == '[')
+                ++depth;
+            else if (c == ')' || c == ']')
+                --depth;
+            else if (depth == 0) {
+                const size_t width = truth_operator_at(expression, at);
+                if (width != 0)
+                    return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<std::string> lines;
+    {
+        std::istringstream in(out);
+        std::string line;
+        while (std::getline(in, line))
+            lines.push_back(line);
+    }
+    bool any = false;
+    for (std::string &line : lines) {
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos || line.empty() || line.back() != ';')
+            continue;
+        size_t start = std::string::npos;
+        if (line.compare(first, 7, "return ") == 0) {
+            start = first + 7;
+        } else {
+            // A plain store: one name, then a single `=`, then the value.
+            size_t at = first;
+            while (at < line.size() && (std::isalnum(static_cast<unsigned char>(line[at])) ||
+                                        line[at] == '_' || line[at] == '.' || line[at] == '*' ||
+                                        line[at] == '[' || line[at] == ']'))
+                ++at;
+            size_t space = at;
+            while (space < line.size() && line[space] == ' ')
+                ++space;
+            if (at == first || space + 1 >= line.size() || line[space] != '=' ||
+                line[space + 1] == '=')
+                continue;
+            start = space + 1;
+            while (start < line.size() && line[start] == ' ')
+                ++start;
+        }
+        if (start == std::string::npos || start >= line.size())
+            continue;
+        const std::string expression = line.substr(start, line.size() - 1 - start);
+        if (expression.empty() || !decides(expression))
+            continue;
+        line = line.substr(0, start) + "(" + expression + ");";
+        any = true;
+    }
+    if (!any)
+        return;
+    std::string rebuilt;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        rebuilt += lines[i];
+        if (i + 1 < lines.size() || (!out.empty() && out.back() == '\n'))
+            rebuilt.push_back('\n');
+    }
+    out = rebuilt;
 }
 
 // Whether the bytes at the start form a printable, NUL-terminated C string.
@@ -3036,6 +3193,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     // C++ stream output written the way C writes it.
     rewrite_stream_idioms(out, image_);
     tidy_names(out);
+    parenthesise_truth(out);
     return true;
 }
 

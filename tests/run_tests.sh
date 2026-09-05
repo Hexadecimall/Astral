@@ -265,7 +265,7 @@ if cc -O1 -o "$work/eviden" "$work/eviden.c" 2>/dev/null; then
     check "naming: accumulator"      "sum"             "$summed"
 
     plain=$("$astral" decompile --raw-names -a "$check_addr" "$work/eviden_stripped" 2>/dev/null)
-    check "naming: can be turned off" "sub"        "$plain"
+    check "naming: can be turned off" "function"   "$plain"
 
     check "knowledge: reports its database" "records" "$("$astral" knowledge)"
 
