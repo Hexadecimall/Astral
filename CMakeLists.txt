@@ -119,7 +119,13 @@ set(ASTRAL_LIB_SRC
     engine/compiler/lexer.cc
     engine/compiler/parser.cc
     engine/compiler/sema.cc
-    engine/compiler/front.cc)
+    engine/compiler/front.cc
+    engine/nova/lexer.cc
+    engine/nova/parser.cc
+    engine/nova/types.cc
+    engine/nova/format.cc
+    engine/nova/lower.cc
+    engine/nova/nova.cc)
 
 add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs
@@ -286,6 +292,19 @@ if(TARGET astral_cli)
     set_tests_properties(emulator_debug_cli PROPERTIES
         ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs;ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
 endif()
+
+# Nova is checked the way the C compiler is: the front end on its own, then by
+# running what the back end wrote. The parser suite is a round trip, since a
+# formatter that is not a fixed point of its own parser is wrong somewhere.
+foreach(suite lexer parser nova)
+    add_executable(astral_nova_${suite}_test engine/nova/tests/${suite}_test.cc)
+    # Nova's directory goes first: its headers share names with the C
+    # compiler's, and a bare `#include "lexer.hh"` has to mean Nova's.
+    target_include_directories(astral_nova_${suite}_test BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/engine/nova ${ASTRAL_ENGINE_INCLUDE_DIRS})
+    target_link_libraries(astral_nova_${suite}_test PRIVATE astral_static)
+    add_test(NAME nova_${suite} COMMAND astral_nova_${suite}_test)
+endforeach()
 
 # The readable listing is checked on a program built for it: the subject has a
 # frame slot no symbol names, a request number that means one thing in an ioctl
