@@ -219,7 +219,10 @@ endif()
 # ---------------------------------------------------------------- checks
 # The C front end reads text and answers with a tree, so it can be checked on
 # its own without a binary, a target or a spec anywhere in sight.
-add_executable(astral_compiler_test EXCLUDE_FROM_ALL engine/compiler/tests/front_test.cc)
+# Not excluded from the default build: ctest runs it, so a plain build has to
+# produce it or a fresh checkout fails its own tests without anything being
+# wrong with the code.
+add_executable(astral_compiler_test engine/compiler/tests/front_test.cc)
 target_include_directories(astral_compiler_test PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS})
 target_link_libraries(astral_compiler_test PRIVATE astral_static)
 # Registered with ctest as well, so `ctest` in a build tree runs it. Real
