@@ -256,9 +256,10 @@ QToolButton#transportButton { border: none; border-radius: 4px; padding: 3px 7px
 QToolButton#transportButton:hover { background: %hover%; }
 QToolButton#transportButton:disabled { color: %textDisabled%; }
 QComboBox#runConfigBox { padding: 2px 6px; }
-QToolButton#analyzeButton { border: 1px solid %border%; border-radius: 4px; padding: 3px 8px; color: %text%; }
+QToolButton#analyzeButton { border: 1px solid %border%; border-radius: 4px; padding: 3px 10px; padding-right: 26px; color: %text%; }
 QToolButton#analyzeButton:hover { background: %hover%; border-color: %accent%; }
-QToolButton#analyzeButton::menu-button { border-left: 1px solid %border%; width: 14px; }
+QToolButton#analyzeButton::menu-button { border-left: 1px solid %border%; width: 20px; }
+QToolButton#analyzeButton::menu-arrow { width: 8px; height: 8px; }
 QToolButton#analyzeButton:disabled { color: %textDisabled%; }
 QToolButton#headerButton { border: 1px solid %border%; border-radius: 4px; padding: 2px 10px; color: %text%; font-size: 11px; }
 QToolButton#headerButton:hover { background: %hover%; border-color: %accent%; }

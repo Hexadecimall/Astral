@@ -110,11 +110,11 @@ WelcomePage::WelcomePage(QWidget *parent) : QWidget(parent)
     auto *cards = new QGridLayout;
     cards->setHorizontalSpacing(12);
     cards->setVerticalSpacing(12);
-    auto *newProject = new Card(QStringLiteral("＋"), tr("New Project"),
+    auto *newProject = new Card(QStringLiteral("+"), tr("New Project"),
                                 tr("A folder that holds programs, their analysis and shared types."));
-    auto *openBinary = new Card(QStringLiteral("⌘"), tr("Open Binary"),
+    auto *openBinary = new Card(QStringLiteral("\u25C6"), tr("Open Binary"),
                                 tr("Mach-O, ELF or PE. Creates a project beside it if there is none."));
-    auto *openProject = new Card(QStringLiteral("▤"), tr("Open Project"),
+    auto *openProject = new Card(QStringLiteral("\u2261"), tr("Open Project"),
                                  tr("Continue where you left off in an existing .astralproj."));
     connect(newProject, &Card::clicked, this, &WelcomePage::newProjectRequested);
     connect(openBinary, &Card::clicked, this, &WelcomePage::openRequested);
@@ -177,8 +177,8 @@ void WelcomePage::refresh()
     }
     for (const QString &path : paths) {
         QFileInfo info(path);
-        auto *row = new Card(info.suffix() == QStringLiteral("astralproj") ? QStringLiteral("▤")
-                                                                             : QStringLiteral("⌘"),
+        auto *row = new Card(info.suffix() == QStringLiteral("astralproj") ? QStringLiteral("\u2261")
+                                                                             : QStringLiteral("\u25C6"),
                              info.fileName(), info.absolutePath());
         row->setObjectName(QStringLiteral("recentRow"));
         row->setToolTip(path);

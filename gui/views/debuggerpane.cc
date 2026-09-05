@@ -83,12 +83,12 @@ void DebuggerPane::buildControls(QVBoxLayout *layout)
     configBox_->setToolTip(tr("How to run it. Edit these to set arguments, input and where to begin."));
     row->addWidget(configBox_);
 
-    startButton_ = control(QStringLiteral("\u25B6"), tr("Run"));
-    stepButton_ = control(QStringLiteral("\u2193"), tr("Step: one instruction, entering any call"));
-    overButton_ = control(QStringLiteral("\u21B7"), tr("Step over: run any call to completion"));
-    outButton_ = control(QStringLiteral("\u2191"), tr("Step out: until this frame returns"));
-    goButton_ = control(QStringLiteral("\u25B7\u25B7"), tr("Continue: until a breakpoint, or the end"));
-    stopButton_ = control(QStringLiteral("\u25A0"), tr("Stop"));
+    startButton_ = control(QStringLiteral("\u25B8"), tr("Run"));
+    stepButton_ = control(QStringLiteral("\u2193\ufe0e"), tr("Step: one instruction, entering any call"));
+    overButton_ = control(QStringLiteral("\u21B7\ufe0e"), tr("Step over: run any call to completion"));
+    outButton_ = control(QStringLiteral("\u2191\ufe0e"), tr("Step out: until this frame returns"));
+    goButton_ = control(QStringLiteral("\u25B9\u25B9"), tr("Continue: until a breakpoint, or the end"));
+    stopButton_ = control(QStringLiteral("\u25A0\ufe0e"), tr("Stop"));
     for (QToolButton *button : {startButton_, stepButton_, overButton_, outButton_, goButton_, stopButton_}) {
         button->setObjectName(QStringLiteral("transportButton"));
         row->addWidget(button);

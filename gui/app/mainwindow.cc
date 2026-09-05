@@ -4,6 +4,7 @@
 #include "model/functionlistmodel.hh"
 #include "app/programtab.hh"
 #include "app/searchresults.hh"
+#include "model/decompilersettings.hh"
 #include "model/settings.hh"
 #include "app/projectcontroller.hh"
 #include "app/tablepane.hh"
@@ -573,17 +574,18 @@ void MainWindow::runAnalyzeHook()
         QTimer::singleShot(250, this, &MainWindow::runAnalyzeHook);
         return;
     }
+    // A scripted run writes the settings the same way the dialog does, so it
+    // exercises the path the window uses rather than one of its own.
     const QString scope = qEnvironmentVariable("ASTRAL_GUI_ANALYZE_SCOPE");
-    if (scope == QStringLiteral("everything")) {
-        analysisRequest_.scope = AnalysisRequest::Scope::Everything;
-        analysisRequest_.forget = true;
-    } else if (scope == QStringLiteral("entry")) {
-        analysisRequest_.scope = AnalysisRequest::Scope::FromEntryPoints;
-    } else if (scope == QStringLiteral("one")) {
-        analysisRequest_.scope = AnalysisRequest::Scope::OneFunction;
-    }
+    if (!scope.isEmpty())
+        Settings::instance().setString(QStringLiteral("analysis.scope"),
+                                       scope == QStringLiteral("entry")
+                                           ? QStringLiteral("entrypoints")
+                                           : scope == QStringLiteral("one")
+                                                 ? QStringLiteral("function")
+                                                 : scope);
     if (qEnvironmentVariable("ASTRAL_GUI_ANALYZE_DISCOVER") == QStringLiteral("0"))
-        analysisRequest_.discover = false;
+        Settings::instance().setBool(QStringLiteral("analysis.discover"), false);
     connect(tab->document(), &ProgramDocument::analysisFinished, this,
             [](int, int, qint64) { QTimer::singleShot(300, qApp, &QCoreApplication::quit); });
     analyzeCurrent();
@@ -997,80 +999,80 @@ void MainWindow::showAnalysisRundown(ProgramTab *tab, int done, int failed, int 
 
 QMenu *MainWindow::buildAnalyzeMenu()
 {
+    // Every Analysis setting there is, read from the same table the settings
+    // dialog and the command line read, so nothing here is invented and
+    // nothing drifts. Changing one writes the setting; the next run reads it.
     auto *menu = new QMenu(this);
+    menu->setToolTipsVisible(true);
+    Settings &settings = Settings::instance();
 
-    // What to cover. One of these runs immediately and becomes the default
-    // for the button, so the choice is made once and repeated by clicking.
-    auto *scopes = new QActionGroup(menu);
-    struct Choice {
-        AnalysisRequest::Scope scope;
-        QString text;
-        QString tip;
-    };
-    const Choice choices[] = {
-        {AnalysisRequest::Scope::Missing, tr("What Is Missing"),
-         tr("Only the functions with no result yet. The usual choice.")},
-        {AnalysisRequest::Scope::Everything, tr("Everything, Again"),
-         tr("Throw away what was decompiled and do all of it again. "
-            "What a patch makes necessary.")},
-        {AnalysisRequest::Scope::FromEntryPoints, tr("From the Entry Points"),
-         tr("Start where the program starts and follow the calls. "
-            "Reaches only what actually runs.")},
-        {AnalysisRequest::Scope::OneFunction, tr("This Function and What It Calls"),
-         tr("The function on screen, and everything it reaches.")},
-    };
-    for (const Choice &choice : choices) {
-        QAction *action = menu->addAction(choice.text, this,
-                                          [this, s = choice.scope] { analyzeWith(s); });
-        action->setToolTip(choice.tip);
-        action->setCheckable(true);
-        action->setChecked(choice.scope == analysisRequest_.scope);
-        action->setActionGroup(scopes);
-    }
-
-    menu->addSeparator();
-    QAction *discover = menu->addAction(tr("Find Unnamed Functions"));
-    discover->setToolTip(tr("Follow calls into code the symbol table never named. "
-                            "This is what finds functions in a stripped binary."));
-    discover->setCheckable(true);
-    discover->setChecked(analysisRequest_.discover);
-    connect(discover, &QAction::toggled, this, [this](bool on) { analysisRequest_.discover = on; });
-
-    menu->addSeparator();
-    auto *threads = menu->addMenu(tr("Engines"));
-    threads->setToolTip(tr("How many to run at once"));
-    auto *threadGroup = new QActionGroup(threads);
-    const int cores = QThread::idealThreadCount();
-    for (int count : {0, 1, 2, 4, 8, cores}) {
-        if (count > cores && count != 0)
+    for (const OptionInfo &option : DecompilerSettings::options()) {
+        if (option.group != QStringLiteral("Analysis")
+            || option.scope != OptionInfo::Scope::Interface)
             continue;
-        QAction *action = threads->addAction(
-            count == 0 ? tr("One per core (%1)").arg(cores) : tr("%n", nullptr, count));
-        action->setCheckable(true);
-        action->setChecked(count == analysisRequest_.threads);
-        action->setActionGroup(threadGroup);
-        connect(action, &QAction::toggled, this, [this, count](bool on) {
-            if (on)
-                analysisRequest_.threads = count;
-        });
+        const QString name = option.name;
+        const QString label = option.label;
+        const QString tip = option.explanation;
+        const QString fallback = option.defaultValue;
+
+        switch (option.kind) {
+        case OptionInfo::Kind::Boolean: {
+            QAction *action = menu->addAction(label);
+            action->setToolTip(tip);
+            action->setCheckable(true);
+            action->setChecked(settings.boolValue(name, fallback == QStringLiteral("on")));
+            connect(action, &QAction::toggled, this,
+                    [name](bool on) { Settings::instance().setBool(name, on); });
+            break;
+        }
+        case OptionInfo::Kind::Choice: {
+            QMenu *sub = menu->addMenu(label);
+            sub->setToolTipsVisible(true);
+            auto *group = new QActionGroup(sub);
+            const QString held = settings.stringValue(name, fallback);
+            for (const QString &value : option.choices) {
+                QAction *action = sub->addAction(value);
+                action->setToolTip(tip);
+                action->setCheckable(true);
+                action->setChecked(value == held);
+                action->setActionGroup(group);
+                connect(action, &QAction::toggled, this, [name, value](bool on) {
+                    if (on)
+                        Settings::instance().setString(name, value);
+                });
+            }
+            break;
+        }
+        case OptionInfo::Kind::Integer: {
+            QMenu *sub = menu->addMenu(label);
+            sub->setToolTipsVisible(true);
+            auto *group = new QActionGroup(sub);
+            const int held = settings.intValue(name, fallback.toInt());
+            for (int value : {0, 1, 2, 4, 8, 16}) {
+                if (value < option.minimum || value > option.maximum)
+                    continue;
+                QAction *action = sub->addAction(value == 0 ? tr("one per core") : QString::number(value));
+                action->setToolTip(tip);
+                action->setCheckable(true);
+                action->setChecked(value == held);
+                action->setActionGroup(group);
+                connect(action, &QAction::toggled, this, [name, value](bool on) {
+                    if (on)
+                        Settings::instance().setInt(name, value);
+                });
+            }
+            break;
+        }
+        }
     }
 
     menu->addSeparator();
+    menu->addAction(tr("All Decompiler Settings..."), this, &MainWindow::showDecompilerSettings);
     menu->addAction(tr("Stop"), this, [this] {
         if (ProgramTab *tab = currentTab())
             tab->document()->cancelAnalysis();
     });
-    // Tooltips in a menu are off by default, and these are where the
-    // explanation of each choice lives.
-    menu->setToolTipsVisible(true);
     return menu;
-}
-
-void MainWindow::analyzeWith(AnalysisRequest::Scope scope)
-{
-    analysisRequest_.scope = scope;
-    analysisRequest_.forget = scope == AnalysisRequest::Scope::Everything;
-    analyzeCurrent();
 }
 
 void MainWindow::analyzeCurrent()
@@ -1079,7 +1081,16 @@ void MainWindow::analyzeCurrent()
     if (!tab)
         return;
     analyzeAction_->setEnabled(false);
-    AnalysisRequest request = analysisRequest_;
+    AnalysisRequest request;
+    const QString scope = Settings::instance().stringValue(QStringLiteral("analysis.scope"),
+                                                           QStringLiteral("missing"));
+    request.scope = scope == QStringLiteral("everything")  ? AnalysisRequest::Scope::Everything
+                    : scope == QStringLiteral("entrypoints") ? AnalysisRequest::Scope::FromEntryPoints
+                    : scope == QStringLiteral("function")    ? AnalysisRequest::Scope::OneFunction
+                                                             : AnalysisRequest::Scope::Missing;
+    request.forget = request.scope == AnalysisRequest::Scope::Everything;
+    request.discover = Settings::instance().boolValue(QStringLiteral("analysis.discover"), true);
+    request.threads = Settings::instance().intValue(QStringLiteral("analysis.engines"), 0);
     request.only = tab->currentAddress();
     static const QStringList names = {tr("everything, again"), tr("what is missing"),
                                       tr("from the entry points"), tr("this function")};
@@ -2325,9 +2336,23 @@ void MainWindow::buildToolBar()
     bar->setMovable(false);
     bar->setIconSize(QSize(16, 16));
 
-    bar->addAction(QStringLiteral("◀"), this, [] {})->setToolTip(tr("Back"));
-    bar->addAction(QStringLiteral("▶"), this, [] {})->setToolTip(tr("Forward"));
-    bar->addSeparator();
+    auto *strip = new QWidget;
+    auto *row = new QHBoxLayout(strip);
+    row->setContentsMargins(4, 0, 8, 0);
+    row->setSpacing(6);
+    auto *back = new QToolButton;
+    back->setObjectName(QStringLiteral("transportButton"));
+    back->setText(QStringLiteral("\u25C2"));
+    back->setToolTip(tr("Back"));
+    auto *forward = new QToolButton;
+    forward->setObjectName(QStringLiteral("transportButton"));
+    forward->setText(QStringLiteral("\u25B8"));
+    forward->setToolTip(tr("Forward"));
+    connect(back, &QToolButton::clicked, this, [this] { navigateHistory(-1); });
+    connect(forward, &QToolButton::clicked, this, [this] { navigateHistory(1); });
+    row->addWidget(back);
+    row->addWidget(forward);
+    row->addSpacing(6);
 
     // One box: it goes to an address or a name outright, and shows every
     // other match as it is typed. Two boxes asked the user to know which
@@ -2355,7 +2380,7 @@ void MainWindow::buildToolBar()
         typing->stop();
         goToTarget();
     });
-    bar->addWidget(searchBox_);
+    row->addWidget(searchBox_);
     searchResults_ = new SearchResults(searchBox_, this);
     connect(searchResults_, &SearchResults::chosen, this, [this](quint64 address) {
         searchBox_->clear();
@@ -2363,11 +2388,9 @@ void MainWindow::buildToolBar()
             tab->showAddress(address);
     });
 
-    // A fixed gap, not a stretch: the button belongs beside what it acts on,
-    // and a stretch pushes it to wherever the window happens to end.
-    auto *gap = new QWidget;
-    gap->setFixedWidth(12);
-    bar->addWidget(gap);
+    // Analysis acts on the whole program rather than on what is typed, so it
+    // sits at the far end rather than beside the box.
+    row->addStretch(1);
     // Analysis is the slow thing this tool does, so the button runs it and the
     // arrow beside it says how much of it to run.
     analyzeButton_ = new QToolButton;
@@ -2380,7 +2403,11 @@ void MainWindow::buildToolBar()
     analyzeAction_->setToolTip(tr("Decompile what the settings beside this ask for"));
     connect(analyzeAction_, &QAction::triggered, this, &MainWindow::analyzeCurrent);
     analyzeButton_->setDefaultAction(analyzeAction_);
-    bar->addWidget(analyzeButton_);
+    row->addWidget(analyzeButton_);
+    bar->addWidget(strip);
+    // The strip is the toolbar's only item, so it has to be allowed to grow
+    // with it or the stretch inside it has nothing to spend.
+    strip->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 }
 
 QDockWidget *MainWindow::addPane(const QString &title, const QString &objectName, QWidget *body,

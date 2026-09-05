@@ -148,7 +148,7 @@ private:
     // is running come forward, and the layout goes back when it stops.
     void setDebugging(bool debugging);
     void analyzeCurrent();
-    void analyzeWith(AnalysisRequest::Scope scope);
+    // The Analysis settings, as a menu, so they can be changed where they are used.
     QMenu *buildAnalyzeMenu();
     void appendLog(const QString &line);
     void savePatched();
@@ -239,8 +239,6 @@ private:
     QPlainTextEdit *logView_ = nullptr;
     QAction *analyzeAction_ = nullptr;
     QToolButton *analyzeButton_ = nullptr;
-    // What the next run should cover; the Analyze menu edits it.
-    AnalysisRequest analysisRequest_;
     QAction *savePatchedAction_ = nullptr;
     QDockWidget *listingDock_ = nullptr;
     QToolBar *navigationBar_ = nullptr;

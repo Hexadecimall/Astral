@@ -78,6 +78,40 @@ OptionDescriptor astralBool(const char *name, OptionScope scope, const char *gro
     return d;
 }
 
+
+OptionDescriptor astralChoice(const char *name, OptionScope scope, const char *group,
+                              const char *label, const char *fallback,
+                              std::vector<std::string> choices, const char *explanation)
+{
+    OptionDescriptor d;
+    d.name = name;
+    d.group = group;
+    d.label = label;
+    d.kind = OptionKind::Choice;
+    d.scope = scope;
+    d.fallback = fallback;
+    d.choices = std::move(choices);
+    d.explanation = explanation;
+    return d;
+}
+
+OptionDescriptor astralInt(const char *name, OptionScope scope, const char *group,
+                           const char *label, int fallback, int minimum, int maximum,
+                           const char *explanation)
+{
+    OptionDescriptor d;
+    d.name = name;
+    d.group = group;
+    d.label = label;
+    d.kind = OptionKind::Integer;
+    d.scope = scope;
+    d.fallback = std::to_string(fallback);
+    d.minimum = minimum;
+    d.maximum = maximum;
+    d.explanation = explanation;
+    return d;
+}
+
 std::vector<OptionDescriptor> build()
 {
     std::vector<OptionDescriptor> t;
@@ -259,6 +293,22 @@ std::vector<OptionDescriptor> build()
                            "Allow context to be set", true, true,
                            "Let the decompiler set processor context, such as the "
                            "instruction set a branch switches to."));
+
+    // ----------------------------------------------------------- analysis
+    t.push_back(astralChoice("analysis.scope", OptionScope::Interface, "Analysis",
+                             "What analysis covers", "missing",
+                             {"missing", "everything", "entrypoints", "function"},
+                             "missing: only functions with no result yet. everything: discard "
+                             "what was decompiled and do it all again. entrypoints: start where "
+                             "the program starts and follow the calls. function: the one on "
+                             "screen, and what it reaches."));
+    t.push_back(astralBool("analysis.discover", OptionScope::Interface, "Analysis",
+                           "Find unnamed functions", true,
+                           "Follow calls into code the symbol table never named. This is what "
+                           "finds functions in a stripped program."));
+    t.push_back(astralInt("analysis.engines", OptionScope::Interface, "Analysis",
+                          "Engines to run at once", 0, 0, 32,
+                          "How many decompilers work in parallel. Zero means one per core."));
 
     // ------------------------------------------------------------- naming
     t.push_back(astralBool("autoNaming", OptionScope::Emission, "Naming",
