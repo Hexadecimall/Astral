@@ -2618,9 +2618,16 @@ private:
                     *error_ = error;
                 continue;
             }
-            if (found_ != nullptr)
+            if (found_ != nullptr) {
                 for (uint64_t callee : result.callees)
                     found_->insert(callee);
+                // A function reached only by having its address taken is code
+                // the program runs; see reached_by, which the single-engine
+                // walk uses for the same reason.
+                for (const Declaration &declaration : result.externals)
+                    if (declaration.is_function && declaration.address != 0)
+                        found_->insert(declaration.address);
+            }
             (*out_names_)[address] = result.name;
             (*results_)[address] = std::move(result);
         }
@@ -2723,7 +2730,40 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         for (const char *prefix : runtime)
             if (core.rfind(prefix, 0) == 0)
                 return true;
-        return core.find("cxx") != std::string::npos;
+        if (core.find("cxx") != std::string::npos)
+            return true;
+
+        // Rust's runtime, which arrives mangled and says which crate a body
+        // came from. The v0 scheme writes a crate as `Cs<id>_<length><name>`
+        // and the older one as `_ZN<length><name>`, so the crate is looked for
+        // with its length in front of it either way - `3std` matches std and
+        // not a user crate whose name merely ends in it. Everything a Rust
+        // program is built on lands here: the entry point calls into std, std
+        // calls into core and alloc, and the panic machinery drags in the
+        // backtrace crates behind it. None of that is the program.
+        if (core.rfind("R", 0) == 0 || core.rfind("ZN", 0) == 0) {
+            static const char *const crates[] = {
+                "3std", "4core", "5alloc", "4libc", "10std_detect",
+                "11panic_unwind", "11panic_abort", "12rustc_demangle",
+                "9addr2line", "5gimli", "6object", "9miniz_oxide", "5adler",
+                "9hashbrown", "10compiler_builtins", "9unwinding",
+            };
+            for (const char *crate : crates) {
+                const size_t at = core.find(crate);
+                if (at == std::string::npos)
+                    continue;
+                // The crate name has to be where a crate is written: right
+                // after the v0 crate marker, or at the start of a path in the
+                // older scheme. A digit before it would make it part of a
+                // longer length, and a letter part of a longer name.
+                if (at == 0)
+                    return true;
+                const char before = core[at - 1];
+                if (before == '_' || before == 'N' || before == 'C')
+                    return true;
+            }
+        }
+        return false;
     };
     // Asking for every function in the program is asking for every function in
     // the program: nothing is trimmed out of a request that already covers the
@@ -2733,6 +2773,20 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     // Counted by function, not by call: one libc++ body called from ten places
     // is one body left alone, and saying ten would be a different claim.
     std::set<uint64_t> skipped_library;
+
+    // Everything one function reaches: what it calls, and what it hands to
+    // something else to call. A function pointer taken by address is not a call
+    // site and does not show up as a callee, but it is still the program's own
+    // code - a Rust program's real main is passed to the runtime rather than
+    // called, and following only calls would decompile the four lines that hand
+    // it over and none of the program.
+    auto reached_by = [](const FunctionResult &result) {
+        std::vector<uint64_t> reached = result.callees;
+        for (const Declaration &declaration : result.externals)
+            if (declaration.is_function && declaration.address != 0)
+                reached.push_back(declaration.address);
+        return reached;
+    };
 
     auto in_code = [&](uint64_t addr) {
         for (const Segment &seg : image_.segments)
@@ -2804,7 +2858,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
             }
             settled_names[address] = probe.name;
             found_results[address] = std::move(probe);
-            for (uint64_t callee : found_results[address].callees)
+            for (uint64_t callee : reached_by(found_results[address]))
                 if (wanted(callee) && !discovered.count(callee))
                     worklist.push_back(callee);
         }
@@ -2870,8 +2924,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
                 return;
             auto found = found_results.find(address);
             if (found != found_results.end()) {
-                std::vector<uint64_t> callees(found->second.callees.begin(),
-                                              found->second.callees.end());
+                std::vector<uint64_t> callees = reached_by(found->second);
                 std::sort(callees.begin(), callees.end());
                 for (uint64_t callee : callees)
                     if (discovered.count(callee) != 0)
