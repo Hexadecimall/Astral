@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.14.0 LANGUAGES CXX)
+project(Astral VERSION 0.15.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -90,6 +90,7 @@ set(ASTRAL_LIB_SRC
     src/patch/patch.cc
     src/patch/sha256.cc
     src/patch/macho_sign.cc
+    src/patch/format_finish.cc
     src/format/loader_elf.cc
     src/format/loader_pe.cc
     src/format/loader_macho.cc
@@ -97,7 +98,11 @@ set(ASTRAL_LIB_SRC
     src/emit/libc_protos.cc
     src/core/session.cc
     src/api/capi.cc
-    engine/assembler/arm64.cc)
+    engine/assembler/assembler.cc
+    engine/assembler/text.cc
+    engine/assembler/arm64.cc
+    engine/assembler/arm32.cc
+    engine/assembler/x86.cc)
 
 add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs

@@ -546,6 +546,30 @@ check "refuses the wrong operand count" "takes 2 operands" \
 check "refuses a branch out of reach" "too far" \
     "$("$astral" patch "$work/host" --asm "0x100000000=b 0x7fffffff0" -o /dev/null 2>&1)"
 
+# Every format Astral reads, it can also write back: a Mach-O is signed again,
+# a PE's checksum is recomputed, an ELF records nothing and needs nothing.
+patch_entry() {
+    local file=$1 out=$2
+    local at
+    at=$("$astral" info "$file" 2>/dev/null | sed -n 's/^entry *//p' | head -1)
+    [ -n "$at" ] || return 1
+    "$astral" patch "$file" --asm "$at=nop" -o "$out" >/dev/null 2>&1 || return 1
+    "$astral" disassemble -a "$at" -d 1 "$out" 2>/dev/null | head -1 | sed 's/^[^:]*: *//'
+}
+check "patches an elf"   "NOP" "$(patch_entry "$elf" "$work/patched.elf")"
+check "patches a pe"     "NOP" "$(patch_entry "$pe" "$work/patched.exe")"
+if [ -f "$work/host" ]; then
+    check "patches a mach-o" "nop" "$(patch_entry "$work/host" "$work/patched.host")"
+    check "the patched mach-o is signed" "satisfies its Designated Requirement" \
+        "$(codesign -v --verbose "$work/patched.host" 2>&1 | tail -1)"
+fi
+
+# x86 instructions vary in length, so a shorter replacement is padded rather
+# than refused; on a fixed-width machine the sizes have to match exactly.
+check "pads a shorter x86 instruction" "NOP" \
+    "$("$astral" patch "$elf" --asm "0x40008c=nop" -o "$work/pad.elf" >/dev/null 2>&1 &&
+       "$astral" disassemble -a 0x40008c -d 1 "$work/pad.elf" 2>/dev/null | sed 's/^[^:]*: *//')"
+
 # ---------------------------------------------------------------- threading
 #
 # Whole-program decompilation can run several engines at once. A given thread

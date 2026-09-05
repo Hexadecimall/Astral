@@ -368,6 +368,31 @@ void MainWindow::runAnalyzeHook()
     analyzeCurrent();
 }
 
+void MainWindow::runAssembleHook(const QString &edit, const QString &outPath)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || tab->listing().isEmpty()) {
+        QTimer::singleShot(250, this, [this, edit, outPath] { runAssembleHook(edit, outPath); });
+        return;
+    }
+    // `edit` is `<from>|<to>`: the first line holding <from> is rewritten.
+    const QStringList parts = edit.split(QLatin1Char('|'));
+    QStringList lines = tab->listing().split(QLatin1Char('\n'));
+    for (QString &line : lines)
+        if (parts.size() == 2 && line.contains(parts[0])) {
+            line.replace(parts[0], parts[1]);
+            break;
+        }
+    listingPane_->view()->setPlainText(lines.join(QLatin1Char('\n')));
+    connect(tab->document(), &ProgramDocument::patchesChanged, this, [this, tab, outPath] {
+        QString error;
+        if (!tab->document()->writePatched(outPath, error))
+            appendLog(error);
+        QTimer::singleShot(300, qApp, &QCoreApplication::quit);
+    });
+    listingPane_->assembleForTesting();
+}
+
 void MainWindow::dumpListing()
 {
     ProgramTab *tab = currentTab();

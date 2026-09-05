@@ -5,6 +5,7 @@
 #include "views/hexpane.hh"
 #include "views/hexview.hh"
 #include "model/patchbuilder.hh"
+#include "model/settings.hh"
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -182,6 +183,14 @@ void ProgramTab::replaceCodeText(const QString &text)
 
 void ProgramTab::compileCurrent()
 {
+    // Astral has no C compiler of its own, so this one path runs another
+    // program. The settings file says whether that is wanted.
+    if (!Settings::instance().boolValue(QStringLiteral("patch.useCCompiler"), true)) {
+        Q_EMIT logMessage(tr("patch refused: patching from C needs a C compiler, and "
+                             "patch.useCCompiler is off in %1").arg(Settings::path()));
+        decompiler_->showRefused(tr("patch.useCCompiler is off"));
+        return;
+    }
     const auto entry = document_->functionAt(current_);
     const auto cachedFunction = document_->cached(current_);
     QString name = cachedFunction ? cachedFunction->name : entry ? entry->name : QString();

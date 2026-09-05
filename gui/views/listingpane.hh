@@ -20,6 +20,8 @@ public:
     explicit ListingPane(ListingView *view, QWidget *parent = nullptr);
 
     ListingView *view() const { return view_; }
+    // Drives the assemble action from a scripted run.
+    void assembleForTesting() { editing_ = true; assemble(); }
     // Replaces the disassembly and leaves edit mode; the old text describes
     // code the program may no longer hold.
     void setListing(const QString &text);
@@ -34,6 +36,8 @@ Q_SIGNALS:
 private:
     void setEditing(bool editing);
     void assemble();
+    // Astral's own assembler, one changed line at a time.
+    void assembleWithEngine();
     // The bytes the untouched listing covers, measured from its own addresses.
     quint64 span() const;
     void updateButtons();

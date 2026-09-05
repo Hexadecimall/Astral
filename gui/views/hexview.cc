@@ -25,6 +25,9 @@ int HexView::asciiColumn(int byte) { return kAsciiStart + byte; }
 HexView::HexView(QWidget *parent) : CodeView(parent)
 {
     setPlaceholderText(tr("Bytes at the current address"));
+    // The base class paints the current line by replacing every extra
+    // selection, so the marks are put back after it, not before.
+    connect(this, &QPlainTextEdit::cursorPositionChanged, this, &HexView::applySelections);
 }
 
 void HexView::showBytes(quint64 base, const QByteArray &bytes, quint64 mark, quint64 markSize)
@@ -68,7 +71,6 @@ void HexView::render()
         text += QStringLiteral("0x%1:  %2 %3\n").arg(base_ + offset, 12, 16, QLatin1Char('0')).arg(hex, ascii);
     }
     setPlainText(text);
-    applySelections();
     if (markSize_ > 0 && mark_ >= base_) {
         const int firstLine = static_cast<int>((mark_ - base_) / kPerLine);
         if (firstLine < blockCount()) {
@@ -76,12 +78,20 @@ void HexView::render()
             centerCursor();
         }
     }
+    applySelections();
 }
 
 void HexView::applySelections()
 {
-    QList<QTextEdit::ExtraSelection> marks;
     const Theme &theme = Theme::current();
+    QList<QTextEdit::ExtraSelection> marks;
+    // The current line first, the way the base class draws it.
+    QTextEdit::ExtraSelection line;
+    line.format.setBackground(theme.colour(QStringLiteral("editorLine")));
+    line.format.setProperty(QTextFormat::FullWidthSelection, true);
+    line.cursor = textCursor();
+    line.cursor.clearSelection();
+    marks << line;
     if (markSize_ > 0 && mark_ >= base_) {
         const int firstLine = static_cast<int>((mark_ - base_) / kPerLine);
         const int lastLine = static_cast<int>((mark_ + markSize_ - 1 - base_) / kPerLine);

@@ -492,6 +492,19 @@ bool ProgramDocument::patchBytes(quint64 address, const QByteArray &bytes, const
     return ok;
 }
 
+bool ProgramDocument::patchAssembly(quint64 address, const QString &text, QString &error)
+{
+    bool ok;
+    {
+        QMutexLocker guard(&lock_);
+        ok = report(astral_program_patch_assembly(program_.get(), address, text.toUtf8().constData()),
+                    error);
+    }
+    if (ok)
+        patchLanded();
+    return ok;
+}
+
 bool ProgramDocument::patchNop(quint64 address, int count, QString &error)
 {
     bool ok;

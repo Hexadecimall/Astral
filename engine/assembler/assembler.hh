@@ -19,10 +19,17 @@ namespace assembler {
 enum class Target {
     Unknown,
     Arm64,
+    Arm32,   // A32, the classic four-byte ARM encoding
+    Thumb,   // T32, the two-byte encoding ARM cores boot into on many systems
+    X86_64,
+    X86,
 };
 
-// Picks the target from a language id such as "AARCH64:LE:64:AppleSilicon".
+// Picks the target from a language id such as "AARCH64:LE:64:AppleSilicon" or
+// "x86:LE:64:default".
 Target target_for_language(const std::string &language_id);
+// How wide an instruction may be, which is what a patch has to fit inside.
+bool is_fixed_width(Target target);
 const char *target_name(Target target);
 
 struct Result {

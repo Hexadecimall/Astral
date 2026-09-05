@@ -73,6 +73,10 @@ int main(int argc, char **argv)
     const QString exportOut = qEnvironmentVariable("ASTRAL_GUI_EXPORT");
     if (!exportOut.isEmpty())
         QTimer::singleShot(1500, &window, [&window, exportOut] { window.runExportHook(exportOut); });
+    const QString asmEdit = qEnvironmentVariable("ASTRAL_GUI_ASM");
+    const QString asmOut = qEnvironmentVariable("ASTRAL_GUI_ASM_OUT");
+    if (!asmEdit.isEmpty() && !asmOut.isEmpty())
+        QTimer::singleShot(1500, &window, [&window, asmEdit, asmOut] { window.runAssembleHook(asmEdit, asmOut); });
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_DUMP_LISTING"))
         QTimer::singleShot(1500, &window, &astral::gui::MainWindow::dumpListing);
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_ANALYZE"))

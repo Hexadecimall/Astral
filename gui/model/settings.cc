@@ -76,6 +76,17 @@ analysis.showRundown = true
 
 # How many recent projects and binaries the welcome screen remembers.
 recent.limit = 8
+
+# How edited assembly becomes bytes. `engine` uses the assembler built into
+# Astral and runs nothing else. `toolchain` runs the system assembler through
+# a C compiler, which accepts more syntax and can rewrite a whole block, but
+# needs a compiler installed and starts another program to do it.
+patch.assembler = engine
+
+# Patching from edited C needs a C compiler, which Astral does not contain.
+# With this off, the source views are read-only and only assembly and hex can
+# be patched.
+patch.useCCompiler = true
 )");
 }
 
@@ -95,6 +106,36 @@ void Settings::reload()
     const QString text = QString::fromUtf8(file.readAll());
     lines_ = text.split(QLatin1Char('\n'));
     parseInto(text, values_);
+    addMissingDefaults();
+}
+
+void Settings::addMissingDefaults()
+{
+    // A file written by an older build knows nothing of settings added since.
+    // Each one arrives with the comment that explains it, so the file stays
+    // able to teach whoever opens it.
+    QStringList block;
+    bool changed = false;
+    for (const QString &line : defaultText().split(QLatin1Char('\n'))) {
+        const QString key = keyOf(line);
+        if (key.isEmpty()) {
+            if (line.trimmed().startsWith(QLatin1Char('#')))
+                block << line;
+            else
+                block.clear();
+            continue;
+        }
+        if (!values_.count(key)) {
+            while (!lines_.isEmpty() && lines_.last().trimmed().isEmpty())
+                lines_.removeLast();
+            lines_ << QString() << block << line;
+            parseInto(line, values_);
+            changed = true;
+        }
+        block.clear();
+    }
+    if (changed)
+        save();
 }
 
 bool Settings::boolValue(const QString &key, bool fallback) const

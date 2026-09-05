@@ -1,7 +1,14 @@
 #include "views/listingpane.hh"
 #include "model/assembler.hh"
 #include "model/programdocument.hh"
+#include "model/settings.hh"
+
+#include <QRegularExpression>
+
+#include <map>
+#include "model/programdocument.hh"
 #include "views/listingview.hh"
+#include "theme/theme.hh"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -24,6 +31,12 @@ ListingPane::ListingPane(ListingView *view, QWidget *parent)
     auto *row = new QHBoxLayout(header);
     row->setContentsMargins(8, 4, 8, 4);
     row->setSpacing(6);
+    // The dock draws nothing behind a plain widget, so the row paints itself
+    // in the panel colour rather than sitting on the window's black.
+    header->setAutoFillBackground(true);
+    QPalette headerPalette = header->palette();
+    headerPalette.setColor(QPalette::Window, Theme::current().colour(QStringLiteral("panel")));
+    header->setPalette(headerPalette);
     editButton_->setCheckable(true);
     editButton_->setToolTip(tr("Edit the disassembly and assemble it back into the program"));
     assembleButton_->setToolTip(tr("Assemble the edited listing in place (Ctrl+Return)"));
@@ -82,6 +95,8 @@ void ListingPane::updateButtons()
 void ListingPane::setEditing(bool editing)
 {
     editing_ = editing;
+    // The button label carries the state; a checked flat button reads as off.
+    editButton_->setText(editing ? tr("Editing") : tr("Edit"));
     view_->setEditable(editing);
     if (!editing)
         view_->setPlainText(pristine_);
@@ -120,10 +135,53 @@ quint64 ListingPane::span() const
     return last + static_cast<quint64>(length) - address_;
 }
 
+namespace {
+
+// One line of a listing, split into the address it sits at and the
+// instruction written there. Comments and blank lines have no address.
+struct ListingLine {
+    quint64 address = 0;
+    QString instruction;
+    bool hasAddress = false;
+};
+
+ListingLine readLine(const QString &line)
+{
+    static const QRegularExpression shape(QStringLiteral(R"(^\s*(0x[0-9a-fA-F]+)\s*:\s*(.*)$)"));
+    const auto match = shape.match(line);
+    ListingLine out;
+    if (!match.hasMatch())
+        return out;
+    bool ok = false;
+    out.address = QStringView(match.captured(1)).mid(2).toULongLong(&ok, 16);
+    if (!ok)
+        return out;
+    // The trailing note the listing adds is for the reader, not the assembler.
+    QString text = match.captured(2);
+    const int comment = text.indexOf(QStringLiteral(";"));
+    if (comment >= 0)
+        text = text.left(comment);
+    out.instruction = text.simplified();
+    out.hasAddress = true;
+    return out;
+}
+
+} // namespace
+
 void ListingPane::assemble()
 {
-    if (!editing_ || busy_ || !document_)
+    if (!editing_ || busy_ || document_ == nullptr)
         return;
+
+    // Astral assembles its own instructions. Reaching for the system
+    // toolchain is a choice the settings file records, not a default.
+    if (Settings::instance().stringValue(QStringLiteral("patch.assembler"),
+                                         QStringLiteral("engine"))
+        != QStringLiteral("toolchain")) {
+        assembleWithEngine();
+        return;
+    }
+
     const quint64 available = span();
     if (available == 0) {
         Q_EMIT logMessage(tr("assemble refused: the listing's extent could not be measured"));
@@ -156,6 +214,67 @@ void ListingPane::assemble()
                             status_->setText(outcome.report);
                             updateButtons();
                         });
+}
+
+void ListingPane::assembleWithEngine()
+{
+    // Every line the user changed is one instruction at a known address, which
+    // is exactly what the engine's assembler takes. Lines left alone are not
+    // touched, so a listing is edited in place rather than rebuilt.
+    std::map<quint64, QString> before;
+    for (const QString &line : pristine_.split(QLatin1Char('\n'))) {
+        const ListingLine parsed = readLine(line);
+        if (parsed.hasAddress)
+            before[parsed.address] = parsed.instruction;
+    }
+
+    std::vector<std::pair<quint64, QString>> changes;
+    QStringList unknown;
+    for (const QString &line : view_->toPlainText().split(QLatin1Char('\n'))) {
+        const ListingLine parsed = readLine(line);
+        if (!parsed.hasAddress) {
+            if (!line.trimmed().isEmpty())
+                unknown << line.trimmed();
+            continue;
+        }
+        const auto found = before.find(parsed.address);
+        if (found == before.end()) {
+            unknown << line.trimmed();
+            continue;
+        }
+        if (found->second != parsed.instruction)
+            changes.push_back({parsed.address, parsed.instruction});
+    }
+
+    if (!unknown.isEmpty()) {
+        const QString problem = tr("every line has to keep its address, and no line may be added: "
+                                   "%1").arg(unknown.first());
+        Q_EMIT logMessage(tr("assemble refused: %1").arg(problem));
+        status_->setText(tr("line without an address"));
+        return;
+    }
+    if (changes.empty()) {
+        status_->setText(tr("nothing changed"));
+        return;
+    }
+
+    QStringList written;
+    for (const auto &[address, text] : changes) {
+        QString error;
+        if (!document_->patchAssembly(address, text, error)) {
+            Q_EMIT logMessage(tr("assemble refused at 0x%1 (%2): %3").arg(address, 0, 16).arg(text, error));
+            status_->setText(tr("refused at 0x%1").arg(address, 0, 16));
+            return;
+        }
+        written << QStringLiteral("0x%1 %2").arg(address, 0, 16).arg(text);
+    }
+    Q_EMIT logMessage(tr("assembled %n instruction(s) with the engine: %1", nullptr,
+                         static_cast<int>(written.size()))
+                          .arg(written.join(QStringLiteral(", "))));
+    status_->setText(tr("queued %n instruction(s)", nullptr, static_cast<int>(written.size())));
+    editButton_->setChecked(false);
+    setEditing(false);
+    Q_EMIT patchApplied();
 }
 
 } // namespace astral::gui

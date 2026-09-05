@@ -138,6 +138,9 @@ public:
 
     // Patches queue in the engine and apply when a patched copy is written.
     bool patchBytes(quint64 address, const QByteArray &bytes, const QString &note, QString &error);
+    // Replaces the instruction at `address` with the one written in `text`,
+    // assembled by the engine itself. Refused unless it is the same length.
+    bool patchAssembly(quint64 address, const QString &text, QString &error);
     bool patchNop(quint64 address, int count, QString &error);
     bool patchInvert(quint64 address, QString &error);
     bool patchReturn(quint64 address, quint64 value, QString &error);

@@ -48,6 +48,7 @@ public:
     void selectView(const QString &name);
     void typeInSearch(const QString &text);
     void dumpListing();
+    void runAssembleHook(const QString &edit, const QString &outPath);
     // Developer hooks used by the automated run: edit, patch, write, quit.
     void runEditHook(const QString &sourceFile, const QString &outPath);
     void runAnalyzeHook();

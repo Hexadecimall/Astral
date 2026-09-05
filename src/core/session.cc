@@ -1,6 +1,7 @@
 // Binds a loaded BinaryImage to Ghidra's decompiler core: a LoadImage over the
 // image, a SleighArchitecture that uses it, and the analysis entry points.
 #include "session.hh"
+#include "format_finish.hh"
 #include "macho_sign.hh"
 
 #include <sys/stat.h>
@@ -790,16 +791,55 @@ bool Session::patch_assembly(uint64_t address, const std::string &text, std::str
         error = "there is no instruction at that address to replace";
         return false;
     }
-    if (written.bytes.size() != static_cast<size_t>(room)) {
-        char message[160];
-        std::snprintf(message, sizeof message,
-                      "that assembles to %zu bytes but the instruction there is %d; "
-                      "an instruction can only be replaced by one the same size",
-                      written.bytes.size(), room);
+    std::vector<uint8_t> bytes = written.bytes;
+    if (bytes.size() > static_cast<size_t>(room)) {
+        // Room can be made by taking in the instructions that follow, but only
+        // deliberately: silently overwriting the next one is how a patch turns
+        // into a crash somewhere else entirely.
+        int covered = room;
+        int instructions = 1;
+        while (covered < static_cast<int>(bytes.size())) {
+            const int next = instruction_length(address + static_cast<uint64_t>(covered));
+            if (next <= 0)
+                break;
+            covered += next;
+            ++instructions;
+        }
+        char message[240];
+        if (covered >= static_cast<int>(bytes.size()))
+            std::snprintf(message, sizeof message,
+                          "that assembles to %zu bytes but only %d are free before the next "
+                          "instruction; it would take %d instructions to make room",
+                          bytes.size(), room, instructions);
+        else
+            std::snprintf(message, sizeof message,
+                          "that assembles to %zu bytes but the instruction there is only %d",
+                          bytes.size(), room);
         error = message;
         return false;
     }
-    return patch_bytes(address, written.bytes, PatchTier::Assembled, text, error);
+    if (bytes.size() < static_cast<size_t>(room)) {
+        if (asmw::is_fixed_width(target)) {
+            char message[200];
+            std::snprintf(message, sizeof message,
+                          "that assembles to %zu bytes but the instruction there is %d, and every "
+                          "instruction on this architecture is the same size",
+                          bytes.size(), room);
+            error = message;
+            return false;
+        }
+        // A shorter instruction leaves a gap. Filling it with no-ops keeps
+        // everything after it where it was, which is what the rest of the
+        // program expects.
+        const asmw::Result padding = asmw::assemble(target, "nop", address + bytes.size());
+        if (!padding.ok || padding.bytes.size() != 1) {
+            error = "the replacement is shorter and there is no single-byte no-op to fill the gap";
+            return false;
+        }
+        while (bytes.size() < static_cast<size_t>(room))
+            bytes.push_back(padding.bytes.front());
+    }
+    return patch_bytes(address, bytes, PatchTier::Assembled, text, error);
 }
 
 bool Session::patch_nop(uint64_t address, int instruction_count, std::string &error)
@@ -914,14 +954,15 @@ bool Session::write_patched(const std::string &out_path, std::string &error) con
         return false;
     if (!patches_.apply_to(bytes, error))
         return false;
-    // A patched arm64 Mach-O will not run until it is re-signed: Apple Silicon
-    // refuses a binary whose signature no longer covers its bytes. Re-sign in
-    // memory when possible, and fall back to the platform tool otherwise.
+    // Changing bytes inside an executable breaks whatever the format records
+    // about them: a Mach-O signature no longer covers the file, a PE checksum
+    // no longer adds up. An ELF records nothing and needs nothing.
     bool sign_on_disk = false;
-    if (is_macho(bytes)) {
-        std::string sign_error;
-        if (!macho_adhoc_sign(bytes, sign_error))
-            sign_on_disk = true; // native path declined; try codesign after write
+    {
+        std::string note;
+        std::string finish_error;
+        if (!finish_patched_file(bytes, note, finish_error) && is_macho(bytes))
+            sign_on_disk = true; // the native signer declined; try codesign after writing
     }
     if (!write_file(out_path, bytes, error))
         return false;

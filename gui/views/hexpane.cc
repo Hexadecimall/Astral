@@ -1,6 +1,7 @@
 #include "views/hexpane.hh"
 #include "model/programdocument.hh"
 #include "views/hexview.hh"
+#include "theme/theme.hh"
 
 #include <QHBoxLayout>
 #include <QLabel>
@@ -23,6 +24,12 @@ HexPane::HexPane(HexView *view, QWidget *parent)
     auto *row = new QHBoxLayout(header);
     row->setContentsMargins(8, 4, 8, 4);
     row->setSpacing(6);
+    // The dock draws nothing behind a plain widget, so the row paints itself
+    // in the panel colour rather than sitting on the window's black.
+    header->setAutoFillBackground(true);
+    QPalette headerPalette = header->palette();
+    headerPalette.setColor(QPalette::Window, Theme::current().colour(QStringLiteral("panel")));
+    header->setPalette(headerPalette);
     editButton_->setCheckable(true);
     editButton_->setToolTip(tr("Type hex digits over the bytes to change them"));
     applyButton_->setToolTip(tr("Queue the changed bytes as a patch (Ctrl+Return)"));
@@ -38,6 +45,7 @@ HexPane::HexPane(HexView *view, QWidget *parent)
 
     connect(editButton_, &QPushButton::toggled, this, [this](bool on) {
         view_->setEditing(on);
+        editButton_->setText(on ? tr("Editing") : tr("Edit"));
         if (!on)
             view_->revert();
         status_->setText(on ? tr("editing: type hex digits, apply with Ctrl+Return") : QString());

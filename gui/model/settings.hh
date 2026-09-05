@@ -44,6 +44,8 @@ public:
 
 private:
     Settings();
+    // Appends any documented default the file does not mention yet.
+    void addMissingDefaults();
 
     std::map<QString, QString> values_;
     // The file as it was read, so saving keeps its comments and its order.
