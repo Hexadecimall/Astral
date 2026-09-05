@@ -554,8 +554,8 @@ if [ -f "$work/host" ]; then
     "$astral" crap-ya-dont-need binary "$work/host" -o "$work/host.binary" >/dev/null 2>&1
     lines=$(wc -l < "$work/host.binary" | tr -d ' ')
     bytes=$(wc -c < "$work/host" | tr -d ' ')
-    check "binary: a line for every byte, and one that says where it came from" \
-        "$((bytes + 1))" "$lines"
+    check "binary: a line for every byte, and two of warning" \
+        "$((bytes + 2))" "$lines"
     "$astral" crap-ya-dont-need binary-compile "$work/host.binary" -o "$work/host.again" \
         >/dev/null 2>&1
     if cmp -s "$work/host" "$work/host.again"; then

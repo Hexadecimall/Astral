@@ -91,6 +91,30 @@ fn parse(arguments: &[String]) -> Result<(String, Option<String>), i32> {
     }
 }
 
+/// A round number to brace yourself with. The exact count is the file's own
+/// business; what matters before opening it is the order of magnitude.
+fn about(lines: usize) -> String {
+    if lines < 100 {
+        return lines.to_string();
+    }
+    // Two significant figures, so 33,432 reads as 33,000 and 118,800 as 120,000.
+    let mut scale = 1usize;
+    while lines / scale >= 100 {
+        scale *= 10;
+    }
+    let rounded = (lines + scale / 2) / scale * scale;
+
+    let digits = rounded.to_string();
+    let mut text = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    text
+}
+
 fn to_binary(path: &str, output: Option<&str>) -> i32 {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -104,6 +128,11 @@ fn to_binary(path: &str, output: Option<&str>) -> i32 {
     // rather than a line at a time: a real program is megabytes of this.
     let mut text = String::with_capacity(bytes.len() * 9 + 256);
     text.push_str("# Decompiled by Astral\n");
+    text.push_str(&format!(
+        "# About {} line{}\n",
+        about(bytes.len()),
+        if bytes.len() == 1 { "" } else { "s" }
+    ));
     for byte in &bytes {
         for bit in (0..8).rev() {
             text.push(if byte >> bit & 1 == 1 { '1' } else { '0' });
