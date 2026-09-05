@@ -22,6 +22,12 @@
 #include "slgh_compile.hh"
 #include "types.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -423,7 +429,7 @@ Session::~Session()
 }
 
 std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &language_override,
-                                         std::string &error)
+                                         std::string &error, bool note_prototypes)
 {
     if (!g_initialized) {
         error = "astral_init has not been called";
@@ -436,9 +442,14 @@ std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &l
     demangle_symbols(session->image_);
     // What a mangled name says about its own signature is as good as a
     // prototype read from source; make it known before prototypes are applied.
-    for (const Symbol &sym : session->image_.symbols)
-        if (sym.is_function && !sym.prototype.empty())
-            Knowledge::instance().note_prototype(sym.name, sym.prototype);
+    // Recorded once per image: a second engine over the same program would be
+    // writing what the first is already reading.
+    if (!note_prototypes)
+        ; // the caller has already recorded them
+    else
+        for (const Symbol &sym : session->image_.symbols)
+            if (sym.is_function && !sym.prototype.empty())
+                Knowledge::instance().note_prototype(sym.name, sym.prototype);
 
     if (!language_override.empty())
         session->archid_ = complete_architecture(language_override, session->image_.arch.abi, error);
@@ -1691,6 +1702,7 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
     // each holds the real bytes at its own base - and reading past the segment
     // just zero-fills.
     const uint64_t kWindow = 8192;
+    std::map<std::string, int> slug_counts;
     std::ostringstream defs;
     for (size_t i = 0; i < sorted.size(); ++i) {
         uint64_t a = sorted[i];
@@ -1714,7 +1726,9 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
         if (looks_like_string(bytes, slen))
             slug = string_slug(bytes, slen);
         if (!slug.empty()) {
-            static std::map<std::string, int> used_slugs;
+            // Distinct names within this unit; the emit that uses it runs on
+            // one thread after every function is decompiled.
+            std::map<std::string, int> &used_slugs = slug_counts;
             int &n = used_slugs[slug];
             std::string sname = n == 0 ? slug : slug + std::to_string(n + 1);
             ++n;
@@ -1758,6 +1772,222 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
 }
 
 } // namespace
+
+
+// The name a function should be decompiled under: an entry point is main.
+std::string Session::current_name(uint64_t address) const
+{
+    try {
+        ghidra::Address addr(arch_->getDefaultCodeSpace(), address);
+        ghidra::Funcdata *fd = arch_->symboltab->getGlobalScope()->queryFunction(addr);
+        return fd == nullptr ? std::string() : fd->getName();
+    } catch (ghidra::LowlevelError &) {
+        return std::string();
+    }
+}
+
+std::string Session::name_for_entry(uint64_t address) const
+{
+    for (uint64_t entry : image_.entry_points)
+        if (entry == address)
+            return "main";
+    return std::string();
+}
+
+
+std::unique_ptr<Session> Session::clone(std::string &error) const
+{
+    // The image is copied rather than shared: each engine writes its own
+    // symbol table and patches its own copy of the bytes.
+    std::unique_ptr<Session> other = Session::create(image_, archid_, error, false);
+    if (other)
+        other->auto_naming_ = auto_naming_;
+    return other;
+}
+
+int Session::worker_count(size_t work) const
+{
+    unsigned cores = std::thread::hardware_concurrency();
+    if (cores == 0)
+        cores = 1;
+    int want = threads_ > 0 ? threads_ : static_cast<int>(cores);
+    // A way to pin the count without threading an option through every caller,
+    // which is what makes measuring one against the other possible.
+    if (const char *pinned = std::getenv("ASTRAL_THREADS")) {
+        const int asked = std::atoi(pinned);
+        if (asked > 0)
+            want = asked;
+    }
+    if (want < 1)
+        want = 1;
+    // Another engine is only worth having when there is real work for it. Each
+    // one re-derives what its own share calls, so on a small program spreading
+    // the work costs more than doing it in one place; measuring says the turn
+    // comes somewhere in the low hundreds of functions.
+    const size_t kMinimumToSpread = 128;
+    const size_t kEachThreadWants = 64;
+    if (work < kMinimumToSpread)
+        return 1;
+    const int useful = static_cast<int>(work / kEachThreadWants);
+    if (want > useful)
+        want = useful;
+    if (want < 1)
+        want = 1;
+    return want;
+}
+
+
+// A set of engines kept alive for the whole job.
+//
+// Cloning an engine is cheap next to decompiling one function, but not next to
+// decompiling a handful, and the call graph is walked in many small layers. So
+// the engines are built once, on their own threads, and fed batch after batch.
+class Session::Pool {
+public:
+    Pool(Session &primary, int workers) : primary_(primary)
+    {
+        if (workers <= 1)
+            return;
+        ready_.store(0);
+        for (int i = 0; i < workers - 1; ++i)
+            threads_.emplace_back([this] { serve(); });
+        // Wait for each helper to report whether it has an engine, so the first
+        // batch is not handed to a pool that is still assembling itself.
+        std::unique_lock<std::mutex> guard(lock_);
+        started_.wait(guard, [this] {
+            return ready_.load() == static_cast<int>(threads_.size());
+        });
+    }
+
+    ~Pool()
+    {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            closing_ = true;
+        }
+        work_ready_.notify_all();
+        for (std::thread &thread : threads_)
+            thread.join();
+    }
+
+    // Decompiles every address in `work`. `apply_names` is adopted by every
+    // engine first, when given.
+    void run(const std::vector<uint64_t> &work,
+             const std::map<uint64_t, std::string> *apply_names,
+             std::map<uint64_t, FunctionResult> &results,
+             std::map<uint64_t, std::string> &names, std::set<uint64_t> *found,
+             std::string &first_error)
+    {
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            work_ = &work;
+            names_ = apply_names;
+            results_ = &results;
+            out_names_ = &names;
+            found_ = found;
+            error_ = &first_error;
+            next_.store(0);
+            outstanding_ = static_cast<int>(threads_.size());
+            generation_ += 1;
+        }
+        work_ready_.notify_all();
+        adopt(primary_);
+        consume(primary_);
+        std::unique_lock<std::mutex> guard(lock_);
+        done_.wait(guard, [this] { return outstanding_ == 0; });
+        work_ = nullptr;
+    }
+
+private:
+    void serve()
+    {
+        std::string clone_error;
+        // The engine is built here so its translator belongs to this thread.
+        std::unique_ptr<Session> engine = primary_.clone(clone_error);
+        {
+            std::lock_guard<std::mutex> guard(lock_);
+            ready_.fetch_add(1);
+        }
+        started_.notify_all();
+        uint64_t seen = 0;
+        for (;;) {
+            std::unique_lock<std::mutex> guard(lock_);
+            work_ready_.wait(guard, [&] { return closing_ || generation_ != seen; });
+            if (closing_)
+                return;
+            seen = generation_;
+            guard.unlock();
+            if (engine) {
+                adopt(*engine);
+                consume(*engine);
+            }
+            guard.lock();
+            if (--outstanding_ == 0) {
+                guard.unlock();
+                done_.notify_all();
+            }
+        }
+    }
+
+    void adopt(Session &engine)
+    {
+        if (names_ == nullptr)
+            return;
+        for (const auto &named : *names_) {
+            if (named.second.empty())
+                continue;
+            // Renaming rebuilds the function and every call site that names it,
+            // so it is only worth doing where the engine disagrees.
+            if (engine.current_name(named.first) == named.second)
+                continue;
+            std::string ignored;
+            engine.rename(named.first, named.second, false, ignored);
+        }
+    }
+
+    void consume(Session &engine)
+    {
+        for (;;) {
+            const size_t index = next_.fetch_add(1);
+            if (work_ == nullptr || index >= work_->size())
+                return;
+            const uint64_t address = (*work_)[index];
+            FunctionResult result;
+            std::string error;
+            const bool ok = engine.decompile(address, engine.name_for_entry(address), result, error);
+            std::lock_guard<std::mutex> guard(out_lock_);
+            if (!ok) {
+                if (error_->empty())
+                    *error_ = error;
+                continue;
+            }
+            if (found_ != nullptr)
+                for (uint64_t callee : result.callees)
+                    found_->insert(callee);
+            (*out_names_)[address] = result.name;
+            (*results_)[address] = std::move(result);
+        }
+    }
+
+    Session &primary_;
+    std::vector<std::thread> threads_;
+    std::mutex lock_;
+    std::mutex out_lock_;
+    std::condition_variable work_ready_;
+    std::condition_variable done_;
+    std::condition_variable started_;
+    std::atomic<int> ready_{0};
+    std::atomic<size_t> next_{0};
+    bool closing_ = false;
+    uint64_t generation_ = 0;
+    int outstanding_ = 0;
+    const std::vector<uint64_t> *work_ = nullptr;
+    const std::map<uint64_t, std::string> *names_ = nullptr;
+    std::map<uint64_t, FunctionResult> *results_ = nullptr;
+    std::map<uint64_t, std::string> *out_names_ = nullptr;
+    std::set<uint64_t> *found_ = nullptr;
+    std::string *error_ = nullptr;
+};
 
 bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained, bool comments,
                      bool explain, std::string &out, std::string &error)
@@ -1811,39 +2041,114 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     // and its callers disagree, and the disagreement is another link failure.
     const size_t kFunctionLimit = 4000;
     std::string first_error;
+    auto wanted = [&](uint64_t callee) {
+        return callee != 0 && !imports.count(callee) && in_code(callee) && !is_library(callee);
+    };
+
+    // The first pass walks the call graph a layer at a time. Everything in a
+    // layer is independent, so the layer is decompiled across as many engines
+    // as there are threads; what those functions call becomes the next layer.
+    // The call graph is walked a layer at a time. Everything in a layer is
+    // independent, so the layer goes out across the worker threads and what
+    // those functions call becomes the next layer. Taking it in layers rather
+    // than from one shared queue keeps the result the same on every run, and
+    // costs less than spreading a handful of functions over every core: each
+    // engine re-derives what its own slice calls, so more engines on the same
+    // work means more of that repeated.
+    // Where the time went, for anyone measuring the effect of a thread count.
+    const bool timing = std::getenv("ASTRAL_TIMING") != nullptr;
+    auto now = [] { return std::chrono::steady_clock::now(); };
+    auto since = [&](std::chrono::steady_clock::time_point t) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now() - t).count();
+    };
+    auto t0 = now();
     std::set<uint64_t> discovered;
-    std::vector<uint64_t> worklist(addresses.begin(), addresses.end());
-    while (!worklist.empty() && discovered.size() < kFunctionLimit) {
-        uint64_t address = worklist.back();
-        worklist.pop_back();
-        if (!discovered.insert(address).second)
-            continue;
-        FunctionResult probe;
-        std::string one_error;
-        if (!decompile(address, name_for(address), probe, one_error)) {
-            if (first_error.empty())
-                first_error = one_error;
-            discovered.erase(address);
-            continue;
+    std::map<uint64_t, FunctionResult> found_results;
+    std::map<uint64_t, std::string> settled_names;
+    const int workers = worker_count(addresses.size());
+    if (workers <= 1) {
+        // One engine walks the graph depth first: a function is decompiled
+        // right after the one that calls it, while everything that call needed
+        // is still analysed. Taking it in layers instead throws that away.
+        std::vector<uint64_t> worklist(addresses.begin(), addresses.end());
+        while (!worklist.empty() && discovered.size() < kFunctionLimit) {
+            uint64_t address = worklist.back();
+            worklist.pop_back();
+            if (!discovered.insert(address).second)
+                continue;
+            FunctionResult probe;
+            std::string one_error;
+            if (!decompile(address, name_for_entry(address), probe, one_error)) {
+                if (first_error.empty())
+                    first_error = one_error;
+                discovered.erase(address);
+                continue;
+            }
+            settled_names[address] = probe.name;
+            found_results[address] = std::move(probe);
+            for (uint64_t callee : found_results[address].callees)
+                if (wanted(callee) && !discovered.count(callee))
+                    worklist.push_back(callee);
         }
-        for (uint64_t callee : probe.callees)
-            if (callee != 0 && !discovered.count(callee) && !imports.count(callee) &&
-                in_code(callee) && !is_library(callee))
-                worklist.push_back(callee);
+    }
+    Pool pool(*this, workers);
+    if (timing)
+        std::fprintf(stderr, "pool ready %lldms\n", (long long)since(t0));
+    if (workers > 1) {
+        std::vector<uint64_t> layer;
+        for (uint64_t address : addresses)
+            if (discovered.insert(address).second)
+                layer.push_back(address);
+        while (!layer.empty() && discovered.size() < kFunctionLimit) {
+            std::set<uint64_t> callees;
+            pool.run(layer, nullptr, found_results, settled_names, &callees, first_error);
+            layer.clear();
+            for (uint64_t callee : callees)
+                if (wanted(callee) && discovered.size() < kFunctionLimit &&
+                    discovered.insert(callee).second)
+                    layer.push_back(callee);
+        }
+    }
+    if (timing)
+        std::fprintf(stderr, "pass1 %lldms (%zu functions)\n", (long long)since(t0), discovered.size());
+    auto t1 = now();
+    for (auto it = discovered.begin(); it != discovered.end();) {
+        if (found_results.count(*it) == 0)
+            it = discovered.erase(it);
+        else
+            ++it;
     }
     if (discovered.empty()) {
         error = first_error.empty() ? "nothing could be decompiled" : first_error;
         return false;
     }
-    // Experiment: lock one named address only.
+
+    // Every engine has to agree about what each function is called, or a call
+    // site prints one name and the body it reaches carries another. The
+    // helpers adopt these names as they start; this one adopts them here.
+    for (const auto &named : settled_names) {
+        if (named.second.empty())
+            continue;
+        std::string ignored;
+        rename(named.first, named.second, false, ignored);
+    }
+
+    // The second pass decompiles everything again now that the names are
+    // settled, so callers and callees agree.
     std::vector<uint64_t> ordered(discovered.begin(), discovered.end());
     std::sort(ordered.begin(), ordered.end());
+    std::map<uint64_t, FunctionResult> final_results;
+    std::map<uint64_t, std::string> final_names;
+    pool.run(ordered, &settled_names, final_results, final_names, nullptr, first_error);
+    if (timing)
+        std::fprintf(stderr, "pass2 %lldms\n", (long long)since(t1));
+    auto t2 = now();
     std::vector<FunctionResult> results;
+    results.reserve(final_results.size());
     for (uint64_t address : ordered) {
-        FunctionResult result;
-        std::string one_error;
-        if (decompile(address, name_for(address), result, one_error))
-            results.push_back(std::move(result));
+        auto it = final_results.find(address);
+        if (it != final_results.end())
+            results.push_back(std::move(it->second));
     }
     if (results.empty()) {
         error = first_error.empty() ? "nothing could be decompiled" : first_error;
@@ -1904,7 +2209,12 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         if (!sym.linkage_name.empty())
             options.data_linkage.emplace(sym.address, prefix + sym.linkage_name);
     }
+    if (timing)
+        std::fprintf(stderr, "merge %lldms\n", (long long)since(t2));
+    auto t3 = now();
     out = emit_c_unit(results, options);
+    if (timing)
+        std::fprintf(stderr, "emit %lldms\n", (long long)since(t3));
     // Define and re-point the absolute data addresses the code reads, so the
     // rebuilt program touches real arrays instead of stale image addresses.
     std::vector<std::pair<uint64_t, uint64_t>> code_ranges;

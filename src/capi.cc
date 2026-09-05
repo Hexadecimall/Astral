@@ -620,6 +620,17 @@ void astral_program_set_auto_naming(astral_program *program, int enabled)
         program->session->set_auto_naming(enabled != 0);
 }
 
+void astral_program_set_threads(astral_program *program, int count)
+{
+    if (program != nullptr)
+        program->session->set_threads(count);
+}
+
+int astral_program_threads(const astral_program *program)
+{
+    return program == nullptr ? 0 : program->session->threads();
+}
+
 int astral_program_auto_naming(const astral_program *program)
 {
     return program == nullptr ? 0 : (program->session->auto_naming() ? 1 : 0);

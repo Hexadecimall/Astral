@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 #include "printc.hh"
+
+#include <mutex>
 #include "funcdata.hh"
 
 namespace ghidra {
@@ -124,14 +126,18 @@ PrintC::PrintC(Architecture *g,const string &nm) : PrintLanguage(g,nm)
 
 {
   nullToken = "NULL";
-  
-  // Set the flip tokens
-  less_than.negate = &greater_equal;
-  less_equal.negate = &greater_than;
-  greater_than.negate = &less_equal;
-  greater_equal.negate = &less_than;
-  equal.negate = &not_equal;
-  not_equal.negate = &equal;
+
+  // The flip tokens live on the shared token table, so they are set once
+  // however many printers are built, and never while another is reading them.
+  static std::once_flag flipsSet;
+  std::call_once(flipsSet, [] {
+    less_than.negate = &greater_equal;
+    less_equal.negate = &greater_than;
+    greater_than.negate = &less_equal;
+    greater_equal.negate = &less_than;
+    equal.negate = &not_equal;
+    not_equal.negate = &equal;
+  });
 
   castStrategy = new CastStrategyC();
   resetDefaultsPrintC();
@@ -788,13 +794,13 @@ void PrintC::opReturn(const PcodeOp *op)
     nm = "halt";
     break;
   case PcodeOp::badinstruction:
-    nm = "halt_baddata";	// CPU executes bad instruction
+    nm = "haltBaddata";	// CPU executes bad instruction
     break;
   case PcodeOp::unimplemented:	// instruction is unimplemented
-    nm = "halt_unimplemented";
+    nm = "haltUnimplemented";
     break;
   case PcodeOp::missing:	// Did not analyze this instruction
-    nm = "halt_missing";
+    nm = "haltMissing";
     break;
   }
   pushOp(&function_call,op);
@@ -3317,11 +3323,11 @@ void PrintC::emitLabel(const FlowBlock *bl)
   }
   ostringstream lb;
   if (bb->isJoined())
-    lb << "joined_";
+    lb << "joined";
   else if (bb->isDuplicated())
     lb << "dup_";
   else
-    lb << "code_";
+    lb << "code";
   lb << addr.getShortcut();
   addr.printRaw(lb);
   emit->tagLabel(lb.str(),EmitMarkup::no_color,spc,off);

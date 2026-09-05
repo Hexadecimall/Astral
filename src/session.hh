@@ -7,7 +7,10 @@
 #include <map>
 #include <memory>
 #include <sstream>
+#include <functional>
+#include <condition_variable>
 #include <set>
+#include <thread>
 #include <string>
 #include <utility>
 #include <vector>
@@ -69,8 +72,12 @@ public:
 
     // Builds a session over an already-parsed image. Returns null and fills
     // `error` on failure. `language_override` may be empty.
+    // `note_prototypes` records what each mangled name says about itself in the
+    // shared knowledge base. A second engine over the same image sets it false:
+    // the facts are already there, and writing them again would race the
+    // threads reading them.
     static std::unique_ptr<Session> create(BinaryImage image, const std::string &language_override,
-                                           std::string &error);
+                                           std::string &error, bool note_prototypes = true);
 
     const BinaryImage &image() const { return image_; }
     const std::string &architecture_id() const { return archid_; }
@@ -78,6 +85,19 @@ public:
     std::string compiler_spec() const;
     bool big_endian() const;
     int pointer_size() const;
+
+    // Another session over the same image, for a second thread. Building one
+    // is cheap next to decompiling: the specifications are already parsed and
+    // each thread keeps its own translator.
+    std::unique_ptr<Session> clone(std::string &error) const;
+
+    // How many threads decompilation may use. Zero means one per core. This is
+    // per session and applies to whole-program work, where the functions are
+    // independent of each other.
+    void set_threads(int count) { threads_ = count < 0 ? 0 : count; }
+    int threads() const { return threads_; }
+    // The number actually used for a job of this size.
+    int worker_count(size_t work) const;
 
     bool add_symbol(uint64_t address, const std::string &name, bool is_function, std::string &error);
 
@@ -166,6 +186,17 @@ private:
     void analyse_function(void *funcdata, FunctionResult &out);
     void apply_learned_names();
     void apply_known_prototype(const std::string &name);
+    std::string name_for_entry(uint64_t address) const;
+    // What the engine currently calls the function at an address.
+    std::string current_name(uint64_t address) const;
+    // Decompiles every address in `work`, spreading it over worker threads.
+    // Each worker builds its own engine on its own thread, because a translator
+    // belongs to the thread that made it. `apply_names`, when given, is the set
+    // of names every engine must agree on before it starts. `names` collects
+    // what each function settled on, and callees met along the way are added to
+    // `found`.
+    class Pool;
+    int threads_ = 0;
     // Collects prototype overrides that give each printf-style call a concrete
     // signature recovered from its format string, applied to the current
     // function so its arguments come back. Built the way Ghidra's own override

@@ -357,6 +357,10 @@ void Program::rename(uint64_t address, const std::string &name, bool learn)
 
 int Program::learn_symbols() { return astral_program_learn_symbols(handle_); }
 
+void Program::set_threads(int count) { astral_program_set_threads(handle_, count); }
+
+int Program::threads() const { return astral_program_threads(handle_); }
+
 void Program::set_auto_naming(bool enabled)
 {
     astral_program_set_auto_naming(handle_, enabled ? 1 : 0);

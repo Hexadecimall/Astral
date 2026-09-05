@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 #include "sleigh_arch.hh"
+
+#include <mutex>
 #include "inject_sleigh.hh"
 
 namespace ghidra {
@@ -33,7 +35,7 @@ ElementId ELEM_DESCRIPTION = ElementId("description",233);
 ElementId ELEM_LANGUAGE = ElementId("language",234);
 ElementId ELEM_LANGUAGE_DEFINITIONS = ElementId("language_definitions",235);
 
-map<int4,Sleigh> SleighArchitecture::translators;
+thread_local map<int4,Sleigh> SleighArchitecture::translators;
 vector<LanguageDescription> SleighArchitecture::description;
 
 FileManage SleighArchitecture::specpaths; // Global specfile manager
@@ -451,13 +453,21 @@ SleighArchitecture::SleighArchitecture(const string &fname,const string &targ,os
 void SleighArchitecture::collectSpecFiles(ostream &errs)
 
 {
-  if (!description.empty()) return; // Have we already collected before
-
-  vector<string> testspecs;
-  vector<string>::iterator iter;
-  specpaths.matchList(testspecs,".ldefs",true);
-  for(iter=testspecs.begin();iter!=testspecs.end();++iter)
-    loadLanguageDescription(*iter,errs);
+  // The descriptions are shared by every architecture in the process, and one
+  // is built per thread, so the scan runs exactly once however many ask for it.
+  static std::once_flag collected;
+  static string failure;
+  std::call_once(collected, [&errs] {
+    ostringstream problems;
+    vector<string> testspecs;
+    vector<string>::iterator iter;
+    specpaths.matchList(testspecs,".ldefs",true);
+    for(iter=testspecs.begin();iter!=testspecs.end();++iter)
+      loadLanguageDescription(*iter,problems);
+    failure = problems.str();
+  });
+  if (!failure.empty())
+    errs << failure;
 }
 
 /// \param encoder is the stream encoder

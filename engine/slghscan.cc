@@ -1156,7 +1156,7 @@ struct FileStreamState {
   FILE *file;                   // The NEW file stream
 };
 
-extern SleighCompile *slgh;
+extern thread_local SleighCompile *slgh;
 int4 last_preproc;   // lex state before last preprocessing erasure
 int4 actionon;       // whether '&' '|' and '^' are treated as actionon in pattern section
 int4 withsection = 0; // whether we are between the 'with' keyword and its open brace '{'

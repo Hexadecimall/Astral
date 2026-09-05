@@ -483,7 +483,7 @@ public:
 
 ostream& operator<<(ostream &os, const ConsistencyChecker::OptimizeRecord &rec);
 
-extern SleighCompile *slgh;		///< A global reference to the SLEIGH compiler accessible to the parse functions
+extern thread_local SleighCompile *slgh;		///< A global reference to the SLEIGH compiler accessible to the parse functions
 extern int yydebug;			///< Debug state for the SLEIGH parse functions
 
 } // End namespace ghidra

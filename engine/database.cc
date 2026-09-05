@@ -1752,6 +1752,19 @@ Symbol *Scope::addUnionFacetSymbol(const string &nm,Datatype *dt,int4 fieldNum,c
 /// \param sym is the given Symbol to name
 /// \param base is an index (which may get updated) used to uniquify the name
 /// \param vn is an optional (may be null) Varnode representative of the Symbol
+
+/// Append \b word to \b s with its first letter upper-cased, so a generated
+/// name reads as camelCase rather than running two words together.
+static void appendCapitalized(ostream &s,const string &word)
+
+{
+  if (word.empty()) return;
+  string copy(word);
+  copy[0] = toupper((unsigned char)copy[0]);
+  s << copy;
+}
+
+
 /// \return the default name
 string Scope::buildDefaultName(Symbol *sym,int4 &base,Varnode *vn) const
 
@@ -2440,16 +2453,16 @@ string ScopeInternal::buildVariableName(const Address &addr,
 
   if ((flags & Varnode::unaffected)!=0) {
     if ((flags & Varnode::return_address)!=0)
-      s << "unaff_retaddr";
+      s << "unaffRetaddr";
     else {
       string unaffname;
       unaffname = glb->translate->getRegisterName(addr.getSpace(),addr.getOffset(),sz);
       if (unaffname.empty()) {
-	s << "unaff_";
+	s << "unaff";
 	s << setw(8) << setfill('0') << hex << addr.getOffset();
       }
       else
-	s << "unaff_" << unaffname;
+	s << "unaff"; appendCapitalized(s,unaffname);
     }
   }
   else if ((flags & Varnode::persist)!=0) {
@@ -2471,14 +2484,14 @@ string ScopeInternal::buildVariableName(const Address &addr,
     string regname;
     regname = glb->translate->getRegisterName(addr.getSpace(),addr.getOffset(),sz);
     if (regname.empty()) {
-      s << "in_" << addr.getSpace()->getName() << '_';
+      s << "in"; appendCapitalized(s,addr.getSpace()->getName());
       s << setw(8) << setfill('0') << hex << addr.getOffset();
     }
     else
-      s << "in_" << regname;
+      s << "in"; appendCapitalized(s,regname);
   }
   else if ((flags & Varnode::input)!=0) { // Regular parameter
-    s << "param_" << dec << index;
+    s << "param" << dec << index;
   }
   else if ((flags & Varnode::addrtied)!=0) {
     if (ct != (Datatype *)0)
@@ -2491,12 +2504,12 @@ string ScopeInternal::buildVariableName(const Address &addr,
   }
   else if ((flags & Varnode::indirect_creation)!=0) {
     string regname;
-    s << "extraout_";
+    s << "extraout";
     regname = glb->translate->getRegisterName(addr.getSpace(),addr.getOffset(),sz);
     if (!regname.empty())
-      s << regname;
+      appendCapitalized(s,regname);
     else
-      s << "var";
+      s << "Var";
   }
   else {			// Some sort of local variable
     if (ct != (Datatype *)0)

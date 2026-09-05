@@ -518,5 +518,28 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
+# ---------------------------------------------------------------- threading
+#
+# Whole-program decompilation can run several engines at once. A given thread
+# count has to give the same answer every time, and asking for one thread has
+# to give what a build with no threading at all would.
+one=$("$astral" decompile --all --threads 1 "$work/host" 2>/dev/null)
+again=$("$astral" decompile --all --threads 1 "$work/host" 2>/dev/null)
+check "one engine is reproducible" "yes" "$([[ "$one" == "$again" ]] && echo yes || echo no)"
+
+many=$("$astral" decompile --all --threads 4 "$work/host" 2>/dev/null)
+many_again=$("$astral" decompile --all --threads 4 "$work/host" 2>/dev/null)
+check "four engines are reproducible" "yes" \
+    "$([[ "$many" == "$many_again" ]] && echo yes || echo no)"
+
+# However the work was divided, every function still has to come out.
+one_bodies=$(printf '%s' "$one" | grep -c '^[a-zA-Z_].*)$' || true)
+many_bodies=$(printf '%s' "$many" | grep -c '^[a-zA-Z_].*)$' || true)
+check "the same functions whatever the thread count" "yes" \
+    "$([[ "$one_bodies" == "$many_bodies" ]] && echo yes || echo no)"
+
+check "a bad thread count is refused" "wants a count" \
+    "$("$astral" decompile --all --threads nonsense "$work/host" 2>&1)"
+
 printf '\n%d passed, %d failed, %d known-gaps\n' "$passed" "$failed" "$gaps"
 [[ $failed -eq 0 ]]

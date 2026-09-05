@@ -106,7 +106,11 @@ public:
 /// Generally a \e language \e id (i.e. x86:LE:64:default) is provided, then this
 /// object is able to automatically load in configuration and construct the Translate object.
 class SleighArchitecture : public Architecture {
-  static map<int4,Sleigh> translators;		///< Map from language index to instantiated translators
+  /// Map from language index to instantiated translators. One per thread: a
+  /// translator is rebound to its architecture's loader and context when it is
+  /// handed out, so sharing one between threads would have each rebinding the
+  /// other's.
+  static thread_local map<int4,Sleigh> translators;
   static vector<LanguageDescription> description;	///< List of languages we know about
   int4 languageindex;					///< Index (within LanguageDescription array) of the active language
   string filename;					///< Name of active load-image file

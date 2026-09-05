@@ -281,6 +281,16 @@ ASTRAL_API int astral_knowledge_forget(const char *name);
 ASTRAL_API astral_status astral_knowledge_forget_all(void);
 
 /* Whether to name placeholders from evidence in the binary. On by default. */
+/* How many threads whole-program decompilation may use. Zero means one per
+ * core, one means no extra threads. Each thread runs its own engine over the
+ * same image, so the work is spread but each engine re-derives what its own
+ * share calls: expect a good deal less than one core's worth of gain per
+ * thread. Output for a given count is reproducible, but two different counts
+ * can differ slightly, because what one engine learns about a function is not
+ * available to another. */
+ASTRAL_API void astral_program_set_threads(astral_program *program, int count);
+ASTRAL_API int astral_program_threads(const astral_program *program);
+
 ASTRAL_API void astral_program_set_auto_naming(astral_program *program, int enabled);
 ASTRAL_API int astral_program_auto_naming(const astral_program *program);
 

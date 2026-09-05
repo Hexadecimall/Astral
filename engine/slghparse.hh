@@ -245,7 +245,7 @@ typedef union SLEIGHSTYPE SLEIGHSTYPE;
 #endif
 
 
-extern SLEIGHSTYPE sleighlval;
+extern thread_local SLEIGHSTYPE sleighlval;
 
 int sleighparse (void);
 

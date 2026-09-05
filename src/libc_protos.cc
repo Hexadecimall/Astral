@@ -18,7 +18,9 @@
 namespace astral_internal {
 namespace {
 
-int g_pointer_bytes = 8;
+// The pointer width the size_types helpers assume. Per thread, because two
+// programs of different widths can be open at once.
+thread_local int g_pointer_bytes = 8;
 
 // Replaces the pointer-sized-integer placeholders with real core type names.
 // The decompiler's C parser resolves types through the program's type factory,

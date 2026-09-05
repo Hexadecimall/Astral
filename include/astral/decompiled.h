@@ -23,13 +23,13 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ASTRAL: ASTRAL_INLINE ASTRAL_NORETURN ; ; */
+/* ASTRAL: astralInline astralNoreturn ; ; */
 #if defined(__GNUC__) || defined(__clang__)
-#  define ASTRAL_INLINE static inline __attribute__((always_inline, unused))
-#  define ASTRAL_NORETURN __attribute__((noreturn))
+#  define astralInline static inline __attribute__((always_inline, unused))
+#  define astralNoreturn __attribute__((noreturn))
 #else
-#  define ASTRAL_INLINE static inline
-#  define ASTRAL_NORETURN
+#  define astralInline static inline
+#  define astralNoreturn
 #endif
 
 /* The decompiler names integer types by byte width. An `undefined` width is a
@@ -95,35 +95,35 @@ typedef void code;
  * the widths a function uses; the fixed ones live here. */
 
 /* Execution reached an instruction the disassembler could not decode. */
-/* ASTRAL: halt_baddata ; ; ASTRAL_INLINE */
-ASTRAL_NORETURN ASTRAL_INLINE void halt_baddata(void)
+/* ASTRAL: haltBaddata ; ; astralInline */
+astralNoreturn astralInline void haltBaddata(void)
 {
     for (;;) {
     }
 }
 
 /* A software interrupt, whose effect depends on the target. */
-/* ASTRAL: swi ; ; ASTRAL_INLINE */
-ASTRAL_INLINE void swi(int number) { (void)number; }
+/* ASTRAL: swi ; ; astralInline */
+astralInline void swi(int number) { (void)number; }
 
 /* A trap/breakpoint instruction the disassembler could not attach meaning to.
  * The recovered code sometimes calls through its result, so it returns a null
  * address rather than nothing. */
-/* ASTRAL: SoftwareBreakpoint ; ; ASTRAL_INLINE */
-ASTRAL_INLINE long long SoftwareBreakpoint() { return 0; }
+/* ASTRAL: SoftwareBreakpoint ; ; astralInline */
+astralInline long long SoftwareBreakpoint() { return 0; }
 
 /* NAN is a macro in math.h; the decompiler means the predicate. */
-/* ASTRAL: NAN ; ; ASTRAL_INLINE */
+/* ASTRAL: NAN ; ; astralInline */
 #ifdef NAN
 #  undef NAN
 #endif
-ASTRAL_INLINE int NAN(double value) { return value != value; }
+astralInline int NAN(double value) { return value != value; }
 
-/* ASTRAL: ABS ; ; ASTRAL_INLINE */
-ASTRAL_INLINE double ABS(double value) { return value < 0 ? -value : value; }
+/* ASTRAL: ABS ; ; astralInline */
+astralInline double ABS(double value) { return value < 0 ? -value : value; }
 
-/* ASTRAL: SQRT ; ; ASTRAL_INLINE */
-ASTRAL_INLINE double SQRT(double value)
+/* ASTRAL: SQRT ; ; astralInline */
+astralInline double SQRT(double value)
 {
     /* Newton's method, so this stays free of a libm dependency. */
     if (value <= 0)
@@ -134,37 +134,37 @@ ASTRAL_INLINE double SQRT(double value)
     return guess;
 }
 
-/* ASTRAL: CEIL ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE double CEIL(double value)
+/* ASTRAL: CEIL ; stdint.h ; astralInline */
+astralInline double CEIL(double value)
 {
     double truncated = (double)(int64_t)value;
     return truncated < value ? truncated + 1 : truncated;
 }
 
-/* ASTRAL: FLOOR ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE double FLOOR(double value)
+/* ASTRAL: FLOOR ; stdint.h ; astralInline */
+astralInline double FLOOR(double value)
 {
     double truncated = (double)(int64_t)value;
     return truncated > value ? truncated - 1 : truncated;
 }
 
-/* ASTRAL: ROUND ; ; ASTRAL_INLINE CEIL FLOOR */
-ASTRAL_INLINE double ROUND(double value)
+/* ASTRAL: ROUND ; ; astralInline CEIL FLOOR */
+astralInline double ROUND(double value)
 {
     return value < 0 ? CEIL(value - 0.5) : FLOOR(value + 0.5);
 }
 
-/* ASTRAL: TRUNC ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE double TRUNC(double value) { return (double)(int64_t)value; }
+/* ASTRAL: TRUNC ; stdint.h ; astralInline */
+astralInline double TRUNC(double value) { return (double)(int64_t)value; }
 
-/* ASTRAL: INT2FLOAT ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE double INT2FLOAT(int64_t value) { return (double)value; }
+/* ASTRAL: INT2FLOAT ; stdint.h ; astralInline */
+astralInline double INT2FLOAT(int64_t value) { return (double)value; }
 
-/* ASTRAL: FLOAT2FLOAT ; ; ASTRAL_INLINE */
-ASTRAL_INLINE double FLOAT2FLOAT(double value) { return value; }
+/* ASTRAL: FLOAT2FLOAT ; ; astralInline */
+astralInline double FLOAT2FLOAT(double value) { return value; }
 
-/* ASTRAL: POPCOUNT ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE int POPCOUNT(uint64_t value)
+/* ASTRAL: POPCOUNT ; stdint.h ; astralInline */
+astralInline int POPCOUNT(uint64_t value)
 {
     int count = 0;
     while (value != 0) {
@@ -174,8 +174,8 @@ ASTRAL_INLINE int POPCOUNT(uint64_t value)
     return count;
 }
 
-/* ASTRAL: LZCOUNT ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE int LZCOUNT(uint64_t value)
+/* ASTRAL: LZCOUNT ; stdint.h ; astralInline */
+astralInline int LZCOUNT(uint64_t value)
 {
     int count = 0;
     for (int bit = 63; bit >= 0; --bit) {
@@ -194,32 +194,32 @@ ASTRAL_INLINE int LZCOUNT(uint64_t value)
  * integer, so the bytes are copied directly. A value narrower than the slot is
  * zero-filled and a wider one truncated, matching how the decompiler models the
  * little-endian machines this comes up on. */
-/* ASTRAL: ASTRAL_STORE ; string.h ; */
-#define ASTRAL_STORE(variable, offset, width, value)                                          \
+/* ASTRAL: astralStore ; string.h ; */
+#define astralStore(variable, offset, width, value)                                          \
     do {                                                                                      \
-        __typeof__(value) astral_value_ = (value);                                            \
-        unsigned char astral_bytes_[(width) > sizeof(astral_value_) ? (width)                 \
-                                                                    : sizeof(astral_value_)]; \
-        memset(astral_bytes_, 0, sizeof astral_bytes_);                                       \
-        memcpy(astral_bytes_, &astral_value_, sizeof astral_value_);                          \
-        memcpy((unsigned char *)&(variable) + (offset), astral_bytes_, (width));              \
+        __typeof__(value) astralValue = (value);                                            \
+        unsigned char astralBytes[(width) > sizeof(astralValue) ? (width)                 \
+                                                                    : sizeof(astralValue)]; \
+        memset(astralBytes, 0, sizeof astralBytes);                                       \
+        memcpy(astralBytes, &astralValue, sizeof astralValue);                          \
+        memcpy((unsigned char *)&(variable) + (offset), astralBytes, (width));              \
     } while (0)
 
-/* ASTRAL: INSERT ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE uint64_t INSERT(uint64_t into, uint64_t value, int position, int width)
+/* ASTRAL: INSERT ; stdint.h ; astralInline */
+astralInline uint64_t INSERT(uint64_t into, uint64_t value, int position, int width)
 {
     uint64_t mask = width >= 64 ? ~(uint64_t)0 : (((uint64_t)1 << width) - 1);
     return (into & ~(mask << position)) | ((value & mask) << position);
 }
 
-/* ASTRAL: ZPULL ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE uint64_t ZPULL(uint64_t value, int shift)
+/* ASTRAL: ZPULL ; stdint.h ; astralInline */
+astralInline uint64_t ZPULL(uint64_t value, int shift)
 {
     return shift >= 64 ? 0 : value >> shift;
 }
 
-/* ASTRAL: SPULL ; stdint.h ; ASTRAL_INLINE */
-ASTRAL_INLINE int64_t SPULL(int64_t value, int shift)
+/* ASTRAL: SPULL ; stdint.h ; astralInline */
+astralInline int64_t SPULL(int64_t value, int shift)
 {
     return shift >= 64 ? (value < 0 ? -1 : 0) : value >> shift;
 }

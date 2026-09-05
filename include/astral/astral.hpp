@@ -187,6 +187,13 @@ public:
     void rename(uint64_t address, const std::string &name, bool learn = false);
     // Records every named function against its fingerprint. Returns how many.
     int learn_symbols();
+    // How many threads whole-program decompilation may use. Zero means one per
+    // core, one means no extra threads. Each thread runs its own engine over
+    // the same image, so the gain per thread is well short of a core, and two
+    // different counts can produce slightly different output.
+    void set_threads(int count);
+    int threads() const;
+
     // Whether names are recovered from evidence rather than left as addresses.
     void set_auto_naming(bool enabled);
     bool auto_naming() const;

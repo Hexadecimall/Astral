@@ -34,9 +34,9 @@ const char *const RUNTIME_NAMES[] = {
     "xunknown1", "xunknown2", "xunknown4", "xunknown8",
     "float4", "float8", "float10", "float16", "wchar2", "wchar4", "code",
     "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-    "halt_baddata", "swi", "NAN", "ABS", "SQRT", "CEIL", "FLOOR", "ROUND", "TRUNC",
+    "haltBaddata", "swi", "NAN", "ABS", "SQRT", "CEIL", "FLOOR", "ROUND", "TRUNC",
     "INT2FLOAT", "FLOAT2FLOAT", "POPCOUNT", "LZCOUNT", "INSERT", "ZPULL", "SPULL",
-    "ASTRAL_STORE", "ASTRAL_INLINE", "ASTRAL_NORETURN", "memcpy", "memset",
+    "astralStore", "astralInline", "astralNoreturn", "memcpy", "memset",
     "SoftwareBreakpoint"};
 
 // Library functions whose real declaration lives in a standard header. Naming
@@ -247,14 +247,14 @@ bool make_helper(const std::string &name, Helper &out, bool &wants_int128)
             const std::string u = int_type(width, false);
             const std::string i = int_type(width, true);
             if (stem == "CARRY") {
-                s << "ASTRAL_INLINE int " << name << "(" << u << " a, " << u << " b)\n"
+                s << "astralInline int " << name << "(" << u << " a, " << u << " b)\n"
                   << "{\n    return (" << u << ")(a + b) < a;\n}\n";
             } else if (stem == "SCARRY") {
-                s << "ASTRAL_INLINE int " << name << "(" << i << " a, " << i << " b)\n"
+                s << "astralInline int " << name << "(" << i << " a, " << i << " b)\n"
                   << "{\n    " << i << " sum = (" << i << ")((" << u << ")a + (" << u << ")b);\n"
                   << "    return ((a < 0) == (b < 0)) && ((sum < 0) != (a < 0));\n}\n";
             } else {
-                s << "ASTRAL_INLINE int " << name << "(" << i << " a, " << i << " b)\n"
+                s << "astralInline int " << name << "(" << i << " a, " << i << " b)\n"
                   << "{\n    " << i << " diff = (" << i << ")((" << u << ")a - (" << u << ")b);\n"
                   << "    return ((a < 0) != (b < 0)) && ((diff < 0) != (a < 0));\n}\n";
             }
@@ -273,19 +273,19 @@ bool make_helper(const std::string &name, Helper &out, bool &wants_int128)
             const int total = a + b;
             note(total);
             const std::string rt = int_type(total, false);
-            s << "ASTRAL_INLINE " << rt << " " << name << "(" << int_type(a, false) << " high, "
+            s << "astralInline " << rt << " " << name << "(" << int_type(a, false) << " high, "
               << int_type(b, false) << " low)\n"
               << "{\n    return ((" << rt << ")high << " << (8 * b) << ") | (" << rt << ")low;\n}\n";
         } else if (stem == "SUB") {
-            s << "ASTRAL_INLINE " << int_type(b, false) << " " << name << "("
+            s << "astralInline " << int_type(b, false) << " " << name << "("
               << int_type(a, false) << " value, int offset)\n"
               << "{\n    return (" << int_type(b, false) << ")(value >> (8 * offset));\n}\n";
         } else if (stem == "ZEXT") {
-            s << "ASTRAL_INLINE " << int_type(b, false) << " " << name << "("
+            s << "astralInline " << int_type(b, false) << " " << name << "("
               << int_type(a, false) << " value)\n"
               << "{\n    return (" << int_type(b, false) << ")value;\n}\n";
         } else { // SEXT
-            s << "ASTRAL_INLINE " << int_type(b, true) << " " << name << "("
+            s << "astralInline " << int_type(b, true) << " " << name << "("
               << int_type(a, true) << " value)\n"
               << "{\n    return (" << int_type(b, true) << ")value;\n}\n";
         }
@@ -324,7 +324,7 @@ const char *piece_type(int bytes)
 
 // Ghidra writes an access to part of a variable as `value._8_4_`, meaning the
 // four bytes at offset eight. C has no such syntax. A read becomes a load
-// through the variable's address; a write becomes ASTRAL_STORE, which copies
+// through the variable's address; a write becomes astralStore, which copies
 // bytes rather than converting the value.
 // `code *` is a pointer to something the decompiler could not describe, so a
 // call through one is cast to a function type at the point of the call. That
@@ -380,7 +380,7 @@ std::string rewrite_pieces(const std::string &source)
         size_t semicolon = is_store ? source.find(';', probe) : std::string::npos;
         if (is_store && semicolon != std::string::npos) {
             std::string value = source.substr(probe + 1, semicolon - probe - 1);
-            out += "ASTRAL_STORE(" + match[1].str() + ", " + std::to_string(offset) + ", " +
+            out += "astralStore(" + match[1].str() + ", " + std::to_string(offset) + ", " +
                    std::to_string(width) + "," + rewrite_pieces(value) + ")";
             last = semicolon;
             continue;
@@ -1671,6 +1671,17 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
     std::map<std::string, std::string> externals;
     std::map<std::string, std::string> definitions; // data globals given a value
     std::set<std::string> headers;
+    // Two functions can reach the same piece of data through differently
+    // spelled names - more so when they were recovered by separate engines -
+    // and those names are later tidied into one. Keying a data declaration by
+    // the address it stands for keeps that one identifier declared once.
+    auto key_for = [](const Declaration &declaration) {
+        if (declaration.is_function || declaration.address == 0)
+            return declaration.name;
+        char at[32];
+        std::snprintf(at, sizeof at, "@%llx", static_cast<unsigned long long>(declaration.address));
+        return std::string(at);
+    };
     for (const FunctionResult &function : functions) {
         for (const Declaration &declaration : function.externals) {
             if (defined.find(declaration.name) != defined.end())
@@ -1689,21 +1700,21 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             // A stack-frame pseudo-symbol the decompiler leaked has no address
             // and no real storage, but still needs a definition to link.
             if (!declaration.is_function && declaration.name.rfind("stack", 0) == 0 &&
-                definitions.find(declaration.name) == definitions.end()) {
+                definitions.find(key_for(declaration)) == definitions.end()) {
                 std::string decl = declaration.text;
                 const std::string kw = "extern ";
                 if (decl.compare(0, kw.size(), kw) == 0)
                     decl.erase(0, kw.size());
                 if (!decl.empty() && decl.back() == ';')
                     decl.pop_back();
-                definitions.emplace(declaration.name,
+                definitions.emplace(key_for(declaration),
                                     standardize_types(decl, used_stdint) + " = 0;");
                 continue;
             }
             if (!declaration.is_function) {
                 auto init = options.data_init.find(declaration.address);
                 if (init != options.data_init.end() &&
-                    definitions.find(declaration.name) == definitions.end()) {
+                    definitions.find(key_for(declaration)) == definitions.end()) {
                     std::string decl = declaration.text; // "extern <type-and-name>;"
                     const std::string kw = "extern ";
                     if (decl.compare(0, kw.size(), kw) == 0)
@@ -1755,12 +1766,12 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                                 externals.emplace(real,
                                                   standardize_types(size_types_for(proto), used_stdint));
                         }
-                        definitions.emplace(declaration.name, decl + " = (void *)" + real + ";");
+                        definitions.emplace(key_for(declaration), decl + " = (void *)" + real + ";");
                         continue;
                     }
                     auto linkage = options.data_linkage.find(declaration.address);
                     if (!real_global.empty()) {
-                        definitions.emplace(declaration.name,
+                        definitions.emplace(key_for(declaration),
                                             decl + " = (void *)&" + real_global + ";");
                     } else if (linkage != options.data_linkage.end()) {
                         // The slot holds the address of an object another
@@ -1768,12 +1779,17 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                         // reaches it from C without spelling the mangling in
                         // the identifier.
                         std::string object = declaration.name + "Object";
-                        definitions.emplace(declaration.name,
+                        definitions.emplace(key_for(declaration),
                                             "extern unsigned char " + object + "[] __asm__(\"" +
                                                 linkage->second + "\");\n" + decl + " = (void *)" +
                                                 object + ";");
                     } else if (data_pointer && named_import) {
-                        std::string backing = "BACK_" + declaration.name;
+                        // camelCase, like every other name Astral makes up.
+                        std::string tail = declaration.name;
+                        if (!tail.empty())
+                            tail[0] = static_cast<char>(std::toupper(
+                                static_cast<unsigned char>(tail[0])));
+                        std::string backing = "backing" + tail;
                         definitions.emplace(
                             declaration.name,
                             "static unsigned char " + backing + "[64] = {0};\n" + decl +
@@ -1782,7 +1798,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                         char value[32];
                         std::snprintf(value, sizeof value, "0x%llxULL",
                                       static_cast<unsigned long long>(init->second));
-                        definitions.emplace(declaration.name, decl + " = " + value + ";");
+                        definitions.emplace(key_for(declaration), decl + " = " + value + ";");
                     }
                     continue;
                 }
@@ -1806,7 +1822,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                         text.pop_back();
                         text += " __asm__(\"" + linkage->second + "\");";
                     }
-                    externals.emplace(declaration.name, text);
+                    externals.emplace(key_for(declaration), text);
                     continue;
                 }
             }
@@ -1818,7 +1834,7 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                     text += " __asm__(\"" + linkage->second + "\");";
                 }
             }
-            externals.emplace(declaration.name, text);
+            externals.emplace(key_for(declaration), text);
         }
     }
 
@@ -1860,10 +1876,10 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             for (const Identifier &identifier : scan_identifiers(function.signature_real))
                 mentioned.insert(identifier.name);
 
-        // The generated width-specific helpers are written with ASTRAL_INLINE,
+        // The generated width-specific helpers are written with astralInline,
         // so asking for one asks for that too.
         if (!helpers.empty())
-            mentioned.insert("ASTRAL_INLINE");
+            mentioned.insert("astralInline");
 
         // A piece may pull in others, so keep going until nothing new appears.
         bool grew = true;
@@ -1925,6 +1941,10 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             out << entry.second;
     }
 
+    // A definition supersedes a declaration of the same thing: keeping both
+    // lets one function's idea of the type contradict another's.
+    for (const auto &entry : definitions)
+        externals.erase(entry.first);
     if (!externals.empty()) {
         out << '\n';
         for (const auto &entry : externals)

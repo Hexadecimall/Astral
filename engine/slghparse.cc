@@ -98,7 +98,7 @@ extern int sleighlex(void);
 
 namespace ghidra {
 
-extern SleighCompile *slgh;
+extern thread_local SleighCompile *slgh;
 extern int4 actionon;
 extern int sleighdebug;
 extern int sleigherror(const char *str );
@@ -2103,12 +2103,12 @@ yydestruct (const char *yymsg,
 
 
 /* Lookahead token kind.  */
-int yychar;
+thread_local int yychar;
 
 /* The semantic value of the lookahead symbol.  */
-YYSTYPE yylval;
+thread_local YYSTYPE yylval;
 /* Number of syntax errors so far.  */
-int yynerrs;
+thread_local int yynerrs;
 
 
 

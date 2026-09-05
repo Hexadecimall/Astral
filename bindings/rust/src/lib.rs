@@ -455,6 +455,18 @@ impl Program {
     }
 
     /// Whether to name placeholders from evidence in the binary.
+    /// How many threads whole-program decompilation may use. Zero means one
+    /// per core, one means no extra threads. Each thread runs its own engine
+    /// over the same image, so the gain per thread is well short of a core,
+    /// and two different counts can produce slightly different output.
+    pub fn set_threads(&mut self, count: i32) {
+        unsafe { sys::astral_program_set_threads(self.handle, count) };
+    }
+
+    pub fn threads(&self) -> i32 {
+        unsafe { sys::astral_program_threads(self.handle) }
+    }
+
     pub fn set_auto_naming(&mut self, enabled: bool) {
         unsafe { sys::astral_program_set_auto_naming(self.handle, if enabled { 1 } else { 0 }) };
     }

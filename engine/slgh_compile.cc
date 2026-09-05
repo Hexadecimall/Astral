@@ -22,7 +22,7 @@ extern int sleighlex_destroy(void);
 
 namespace ghidra {
 
-SleighCompile *slgh;		// Global pointer to sleigh object for use with parser
+thread_local SleighCompile *slgh;	// Per-thread pointer to the sleigh object the parser is filling
 #ifdef YYDEBUG
 extern int sleighdebug;		// Global debugging state for parser
 #endif

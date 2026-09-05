@@ -52,6 +52,8 @@ pub struct Options {
     pub why: bool,
     pub raw_names: bool,
     pub c_options: astral::COptions,
+    /// Threads for whole-program decompilation. None means one per core.
+    pub threads: Option<i32>,
     pub disassemble: usize,
     pub pcode: usize,
 }
@@ -74,6 +76,7 @@ impl Default for Options {
             why: false,
             raw_names: false,
             c_options: astral::COptions::default(),
+            threads: None,
             disassemble: 0,
             pcode: 0,
         }
@@ -143,6 +146,16 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
             "-e" | "--entry" => options.addresses.clear(),
             "-o" | "--output" => options.output = Some(value("--output", &mut index)?),
             "--tui" => options.tui = true,
+            "-j" | "--threads" => {
+                let text = value("--threads", &mut index)?;
+                match text.parse::<i32>() {
+                    Ok(n) if n >= 0 => options.threads = Some(n),
+                    _ => {
+                        error(&format!("--threads wants a count, not {text}"));
+                        return Err(2);
+                    }
+                }
+            }
             "--color" | "--colour" => {
                 options.color = match value("--color", &mut index)?.as_str() {
                     "auto" => ColorMode::Auto,

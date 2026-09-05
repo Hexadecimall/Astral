@@ -36,6 +36,9 @@ fn open(options: &Options) -> Option<Opened> {
             return None;
         }
     };
+    if let Some(count) = options.threads {
+        program.set_threads(count);
+    }
     if options.raw_names {
         program.set_auto_naming(false);
     }

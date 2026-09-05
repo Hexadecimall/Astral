@@ -155,6 +155,8 @@ extern "C" {
         name: *const c_char,
         learn: c_int,
     ) -> c_int;
+    pub fn astral_program_set_threads(program: *mut astral_program, count: c_int);
+    pub fn astral_program_threads(program: *const astral_program) -> c_int;
     pub fn astral_program_set_auto_naming(program: *mut astral_program, enabled: c_int);
     pub fn astral_program_auto_naming(program: *const astral_program) -> c_int;
 

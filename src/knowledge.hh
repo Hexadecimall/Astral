@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -57,6 +58,7 @@ public:
     // what a mangled C++ name says about its own signature.
     void note_prototype(const std::string &name, const std::string &declaration)
     {
+        std::lock_guard<std::mutex> guard(writes_);
         protos_[name] = declaration;
     }
     std::string header_for(const std::string &name) const;
@@ -113,6 +115,10 @@ private:
     std::set<uint32_t> lengths_;
     std::string user_path_;
     size_t learned_ = 0;
+    // Guards the mutating paths. Reading is unguarded and is only safe while
+    // nothing is writing, which is why sessions are built before any parallel
+    // decompilation starts rather than alongside it.
+    std::mutex writes_;
     bool loaded_ = false;
 };
 
