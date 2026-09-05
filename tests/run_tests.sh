@@ -546,6 +546,29 @@ if [ -n "$corpus_one" ] && [ -x "$corpus_one" ]; then
     check "the calls it made are reported"            "called:" "$emu"
 fi
 
+# ------------------------------------------------------ crap ya dont need
+#
+# The least useful decompiler in existence, and the claim it makes is the one
+# claim it can keep perfectly: what comes back out is the program that went in.
+if [ -f "$work/host" ]; then
+    "$astral" crap-ya-dont-need binary "$work/host" -o "$work/host.binary" >/dev/null 2>&1
+    lines=$(wc -l < "$work/host.binary" | tr -d ' ')
+    bytes=$(wc -c < "$work/host" | tr -d ' ')
+    check "binary: a line for every byte, and two to explain itself" \
+        "$((bytes + 2))" "$lines"
+    "$astral" crap-ya-dont-need binary-compile "$work/host.binary" -o "$work/host.again" \
+        >/dev/null 2>&1
+    if cmp -s "$work/host" "$work/host.again"; then
+        printf 'ok   binary: it compiles back to the same bytes\n'
+        passed=$((passed + 1))
+    else
+        printf 'FAIL binary: it compiles back to the same bytes\n'
+        failed=$((failed + 1))
+    fi
+    check "binary: and the program still runs" "$("$work/host" >/dev/null; echo $?)" \
+        "$("$work/host.again" >/dev/null; echo $?)"
+fi
+
 # ---------------------------------------------------------------- managed code
 #
 # A .NET assembly holds CIL and its own metadata, not instructions for any

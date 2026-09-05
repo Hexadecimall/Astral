@@ -8,6 +8,7 @@
 // path, so there is nothing to keep in step and nothing to lose.
 
 mod contribute;
+mod crap;
 mod debug;
 mod help;
 mod knowledge;
@@ -52,6 +53,7 @@ fn dispatch(arguments: &[String]) -> i32 {
         }
         "update" => update::run_command(rest),
         "sleigh" => sleigh::run(rest),
+        "crap-ya-dont-need" => crap::run(rest),
         "debug" => debug::run(rest),
         "knowledge" => knowledge::run(rest),
         "learn" => learn::run(rest),
@@ -87,6 +89,7 @@ fn topic(wanted: &str) -> i32 {
         "contribute" | "ctb" => contribute::usage(Stream::Out),
         "update" => update::usage(Stream::Out),
         "sleigh" => sleigh::usage(Stream::Out),
+        "crap-ya-dont-need" => crap::usage(Stream::Out),
         _ => {
             error(&format!("no such command '{wanted}'\n"));
             help::usage(Stream::Err)
