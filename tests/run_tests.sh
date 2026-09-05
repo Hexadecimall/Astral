@@ -518,6 +518,32 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
+# ---------------------------------------------------------------- managed code
+#
+# A .NET assembly holds CIL and its own metadata, not instructions for any
+# processor. It states the name of every type, method and string, so what comes
+# back should read as the source rather than as anything inferred.
+managed=$(ls "$HOME"/crackme-csharp/bin/Release/*/*.dll 2>/dev/null | head -1)
+if [ -n "$managed" ] && [ -f "$managed" ]; then
+    cs=$("$astral" decompile "$managed" 2>/dev/null)
+    check "a managed assembly is recognised"  ".NET assembly" "$cs"
+    check "the names come from the file"      "SuperSecret"   "$cs"
+    check "the strings it loads are readable" "secret key"    "$cs"
+    check "a call becomes the C that does it" "printf"        "$cs"
+    check "comparing strings becomes strcmp"  "strcmp"        "$cs"
+    check "the entry point becomes main"      "int main(void)" "$cs"
+
+    # The point of writing C is that it builds and behaves the same.
+    printf '%s' "$cs" > "$work/managed.c"
+    if cc -w -o "$work/managed" "$work/managed.c" 2>/dev/null; then
+        check "the recovered C compiles" "yes" "yes"
+        check "and answers a wrong key the same way" "Denied" \
+            "$(printf 'nope\n' | "$work/managed" 2>&1)"
+    else
+        check "the recovered C compiles" "yes" "no"
+    fi
+fi
+
 # ---------------------------------------------------------------- libraries
 #
 # A library has no entry point: nothing calls into it first, and what it offers

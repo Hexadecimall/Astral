@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.17.0 LANGUAGES CXX)
+project(Astral VERSION 0.18.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -85,6 +85,7 @@ set(ASTRAL_LIB_SRC
     src/api/cpp_api.cc
     src/api/error.cc
     src/format/image.cc
+    src/format/dotnet.cc
     src/emit/demangle.cc
     src/emit/cxx_idioms.cc
     src/patch/patch.cc

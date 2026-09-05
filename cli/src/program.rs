@@ -211,6 +211,36 @@ fn report_naming(out: &mut Destination, function: &Function) {
 }
 
 pub fn decompile(options: &Options) -> i32 {
+    // A managed assembly holds CIL and its own metadata, not instructions for
+    // any processor. There is nothing for the native decompiler to do with it.
+    if let Some(path) = options.path.as_deref() {
+        if astral::is_dotnet(path) {
+            return match astral::dotnet_source(path) {
+                Ok(source) => {
+                    let mut out = match Destination::open(options.output.as_deref()) {
+                        Ok(out) => out,
+                        Err(_) => {
+                            error("cannot write there");
+                            return 1;
+                        }
+                    };
+                    let colour = options.output.is_none() && stdout_colour(options.color);
+                    out.write(&if colour { astral_tui::ansi_c(&source) } else { source });
+                    if let Some(path) = options.output.as_deref() {
+                        drop(out);
+                        crate::out::Sink::new(crate::out::Stream::Err)
+                            .write(&format!("written to {path}\n"));
+                    }
+                    0
+                }
+                Err(failure) => {
+                    error(&failure.to_string());
+                    1
+                }
+            };
+        }
+    }
+
     let Some(opened) = open(options) else {
         return 1;
     };

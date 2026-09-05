@@ -77,6 +77,8 @@ extern "C" {
 
     pub fn astral_compile_sleigh(slaspec_path: *const c_char, sla_path: *const c_char) -> c_int;
 
+    pub fn astral_is_dotnet(path: *const c_char) -> c_int;
+    pub fn astral_dotnet_source(path: *const c_char) -> *mut c_char;
     pub fn astral_program_open(path: *const c_char, language_id: *const c_char)
         -> *mut astral_program;
     pub fn astral_program_open_memory(

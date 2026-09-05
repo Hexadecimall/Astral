@@ -105,6 +105,70 @@ Result move_immediate(const Register &destination, int64_t value)
     return result;
 }
 
+
+// A memory operand, written the way a listing prints one: [x0], [sp, #0x10],
+// [x1, #-8]. Only the base-plus-offset form is read, because that is the only
+// one the compiler generates and the only one a patch usually needs.
+struct Memory {
+    Register base;
+    int64_t offset = 0;
+};
+
+bool parse_memory(const std::string &text, Memory &out)
+{
+    std::string body = trim(text);
+    if (body.size() < 3 || body.front() != '[' || body.back() != ']')
+        return false;
+    body = body.substr(1, body.size() - 2);
+    const size_t comma = body.find(',');
+    const std::string base = comma == std::string::npos ? body : body.substr(0, comma);
+    if (!parse_register(base, out.base) || !out.base.wide)
+        return false;
+    out.offset = 0;
+    if (comma == std::string::npos)
+        return true;
+    return parse_immediate(body.substr(comma + 1), out.offset);
+}
+
+// Everything a load or a store needs to know about its width and its sign.
+struct Access {
+    int size_field = 3;   // 0 byte, 1 halfword, 2 word, 3 doubleword
+    bool loading = false;
+    bool sign_extending = false;
+};
+
+bool parse_access(const std::string &mnemonic, Access &out)
+{
+    static const std::map<std::string, Access> table = {
+        {"str",   {3, false, false}}, {"ldr",   {3, true,  false}},
+        {"strb",  {0, false, false}}, {"ldrb",  {0, true,  false}},
+        {"strh",  {1, false, false}}, {"ldrh",  {1, true,  false}},
+        {"ldrsb", {0, true,  true}},  {"ldrsh", {1, true,  true}},
+        {"ldrsw", {2, true,  true}},
+        {"stur",  {3, false, false}}, {"ldur",  {3, true,  false}},
+        {"sturb", {0, false, false}}, {"ldurb", {0, true,  false}},
+        {"sturh", {1, false, false}}, {"ldurh", {1, true,  false}},
+        {"ldursb",{0, true,  true}},  {"ldursh",{1, true,  true}},
+        {"ldursw",{2, true,  true}},
+    };
+    const auto found = table.find(mnemonic);
+    if (found == table.end())
+        return false;
+    out = found->second;
+    return true;
+}
+
+// The bitfield-move pair, which every fixed shift and every width extension is
+// written in terms of.
+uint32_t bitfield(bool wide, int opc, uint32_t immr, uint32_t imms, int source, int destination)
+{
+    // opc 0 signed, 1 unsigned. N matches sf, which is what the 64-bit forms use.
+    const uint32_t base = opc == 0 ? 0x13000000u : 0x53000000u;
+    const uint32_t sf = wide ? 0x80400000u : 0u; // sf and N together
+    return base | sf | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) |
+           (static_cast<uint32_t>(source) << 5) | static_cast<uint32_t>(destination);
+}
+
 } // namespace
 
 Result assemble_arm64(Target target, const Line &line, uint64_t address)
@@ -284,6 +348,170 @@ Result assemble_arm64(Target target, const Line &line, uint64_t address)
         const uint32_t opcode = mnemonic == "cbz" ? 0x34000000u : 0x35000000u;
         return word_of(sf_bit(tested) | opcode | ((static_cast<uint32_t>(words) & 0x7ffffu) << 5) |
                         static_cast<uint32_t>(tested.number));
+    }
+
+
+    if (mnemonic == "mvn") {
+        if (operands.size() != 2)
+            return wrong_count(2);
+        Register destination, source;
+        if (!parse_register(operands[0], destination) || !parse_register(operands[1], source))
+            return fail("mvn takes two registers");
+        // ORN Rd, ZR, Rm: the register form of "the other bits".
+        return word_of(sf_bit(destination) | 0x2a200000u |
+                        (static_cast<uint32_t>(source.number) << 16) | (31u << 5) |
+                        static_cast<uint32_t>(destination.number));
+    }
+
+    {
+        Access access;
+        if (parse_access(mnemonic, access)) {
+            if (operands.size() != 2)
+                return wrong_count(2);
+            Register value;
+            Memory memory;
+            if (!parse_register(operands[0], value))
+                return fail(mnemonic + " takes a register and a memory operand");
+            if (!parse_memory(operands[1], memory))
+                return fail("the memory operand has to be [base] or [base, #offset]");
+            // For the unsuffixed forms the register says the width: ldr w0 is
+            // four bytes, ldr x0 is eight.
+            if (access.size_field == 3 && !value.wide)
+                access.size_field = 2;
+            if (access.sign_extending && access.size_field == 2 && !value.wide)
+                return fail("ldrsw always widens into an x register");
+            // opc says load or store, and for a load whether the sign is kept.
+            uint32_t opc;
+            if (!access.loading)
+                opc = 0;
+            else if (!access.sign_extending)
+                opc = 1;
+            else
+                opc = value.wide ? 2 : 3;
+            const uint32_t size = static_cast<uint32_t>(access.size_field);
+            const uint32_t common = (size << 30) | 0x38000000u | (opc << 22) |
+                                    (static_cast<uint32_t>(memory.base.number) << 5) |
+                                    static_cast<uint32_t>(value.number);
+            const bool unscaled = mnemonic.compare(0, 3, "stu") == 0 ||
+                                  mnemonic.compare(0, 3, "ldu") == 0;
+            const int64_t scale = int64_t(1) << access.size_field;
+            if (!unscaled && memory.offset >= 0 && (memory.offset % scale) == 0 &&
+                (memory.offset / scale) <= 0xfff) {
+                // The scaled form reaches furthest, so prefer it whenever the
+                // offset is a whole number of elements.
+                return word_of(common | 0x01000000u |
+                                (static_cast<uint32_t>(memory.offset / scale) << 10));
+            }
+            if (memory.offset < -256 || memory.offset > 255)
+                return fail("that offset is out of reach; it has to be a multiple of the "
+                            "access width up to 4095 of them, or -256 to 255 bytes");
+            return word_of(common | ((static_cast<uint32_t>(memory.offset) & 0x1ffu) << 12));
+        }
+    }
+
+    if (mnemonic == "mul" || mnemonic == "sdiv" || mnemonic == "udiv" ||
+        mnemonic == "lsl" || mnemonic == "lsr" || mnemonic == "asr") {
+        if (operands.size() != 3)
+            return wrong_count(3);
+        Register destination, first;
+        if (!parse_register(operands[0], destination) || !parse_register(operands[1], first))
+            return fail(mnemonic + " takes registers for its destination and first source");
+        const bool wide = destination.wide;
+        Register second;
+        if (parse_register(operands[2], second)) {
+            uint32_t opcode = 0;
+            if (mnemonic == "mul")
+                opcode = 0x1b007c00u;      // MADD with the addend discarded
+            else if (mnemonic == "sdiv")
+                opcode = 0x1ac00c00u;
+            else if (mnemonic == "udiv")
+                opcode = 0x1ac00800u;
+            else if (mnemonic == "lsl")
+                opcode = 0x1ac02000u;
+            else if (mnemonic == "lsr")
+                opcode = 0x1ac02400u;
+            else
+                opcode = 0x1ac02800u;
+            return word_of(sf_bit(destination) | opcode |
+                            (static_cast<uint32_t>(second.number) << 16) |
+                            (static_cast<uint32_t>(first.number) << 5) |
+                            static_cast<uint32_t>(destination.number));
+        }
+        int64_t amount = 0;
+        if (!parse_immediate(operands[2], amount))
+            return fail(mnemonic + " takes a register or an immediate last");
+        if (mnemonic == "mul" || mnemonic == "sdiv" || mnemonic == "udiv")
+            return fail(mnemonic + " takes three registers; there is no immediate form");
+        const int64_t width = wide ? 64 : 32;
+        if (amount < 0 || amount >= width)
+            return fail("a shift amount has to be between 0 and one less than the register width");
+        if (mnemonic == "lsl")
+            return word_of(bitfield(wide, 1, static_cast<uint32_t>((width - amount) % width),
+                                     static_cast<uint32_t>(width - 1 - amount),
+                                     first.number, destination.number));
+        return word_of(bitfield(wide, mnemonic == "asr" ? 0 : 1, static_cast<uint32_t>(amount),
+                                 static_cast<uint32_t>(width - 1), first.number,
+                                 destination.number));
+    }
+
+    if (mnemonic == "msub" || mnemonic == "madd") {
+        if (operands.size() != 4)
+            return wrong_count(4);
+        Register destination, first, second, addend;
+        if (!parse_register(operands[0], destination) || !parse_register(operands[1], first) ||
+            !parse_register(operands[2], second) || !parse_register(operands[3], addend))
+            return fail(mnemonic + " takes four registers");
+        const uint32_t opcode = mnemonic == "madd" ? 0x1b000000u : 0x1b008000u;
+        return word_of(sf_bit(destination) | opcode |
+                        (static_cast<uint32_t>(second.number) << 16) |
+                        (static_cast<uint32_t>(addend.number) << 10) |
+                        (static_cast<uint32_t>(first.number) << 5) |
+                        static_cast<uint32_t>(destination.number));
+    }
+
+    if (mnemonic == "sxtb" || mnemonic == "sxth" || mnemonic == "sxtw" || mnemonic == "uxtb" ||
+        mnemonic == "uxth") {
+        if (operands.size() != 2)
+            return wrong_count(2);
+        Register destination, source;
+        if (!parse_register(operands[0], destination) || !parse_register(operands[1], source))
+            return fail(mnemonic + " takes two registers");
+        const bool is_signed = mnemonic[0] == 's';
+        if (!is_signed && destination.wide)
+            return fail(mnemonic + " widens into a w register; the upper half is cleared anyway");
+        if (mnemonic == "sxtw" && !destination.wide)
+            return fail("sxtw widens into an x register");
+        const uint32_t imms = mnemonic[3] == 'b' ? 7u : (mnemonic[3] == 'h' ? 15u : 31u);
+        return word_of(bitfield(destination.wide, is_signed ? 0 : 1, 0, imms, source.number,
+                                 destination.number));
+    }
+
+    if (mnemonic == "cset" || mnemonic == "csel" || mnemonic == "csinc") {
+        Register destination;
+        if (operands.empty() || !parse_register(operands[0], destination))
+            return fail(mnemonic + " writes to a register");
+        const std::string condition = lower(trim(operands.back()));
+        const auto found = conditions().find(condition);
+        if (found == conditions().end())
+            return fail("there is no condition called " + condition);
+        if (mnemonic == "cset") {
+            if (operands.size() != 2)
+                return wrong_count(2);
+            // CSINC Rd, ZR, ZR with the condition inverted: one when it holds.
+            const uint32_t inverted = found->second ^ 1u;
+            return word_of(sf_bit(destination) | 0x1a800400u | (31u << 16) | (inverted << 12) |
+                            (31u << 5) | static_cast<uint32_t>(destination.number));
+        }
+        if (operands.size() != 4)
+            return wrong_count(4);
+        Register first, second;
+        if (!parse_register(operands[1], first) || !parse_register(operands[2], second))
+            return fail(mnemonic + " takes three registers and a condition");
+        const uint32_t opcode = mnemonic == "csel" ? 0x1a800000u : 0x1a800400u;
+        return word_of(sf_bit(destination) | opcode |
+                        (static_cast<uint32_t>(second.number) << 16) | (found->second << 12) |
+                        (static_cast<uint32_t>(first.number) << 5) |
+                        static_cast<uint32_t>(destination.number));
     }
 
     return unknown_mnemonic(line, target);

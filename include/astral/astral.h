@@ -256,6 +256,19 @@ ASTRAL_API astral_status astral_program_patch_nop(astral_program *program, uint6
 ASTRAL_API astral_status astral_program_patch_assembly(astral_program *program, uint64_t address,
                                                        const char *text);
 
+/* --- Managed assemblies -----------------------------------------------------
+ *
+ * A .NET assembly is a PE whose code is CIL rather than instructions for any
+ * processor, and which carries the name of every type, method and string beside
+ * it. That is read on its own path: there is nothing for the native decompiler
+ * to do with it, and nothing it would have to infer. */
+
+/* Whether the file at `path` is a managed assembly. */
+ASTRAL_API int astral_is_dotnet(const char *path);
+/* The C# the assembly stands for, or null with the reason in astral_last_error.
+ * Caller frees. */
+ASTRAL_API char *astral_dotnet_source(const char *path);
+
 /* Queue inverting the conditional branch at `address`. */
 ASTRAL_API astral_status astral_program_patch_invert(astral_program *program, uint64_t address);
 

@@ -124,6 +124,27 @@ fn to_cstring(value: &str) -> Result<CString> {
     })
 }
 
+/// Whether the file is a managed .NET assembly rather than a native program.
+pub fn is_dotnet(path: &str) -> bool {
+    match to_cstring(path) {
+        Ok(text) => unsafe { sys::astral_is_dotnet(text.as_ptr()) != 0 },
+        Err(_) => false,
+    }
+}
+
+/// The C# a managed assembly stands for. A .NET file states the name of every
+/// type, method and string, so nothing here has to be guessed.
+pub fn dotnet_source(path: &str) -> Result<String> {
+    let text = to_cstring(path)?;
+    let out = unsafe { sys::astral_dotnet_source(text.as_ptr()) };
+    if out.is_null() {
+        return Err(last_error(Status::InvalidArgument));
+    }
+    let source = unsafe { cstr(out) };
+    unsafe { sys::astral_string_free(out) };
+    Ok(source)
+}
+
 /// Version of this library.
 pub fn version() -> String {
     unsafe { cstr(sys::astral_version()) }

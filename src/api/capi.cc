@@ -6,6 +6,7 @@
 #include "image.hh"
 #include "contribute.hh"
 #include "knowledge.hh"
+#include "dotnet.hh"
 #include "session.hh"
 #include "source_learn.hh"
 
@@ -950,3 +951,50 @@ uint64_t astral_function_block_address(const astral_function *f, int index)
 }
 
 } // extern "C"
+
+namespace {
+
+bool slurp(const char *path, std::vector<uint8_t> &bytes)
+{
+    std::FILE *file = std::fopen(path, "rb");
+    if (file == nullptr)
+        return false;
+    std::fseek(file, 0, SEEK_END);
+    const long size = std::ftell(file);
+    std::fseek(file, 0, SEEK_SET);
+    bytes.resize(size > 0 ? static_cast<size_t>(size) : 0);
+    const size_t got = bytes.empty() ? 0 : std::fread(bytes.data(), 1, bytes.size(), file);
+    std::fclose(file);
+    return got == bytes.size();
+}
+
+} // namespace
+
+int astral_is_dotnet(const char *path)
+{
+    std::vector<uint8_t> bytes;
+    if (path == nullptr || !slurp(path, bytes))
+        return 0;
+    return astral_internal::is_dotnet_assembly(bytes) ? 1 : 0;
+}
+
+char *astral_dotnet_source(const char *path)
+{
+    std::vector<uint8_t> bytes;
+    if (path == nullptr || !slurp(path, bytes)) {
+        fail(ASTRAL_ERR_IO, "cannot read that file");
+        return nullptr;
+    }
+    if (!astral_internal::is_dotnet_assembly(bytes)) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, "that file carries no managed code");
+        return nullptr;
+    }
+    const astral_internal::DotnetAssembly assembly =
+        astral_internal::read_dotnet_assembly(bytes);
+    if (!assembly.ok) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, assembly.error);
+        return nullptr;
+    }
+    clear_error();
+    return copy_string(astral_internal::decompile_dotnet(assembly));
+}
