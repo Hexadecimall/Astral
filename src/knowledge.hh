@@ -46,6 +46,9 @@ public:
     const std::vector<Literal> &literals() const { return literals_; }
     std::string role_name(const std::string &shape) const;
     bool is_stop_word(const std::string &word) const;
+    // Whether a call to this function never returns.
+    bool never_returns(const std::string &name) const { return noreturn_.count(name) != 0; }
+    const std::set<std::string> &noreturn_names() const { return noreturn_; }
     bool is_placeholder(const std::string &name) const;
 
     // Library knowledge.
@@ -98,6 +101,10 @@ private:
     std::vector<Literal> literals_;
     std::map<std::string, std::string> roles_;
     std::set<std::string> stop_words_;
+    // Functions that never come back. Decoding past a call to one of these
+    // runs into whatever the linker placed next, which is usually a different
+    // function entirely.
+    std::set<std::string> noreturn_;
     std::vector<std::string> placeholders_;
     std::map<std::string, std::string> protos_;
     std::map<std::string, std::string> headers_;

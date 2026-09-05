@@ -833,3 +833,34 @@ proto __stack_chk_fail extern void __stack_chk_fail(void);
 proto __stack_chk_guard extern int8 __stack_chk_guard;
 proto abort extern void abort(void);
 proto main extern int4 main(int4 argc, char **argv);
+
+# Functions that never come back. Decoding past a call to one of these runs
+# into the next function in the image and merges the two.
+noreturn abort
+noreturn exit
+noreturn _exit
+noreturn _Exit
+noreturn err
+noreturn errx
+noreturn verr
+noreturn verrx
+noreturn longjmp
+noreturn siglongjmp
+noreturn _longjmp
+noreturn pthread_exit
+noreturn __assert_rtn
+noreturn __assert_fail
+noreturn __chk_fail
+noreturn abort_report_np
+noreturn thread_exit
+noreturn execl
+noreturn execle
+noreturn execlp
+noreturn execv
+noreturn execvp
+noreturn execve
+noreturn quick_exit
+noreturn std::terminate
+noreturn __cxa_throw
+noreturn __cxa_rethrow
+noreturn _Unwind_Resume

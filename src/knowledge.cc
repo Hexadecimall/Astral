@@ -167,6 +167,10 @@ void Knowledge::parse(const std::string &text, bool from_user)
                 literals_.push_back(std::move(literal));
             if (from_user)
                 ++learned_;
+        } else if (kind == "noreturn") {
+            noreturn_.insert(trim(rest));
+            if (from_user)
+                ++learned_;
         } else if (kind == "stop") {
             stop_words_.insert(lower(rest));
         } else if (kind == "junk") {

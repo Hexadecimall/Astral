@@ -1740,8 +1740,29 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                     // start at their real value (zero for .bss), or a `!= NULL`
                     // test on one reads true before the program allocates it.
                     bool named_import = options.data_names.count(declaration.address) != 0;
+                    // A slot holding a function's address: point it at the
+                    // function, so a call through it reaches the real code
+                    // instead of the loader fixup value left in the file.
+                    auto fn = options.data_functions.find(declaration.address);
+                    if (fn != options.data_functions.end()) {
+                        const std::string &real = fn->second;
+                        std::string header = header_for(real);
+                        if (!header.empty()) {
+                            headers.insert(header);
+                        } else {
+                            std::string proto = Knowledge::instance().prototype_for(real);
+                            if (!proto.empty())
+                                externals.emplace(real,
+                                                  standardize_types(size_types_for(proto), used_stdint));
+                        }
+                        definitions.emplace(declaration.name, decl + " = (void *)" + real + ";");
+                        continue;
+                    }
                     auto linkage = options.data_linkage.find(declaration.address);
-                    if (linkage != options.data_linkage.end()) {
+                    if (!real_global.empty()) {
+                        definitions.emplace(declaration.name,
+                                            decl + " = (void *)&" + real_global + ";");
+                    } else if (linkage != options.data_linkage.end()) {
                         // The slot holds the address of an object another
                         // image defines under a mangled name. An asm label
                         // reaches it from C without spelling the mangling in
@@ -1751,9 +1772,6 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                                             "extern unsigned char " + object + "[] __asm__(\"" +
                                                 linkage->second + "\");\n" + decl + " = (void *)" +
                                                 object + ";");
-                    } else if (!real_global.empty()) {
-                        definitions.emplace(declaration.name,
-                                            decl + " = (void *)&" + real_global + ";");
                     } else if (data_pointer && named_import) {
                         std::string backing = "BACK_" + declaration.name;
                         definitions.emplace(

@@ -489,6 +489,19 @@ std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &l
         }
     } catch (ghidra::LowlevelError &err) {
     }
+    // A call to a function that never returns is the end of the flow. Without
+    // this the decoder walks off the end of the caller into whatever the
+    // linker put next, which merges two unrelated functions into one.
+    try {
+        ghidra::Scope *global = session->arch_->symboltab->getGlobalScope();
+        const Knowledge &knowledge = Knowledge::instance();
+        for (const std::string &name : knowledge.noreturn_names()) {
+            ghidra::Funcdata *callee = global->queryFunction(name);
+            if (callee != nullptr)
+                callee->getFuncProto().setNoReturn(true);
+        }
+    } catch (ghidra::LowlevelError &err) {
+    }
     // Typing the library functions it imports is what lets string arguments
     // print as strings rather than as addresses.
     try {
@@ -873,12 +886,19 @@ std::vector<std::pair<ghidra::Address, ghidra::FuncProto *>>
 Session::collect_vararg_overrides(void *funcdata)
 {
     ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
-    struct Formatter { int fixed; int format_index; };
-    // Only the output family: scanf takes pointers and the err/warn family is
-    // void/noreturn, both of which need different handling.
+    // `fixed` gives one letter per fixed argument: 'i' an int, 'p' a pointer,
+    // 's' the format string itself. scanf is left out because its arguments
+    // are pointers to write through, which is a different recovery.
+    struct Formatter { const char *fixed; int format_index; bool void_ret; };
     static const std::map<std::string, Formatter> kFormatters = {
-        {"printf", {1, 0}},   {"fprintf", {2, 1}},  {"sprintf", {2, 1}},
-        {"snprintf", {3, 2}}, {"dprintf", {2, 1}},
+        {"printf", {"s", 0, false}},    {"fprintf", {"ps", 1, false}},
+        {"sprintf", {"ps", 1, false}},  {"snprintf", {"pps", 2, false}},
+        {"dprintf", {"ps", 1, false}},
+        // The err/warn family writes the message and returns nothing. Their
+        // arguments are recovered the same way, which is what makes a
+        // diagnostic print the file it is about.
+        {"warn", {"s", 0, true}},       {"warnx", {"s", 0, true}},
+        {"err", {"is", 1, true}},       {"errx", {"is", 1, true}},
     };
     const int ptr = arch_->getDefaultCodeSpace()->getAddrSize();
     const int word = arch_->getDefaultCodeSpace()->getWordSize();
@@ -902,7 +922,8 @@ Session::collect_vararg_overrides(void *funcdata)
         auto entry = kFormatters.find(spec->getName());
         if (entry == kFormatters.end())
             continue;
-        const int fixed = entry->second.fixed;
+        const std::string fixed_spec = entry->second.fixed;
+        const int fixed = static_cast<int>(fixed_spec.size());
         const int format_index = entry->second.format_index;
         const int format_slot = 1 + format_index; // getIn(0) is the call target
         if (op->numInput() <= format_slot)
@@ -952,9 +973,14 @@ Session::collect_vararg_overrides(void *funcdata)
         ghidra::PrototypePieces pieces;
         pieces.model = arch_->defaultfp;
         pieces.name = spec->getName();
-        pieces.outtype = tInt;
+        pieces.outtype = entry->second.void_ret ? tVoid : tInt;
         for (int a = 0; a < fixed; ++a) {
-            pieces.intypes.push_back(a == format_index ? tCharPtr : tVoidPtr);
+            ghidra::Datatype *t = tVoidPtr;
+            if (a == format_index)
+                t = tCharPtr;
+            else if (fixed_spec[a] == 'i')
+                t = tInt;
+            pieces.intypes.push_back(t);
             pieces.innames.emplace_back();
         }
         for (ghidra::Datatype *t : varargs) {
@@ -967,6 +993,7 @@ Session::collect_vararg_overrides(void *funcdata)
             // input lock, so the surrounding register analysis is not disturbed.
             ghidra::FuncProto *proto = new ghidra::FuncProto();
             proto->setInternal(pieces.model, tVoid);
+            (void)0;
             proto->setPieces(pieces);
             // The pieces are laid out as varargs so the model places the
             // arguments past the format on the stack, the way Apple's ABI does.
@@ -1808,6 +1835,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         error = first_error.empty() ? "nothing could be decompiled" : first_error;
         return false;
     }
+    // Experiment: lock one named address only.
     std::vector<uint64_t> ordered(discovered.begin(), discovered.end());
     std::sort(ordered.begin(), ordered.end());
     std::vector<FunctionResult> results;
@@ -1849,6 +1877,12 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     // The loader's name for each referenced data address, so an import slot for
     // a real libc global can be pointed at the true symbol.
     const std::string prefix = image_.format == ASTRAL_FORMAT_MACHO ? "_" : "";
+    // The names this image imports as code. A data slot carrying one of these
+    // names is the pointer the call goes through.
+    std::set<std::string> imported_functions;
+    for (const Symbol &sym : image_.symbols)
+        if (sym.is_function && sym.is_import && !sym.name.empty())
+            imported_functions.insert(sym.name);
     for (const Symbol &sym : image_.symbols) {
         if (sym.is_function) {
             if (!sym.linkage_name.empty())
@@ -1858,6 +1892,13 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         if (sym.name.empty())
             continue;
         options.data_names.emplace(sym.address, sym.name);
+        if (sym.is_import && imported_functions.count(sym.name))
+            options.data_functions.emplace(sym.address, sym.name);
+        // Any other import slot holds the address of an object another image
+        // defines. Its linker-level name reaches that object from C, so the
+        // slot points at the real thing rather than at the file's fixup value.
+        else if (sym.is_import && sym.linkage_name.empty())
+            options.data_linkage.emplace(sym.address, prefix + sym.name);
         // The linker-level name of a C++ object, so a slot for it can point at
         // the real thing. Mach-O spells C symbols with a leading underscore.
         if (!sym.linkage_name.empty())

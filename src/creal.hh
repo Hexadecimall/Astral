@@ -38,6 +38,11 @@ struct CEmitOptions {
     // for, so its extern carries an asm label and the unit links against the
     // C++ runtime as it is.
     std::map<std::string, std::string> function_linkage;
+    // Address -> the function whose address a data slot holds. A lazy-binding
+    // pointer slot stands for a function in another image; the code calls
+    // through it, so it has to point at the real function rather than at the
+    // loader fixup value that happened to be in the file.
+    std::map<uint64_t, std::string> data_functions;
 };
 
 // Fills in c_code_real and signature_real: the same function written in C that
