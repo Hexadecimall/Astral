@@ -247,6 +247,12 @@ ASTRAL_API astral_status astral_program_patch_bytes(astral_program *program, uin
 ASTRAL_API astral_status astral_program_patch_nop(astral_program *program, uint64_t address,
                                                   int count);
 
+/* Queue replacing the instruction at `address` with the one written in `text`.
+ * The text is assembled for the program's own architecture and refused unless
+ * it is exactly as long as the instruction it replaces. */
+ASTRAL_API astral_status astral_program_patch_assembly(astral_program *program, uint64_t address,
+                                                       const char *text);
+
 /* Queue inverting the conditional branch at `address`. */
 ASTRAL_API astral_status astral_program_patch_invert(astral_program *program, uint64_t address);
 

@@ -149,6 +149,12 @@ public:
     // architecture's no-op. A recognised structural edit (tier byte-rewrite).
     bool patch_nop(uint64_t address, int instruction_count, std::string &error);
 
+    // Replaces the instruction at an address with the one written here. This is
+    // what makes a listing editable: the text is assembled for the program's
+    // own architecture, and refused rather than half-written if it does not fit
+    // where it has to go.
+    bool patch_assembly(uint64_t address, const std::string &text, std::string &error);
+
     // Inverts the conditional branch at `address` (b.cond, cbz/cbnz, tbz/tbnz
     // on arm64; the Jcc family on x86-64), so the path it guards is taken when
     // it was not and the other way round. A recognised structural edit.

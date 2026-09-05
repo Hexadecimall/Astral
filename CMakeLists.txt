@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.13.0 LANGUAGES CXX)
+project(Astral VERSION 0.14.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -96,7 +96,8 @@ set(ASTRAL_LIB_SRC
     src/core/langmap.cc
     src/emit/libc_protos.cc
     src/core/session.cc
-    src/api/capi.cc)
+    src/api/capi.cc
+    engine/assembler/arm64.cc)
 
 add_library(astral_objs OBJECT ${ASTRAL_LIB_SRC})
 target_include_directories(astral_objs

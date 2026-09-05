@@ -391,6 +391,11 @@ void Program::patch_nop(uint64_t address, int count)
     check(astral_program_patch_nop(handle_, address, count));
 }
 
+void Program::patch_assembly(uint64_t address, const std::string &text)
+{
+    check(astral_program_patch_assembly(handle_, address, text.c_str()));
+}
+
 void Program::patch_invert(uint64_t address)
 {
     check(astral_program_patch_invert(handle_, address));

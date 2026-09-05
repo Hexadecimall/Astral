@@ -212,6 +212,8 @@ public:
                      const std::string &note = std::string());
     // Queues `count` no-ops at an address.
     void patch_nop(uint64_t address, int count = 1);
+    // Queues replacing the instruction at an address with the one written here.
+    void patch_assembly(uint64_t address, const std::string &text);
     // Queues inverting the conditional branch at an address.
     void patch_invert(uint64_t address);
     // Queues overwriting the function at an address so it only returns a value.

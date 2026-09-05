@@ -17,6 +17,7 @@ enum Edit {
     Bytes { at: String, hex: String },
     Invert { at: String },
     Return { at: String, value: u64 },
+    Assembly { at: String, text: String },
 }
 
 struct Args {
@@ -42,7 +43,7 @@ pub fn run(arguments: &[String]) -> i32 {
         return 2;
     };
     if args.edits.is_empty() {
-        error("nothing to patch: give at least one --nop or --set");
+        error("nothing to patch: give at least one --nop, --set or --asm");
         return 2;
     }
 
@@ -76,6 +77,8 @@ pub fn run(arguments: &[String]) -> i32 {
                 .and_then(|addr| program.patch_invert(addr).map_err(|e| e.to_string())),
             Edit::Return { at, value } => resolve(&program, at)
                 .and_then(|addr| program.patch_return(addr, *value).map_err(|e| e.to_string())),
+            Edit::Assembly { at, text } => resolve(&program, at)
+                .and_then(|addr| program.patch_assembly(addr, text).map_err(|e| e.to_string())),
         };
         if let Err(message) = outcome {
             error(&message);
@@ -307,8 +310,22 @@ fn parse(arguments: &[String]) -> Result<Args, i32> {
                 args.edits.push(Edit::Return { at, value });
             }
             "--asm" => {
-                error("assembling instructions is not built yet; use --set <addr>=<hex> for now");
-                return Err(2);
+                let Some(spec) = it.next() else {
+                    error("--asm needs <address>=<instruction>, e.g. --asm 0x1000=\"mov x0, #1\"");
+                    return Err(2);
+                };
+                let Some((at, text)) = spec.split_once('=') else {
+                    error("--asm wants <address>=<instruction>, e.g. --asm 0x1000=\"mov x0, #1\"");
+                    return Err(2);
+                };
+                if text.trim().is_empty() {
+                    error("--asm needs an instruction after the =");
+                    return Err(2);
+                }
+                args.edits.push(Edit::Assembly {
+                    at: at.to_string(),
+                    text: text.to_string(),
+                });
             }
             "-o" | "--output" => {
                 let Some(path) = it.next() else {
@@ -351,6 +368,7 @@ pub fn usage(stream: Stream) -> i32 {
     w.write("edits\n");
     w.write("  --nop <addr>[:<n>]      replace n instructions (default 1) with no-ops\n");
     w.write("  --set <addr>=<hex>      write exact bytes, e.g. --set 0x1000=1f2003d5\n");
+    w.write("  --asm <addr>=<instr>    write an instruction, e.g. --asm 0x1000=\"mov x0, #1\"\n");
     w.write("  --invert <addr>         flip a conditional branch (b.cond, cbz, jcc)\n");
     w.write("  --ret <addr>[=<value>]  make the function at addr return value (default 0)\n\n");
     w.write("output\n");

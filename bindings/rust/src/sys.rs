@@ -178,6 +178,11 @@ extern "C" {
         size: usize,
         note: *const c_char,
     ) -> c_int;
+    pub fn astral_program_patch_assembly(
+        program: *mut astral_program,
+        address: u64,
+        text: *const c_char,
+    ) -> c_int;
     pub fn astral_program_patch_nop(
         program: *mut astral_program,
         address: u64,

@@ -518,6 +518,34 @@ check "missing file reported" "cannot open" \
 check "bad language reported" "unknown language id" \
     "$("$astral" info --language "nope:LE:64:default" "$elf" 2>&1 || true)"
 
+# ---------------------------------------------------------------- assembler
+#
+# A listing is only editable if what someone writes turns back into the right
+# bytes, so each instruction is assembled and then read back by the
+# disassembler: the two halves have to agree.
+asm_roundtrip() {
+    local text=$1 at=${2:-0x100000000}
+    "$astral" patch "$work/host" --asm "$at=$text" -o "$work/asm.bin" >/dev/null 2>&1 || return 1
+    "$astral" disassemble -a "$at" -d 1 "$work/asm.bin" 2>/dev/null | head -1 | sed 's/^[^:]*: *//'
+}
+
+entry=$("$astral" info "$work/host" 2>/dev/null | sed -n 's/^entry *//p' | head -1)
+if [ -n "$entry" ]; then
+    check "assembles a no-op"        "nop"          "$(asm_roundtrip 'nop' "$entry")"
+    check "assembles a move"         "mov x0, #0x1" "$(asm_roundtrip 'mov x0, #1' "$entry")"
+    check "assembles a register move" "mov x0, x1"  "$(asm_roundtrip 'mov x0, x1' "$entry")"
+    check "assembles a comparison"   "cmp w0, #0x2" "$(asm_roundtrip 'cmp w0, #2' "$entry")"
+    check "assembles a return"       "ret"          "$(asm_roundtrip 'ret' "$entry")"
+fi
+
+# A refusal has to say what was wrong, not write the wrong instruction.
+check "refuses an unknown instruction" "does not write frobnicate" \
+    "$("$astral" patch "$work/host" --asm "0x0=frobnicate x0" -o /dev/null 2>&1)"
+check "refuses the wrong operand count" "takes 2 operands" \
+    "$("$astral" patch "$work/host" --asm "0x0=mov x0, x1, x2" -o /dev/null 2>&1)"
+check "refuses a branch out of reach" "too far" \
+    "$("$astral" patch "$work/host" --asm "0x100000000=b 0x7fffffff0" -o /dev/null 2>&1)"
+
 # ---------------------------------------------------------------- threading
 #
 # Whole-program decompilation can run several engines at once. A given thread

@@ -400,6 +400,18 @@ astral_status astral_program_patch_nop(astral_program *program, uint64_t address
     return ASTRAL_OK;
 }
 
+astral_status astral_program_patch_assembly(astral_program *program, uint64_t address,
+                                            const char *text)
+{
+    if (program == nullptr || text == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "a program and some assembly are needed");
+    std::string error;
+    if (!program->session->patch_assembly(address, text, error))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
 astral_status astral_program_patch_invert(astral_program *program, uint64_t address)
 {
     if (program == nullptr)

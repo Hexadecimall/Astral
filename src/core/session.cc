@@ -5,6 +5,7 @@
 
 #include <sys/stat.h>
 
+#include "assembler.hh"
 #include "creal.hh"
 #include "cxx_idioms.hh"
 #include "langmap.hh"
@@ -766,6 +767,39 @@ bool Session::undo_patch()
     image_.write(last.address, last.original.data(), last.original.size());
     patches_.undo_last();
     return true;
+}
+
+bool Session::patch_assembly(uint64_t address, const std::string &text, std::string &error)
+{
+    namespace asmw = astral_internal::assembler;
+    const asmw::Target target = asmw::target_for_language(language_id());
+    if (target == asmw::Target::Unknown) {
+        error = "Astral reads " + language_id() + " but cannot write it yet";
+        return false;
+    }
+    const asmw::Result written = asmw::assemble(target, text, address);
+    if (!written.ok) {
+        error = written.error;
+        return false;
+    }
+    // The replacement has to fit exactly where the old instruction was. Writing
+    // something shorter would leave the tail of the old one behind, and
+    // something longer would run into whatever follows.
+    const int room = instruction_length(address);
+    if (room <= 0) {
+        error = "there is no instruction at that address to replace";
+        return false;
+    }
+    if (written.bytes.size() != static_cast<size_t>(room)) {
+        char message[160];
+        std::snprintf(message, sizeof message,
+                      "that assembles to %zu bytes but the instruction there is %d; "
+                      "an instruction can only be replaced by one the same size",
+                      written.bytes.size(), room);
+        error = message;
+        return false;
+    }
+    return patch_bytes(address, written.bytes, PatchTier::Assembled, text, error);
 }
 
 bool Session::patch_nop(uint64_t address, int instruction_count, std::string &error)

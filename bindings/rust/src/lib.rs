@@ -511,6 +511,14 @@ impl Program {
 
     /// Queues replacing `count` instructions at `address` with the
     /// architecture's no-op.
+    /// Replaces the instruction at `address` with the one written in `text`.
+    /// The text is assembled for the program's own architecture and refused
+    /// unless it is exactly as long as the instruction it replaces.
+    pub fn patch_assembly(&mut self, address: u64, text: &str) -> Result<()> {
+        let text = to_cstring(text)?;
+        check(unsafe { sys::astral_program_patch_assembly(self.handle, address, text.as_ptr()) })
+    }
+
     pub fn patch_nop(&mut self, address: u64, count: usize) -> Result<()> {
         check(unsafe { sys::astral_program_patch_nop(self.handle, address, count as c_int) })
     }
