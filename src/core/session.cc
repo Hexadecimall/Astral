@@ -2633,10 +2633,42 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
         if (it == sym_names.end())
             return false;
         const std::string &n = it->second;
-        return n.rfind("std", 0) == 0 || n.rfind("__", 0) == 0 ||
-               n.rfind("operator", 0) == 0 || n.rfind("_GLOBAL", 0) == 0 ||
-               n.find("cxx") != std::string::npos;
+        if (n == "main")
+            return false;
+        // Judged by the name's own prefix, mangled or not. A name that arrives
+        // here has had one leading underscore taken off by the Mach-O reader,
+        // so the rest come off too before anything is compared: what is left of
+        // `__ZNSt12length_error...` is `ZNSt12length_error...`, and none of the
+        // readable prefixes below would have matched it otherwise.
+        //
+        // The prefix has to be the function's own. A user function taking a
+        // std::string has std:: all over its signature and is still the
+        // program's code; what makes a body libc++ is that its own name says
+        // St, which is how std is spelled in a mangled name.
+        const size_t start = n.find_first_not_of('_');
+        const std::string core = start == std::string::npos ? std::string() : n.substr(start);
+        static const char *const runtime[] = {
+            "std", "operator",                                  // already readable
+            "cxa_", "Unwind_", "gxx_personality", "GLOBAL__",   // the language runtime
+            "ZNSt", "ZNKSt", "ZNVSt", "ZSt", "ZNSa", "ZNKSa",   // std, as a mangled name spells it
+            "ZN9__gnu_cxx", "ZNK9__gnu_cxx", "ZN10__cxxabiv",   // the ABI's own internals
+            "ZGV", "ZTV", "ZTI", "ZTS", "ZTC", "ZTT",           // guards, vtables, type information
+            "Znw", "Zna", "Zdl", "Zda",                         // operator new and delete
+        };
+        for (const char *prefix : runtime)
+            if (core.rfind(prefix, 0) == 0)
+                return true;
+        return core.find("cxx") != std::string::npos;
     };
+    // Asking for every function in the program is asking for every function in
+    // the program: nothing is trimmed out of a request that already covers the
+    // lot. Anything narrower is a request to read some code, and a body of
+    // libc++ is not the code anyone asked to read.
+    const bool keep_everything = addresses.size() >= function_addresses().size();
+    // Counted by function, not by call: one libc++ body called from ten places
+    // is one body left alone, and saying ten would be a different claim.
+    std::set<uint64_t> skipped_library;
+
     auto in_code = [&](uint64_t addr) {
         for (const Segment &seg : image_.segments)
             if (seg.executable && addr >= seg.address && addr < seg.address + seg.size)
@@ -2657,7 +2689,13 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     const size_t kFunctionLimit = 4000;
     std::string first_error;
     auto wanted = [&](uint64_t callee) {
-        return callee != 0 && !imports.count(callee) && in_code(callee) && !is_library(callee);
+        if (callee == 0 || imports.count(callee) != 0 || !in_code(callee))
+            return false;
+        if (!keep_everything && is_library(callee)) {
+            skipped_library.insert(callee);
+            return false;
+        }
+        return true;
     };
 
     // The first pass walks the call graph a layer at a time. Everything in a
@@ -2827,6 +2865,16 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     if (timing)
         std::fprintf(stderr, "merge %lldms\n", (long long)since(t2));
     auto t3 = now();
+    // What was read and what was left alone, said the way a person would want
+    // to be told: a body of libc++ is a call target, not the program's code,
+    // and a listing is easier to trust when it says how much it set aside.
+    std::fprintf(stderr, "astral: %zu function%s decompiled", results.size(),
+                 results.size() == 1 ? "" : "s");
+    if (!skipped_library.empty())
+        std::fprintf(stderr, ", %zu library function%s skipped", skipped_library.size(),
+                     skipped_library.size() == 1 ? "" : "s");
+    std::fprintf(stderr, "\n");
+
     out = emit_c_unit(results, options);
     if (timing)
         std::fprintf(stderr, "emit %lldms\n", (long long)since(t3));
