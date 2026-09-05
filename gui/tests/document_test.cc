@@ -100,8 +100,11 @@ void DocumentTest::indexesCallersFromTheCallGraph()
 {
     const auto function = document_->cached(document_->entryPoint());
     QVERIFY(function.has_value());
-    if (function->callees.empty())
-        QSKIP("the entry point calls nothing in this program");
+    // The subject is fixed and its entry point calls into it. Finding no
+    // callees means the call graph stopped being built, which is the thing
+    // this test exists to catch, so it must not pass quietly.
+    QVERIFY2(!function->callees.empty(),
+             "the entry point recovered no callees, so the call graph is empty");
     // Whatever the entry point calls must name the entry point as a caller.
     const quint64 callee = function->callees.front().address;
     const std::vector<Reference> callers = document_->callersOf(callee);

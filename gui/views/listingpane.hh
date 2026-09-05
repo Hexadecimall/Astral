@@ -21,7 +21,7 @@ public:
 
     ListingView *view() const { return view_; }
     // Drives the assemble action from a scripted run.
-    void assembleForTesting() { editing_ = true; assemble(); }
+    void assembleForTesting() { assemble(); }
     // Replaces the disassembly and leaves edit mode; the old text describes
     // code the program may no longer hold.
     void setListing(const QString &text);
@@ -34,7 +34,6 @@ Q_SIGNALS:
     void patchApplied();
 
 private:
-    void setEditing(bool editing);
     void assemble();
     // Astral's own assembler, one changed line at a time.
     void assembleWithEngine();
@@ -43,14 +42,12 @@ private:
     void updateButtons();
 
     ListingView *view_;
-    QPushButton *editButton_;
     QPushButton *assembleButton_;
     QPushButton *revertButton_;
     QLabel *status_;
     ProgramDocument *document_ = nullptr;
     quint64 address_ = 0;
     QString pristine_;
-    bool editing_ = false;
     bool busy_ = false;
 };
 

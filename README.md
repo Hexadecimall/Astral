@@ -1,6 +1,7 @@
 # Astral
 
-A decompiler library for C, C++ and Rust that emits **C which compiles**.
+A decompiler library for C, C++ and Rust that emits **C you can read** — and,
+for a great deal of what you hand it, C that compiles.
 
 Astral is built on Ghidra's decompiler core, vendored and linked directly. There
 is no JVM, no Ghidra installation and no headless scripting. Link `-lAstral`,
@@ -187,18 +188,40 @@ int main(void)
 }
 ```
 
-The claim is tested rather than asserted. The suite compiles the emitted unit,
-links it, runs it, and checks it behaves like the original program.
+The claim is measured rather than asserted, on a corpus written to be hard:
+
+| | |
+|---|---|
+| decompiled | 40/40 |
+| compiled | 40/40 |
+| behaved as the original | 20/20 |
 
 ```sh
 astral decompile --all ./a.out > recovered.c
-cc -std=c11 -c recovered.c          # this is the point
+cc -std=c11 -c recovered.c
 ```
 
-Three limits worth knowing. Variadic arguments past the format string are not
-recovered, so `printf("%s", name)` comes back as `printf("%s")`. A function that
-reads absolute addresses needs the original image's data, which is not emitted,
-so it compiles but will fault if run alone. And where the decompiler's reading
+**Be clear about what that measures.** Those are small, self-contained
+programs. Hand Astral a large C++ binary and the C it gives back will not
+compile as it stands — it will read well, and it will have errors in it. A
+recent run over a 4,900-line C++ assembler came back with 21 of them: a `->`
+used on an integer, a call passing more arguments than its declaration takes,
+two lambdas whose mangled names collapse onto one identifier. Every one is a
+real gap, and each is worth fixing on its own.
+
+So the honest shape of it: **readable first, compilable often, guaranteed
+never.** A listing you can follow is the thing Astral is for; C that builds is
+what it manages when the program is small enough or plain enough, and what it
+is being pushed towards everywhere else. If you need something that always
+builds, no decompiler on earth is that, and one claiming to be is lying.
+
+Four limits worth knowing before you start. Variadic arguments past the format
+string are not recovered, so `printf("%s", name)` comes back as `printf("%s")`.
+A function that reads absolute addresses needs the original image's data, which
+is not emitted, so it compiles but will fault if run alone. C++ is markedly
+harder than C: templates, exceptions and the standard library's own bodies all
+land in the output, and the more of them a program uses the further the result
+drifts from something a compiler will take. And where the decompiler's reading
 of the machine code is wrong, the C is faithfully wrong in the same way.
 
 ## What is in here
@@ -356,7 +379,7 @@ astral::Library library;                        // init/shutdown, scoped
 auto program  = astral::Program::open("./a.out");
 auto function = program.decompile("main");
 std::cout << function.c_code();                 // the listing
-std::cout << program.emit_c({function.address()});   // C that compiles
+std::cout << program.emit_c({function.address()});   // C, meant to be read
 ```
 
 Handles are move-only; failures raise `astral::Error`.
@@ -390,7 +413,7 @@ own `--help`.
 
 ```sh
 astral info ./a.out                    # format, language, segments, symbols
-astral decompile ./a.out               # the entry point, as C that compiles
+astral decompile ./a.out               # the entry point, as C you can read
 astral decompile -f main ./a.out       # one function by name; repeatable
 astral decompile -a 0x100004000 ./a.out  # by address; repeatable
 astral decompile --all ./a.out         # the whole program

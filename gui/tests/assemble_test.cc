@@ -24,7 +24,10 @@ private Q_SLOTS:
     void refusesABlockThatDoesNotFit();
 
 private:
-    ProgramDocument *program();
+    // The subject, built and opened. On failure `why` says which of the two
+    // steps failed and what it said, because "one of these two things" is not
+    // a diagnosis and sends the reader to the wrong place.
+    ProgramDocument *program(QString &why);
     QTemporaryDir dir_;
     std::unique_ptr<ProgramDocument> document_;
 };
@@ -33,36 +36,46 @@ namespace {
 
 const char *kSource = R"(
 #include <string.h>
-#include <utility>
 int check(const char *key) { return strcmp(key, "astral") == 0; }
 int main(int argc, char **argv) { return argc == 2 ? check(argv[1]) : 2; }
 )";
 
 } // namespace
 
-ProgramDocument *AssembleTest::program()
+ProgramDocument *AssembleTest::program(QString &why)
 {
     if (document_)
         return document_.get();
     const QString cc = QStandardPaths::findExecutable(QStringLiteral("cc"));
-    if (cc.isEmpty())
+    if (cc.isEmpty()) {
+        why = QStringLiteral("no C compiler named cc is on PATH");
         return nullptr;
+    }
     const QString binary = dir_.filePath(QStringLiteral("subject"));
     QProcess build;
+    build.setProcessChannelMode(QProcess::MergedChannels);
     build.start(cc, {QStringLiteral("-O1"), QStringLiteral("-w"), QStringLiteral("-o"), binary,
                      QStringLiteral("-x"), QStringLiteral("c"), QStringLiteral("-")});
     build.write(kSource);
     build.closeWriteChannel();
     build.waitForFinished();
-    if (build.exitCode() != 0)
+    if (build.exitStatus() != QProcess::NormalExit || build.exitCode() != 0) {
+        why = QStringLiteral("the subject would not build: exit %1\n%2")
+                  .arg(build.exitCode())
+                  .arg(QString::fromUtf8(build.readAll()).trimmed());
         return nullptr;
+    }
 
     QEventLoop loop;
-    ProgramDocument::open(binary, this, [&](std::unique_ptr<ProgramDocument> doc, const QString &) {
+    QString openError;
+    ProgramDocument::open(binary, this, [&](std::unique_ptr<ProgramDocument> doc, const QString &error) {
         document_ = std::move(doc);
+        openError = error;
         loop.quit();
     });
     loop.exec();
+    if (!document_)
+        why = QStringLiteral("the subject would not open: ") + openError;
     return document_.get();
 }
 
@@ -107,9 +120,9 @@ void AssembleTest::passesDirectivesAndLabelsThrough()
 
 void AssembleTest::roundTripsAFunction()
 {
-    ProgramDocument *document = program();
-    if (!document)
-        QSKIP("no working C compiler, or the program would not open");
+    QString why;
+    ProgramDocument *document = program(why);
+    QVERIFY2(document, qPrintable(why));
     if (!document->languageId().startsWith(QStringLiteral("AARCH64")))
         QSKIP("this check is written against the arm64 encodings");
     const auto entry = document->functionNamed(QStringLiteral("check"));
@@ -149,9 +162,9 @@ void AssembleTest::roundTripsAFunction()
 
 void AssembleTest::refusesABlockThatDoesNotFit()
 {
-    ProgramDocument *document = program();
-    if (!document)
-        QSKIP("no working C compiler, or the program would not open");
+    QString why;
+    ProgramDocument *document = program(why);
+    QVERIFY2(document, qPrintable(why));
     if (!document->languageId().startsWith(QStringLiteral("AARCH64")))
         QSKIP("this check is written against the arm64 encodings");
     const auto entry = document->functionNamed(QStringLiteral("check"));

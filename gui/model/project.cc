@@ -17,7 +17,7 @@ namespace astral::gui {
 namespace {
 
 constexpr int kFormatVersion = 1;
-constexpr int kSchemaVersion = 1;
+constexpr int kSchemaVersion = 2;
 
 const QString kManifestName = QStringLiteral("project.astral");
 const QString kProjectSuffix = QStringLiteral(".astralproj");
@@ -150,6 +150,12 @@ const char *const kSchema =
     "  name TEXT NOT NULL,"
     "  learned INTEGER NOT NULL DEFAULT 0,"
     "  changedAt INTEGER);"
+    "CREATE TABLE IF NOT EXISTS localRenames ("
+    "  function INTEGER,"
+    "  original TEXT,"
+    "  name TEXT NOT NULL,"
+    "  changedAt INTEGER,"
+    "  PRIMARY KEY(function, original));"
     "CREATE TABLE IF NOT EXISTS comments ("
     "  address INTEGER,"
     "  kind TEXT,"
@@ -619,6 +625,22 @@ bool Project::loadState(const QString &binaryPath, ProgramState &state, QString 
         }
     }
     {
+        Statement select(database,
+                         "SELECT function, original, name, changedAt FROM localRenames"
+                         " ORDER BY function, original",
+                         error);
+        if (!select.valid())
+            return false;
+        while (select.step()) {
+            LocalRenameRecord record;
+            record.function = static_cast<quint64>(select.integerAt(0));
+            record.original = select.textAt(1);
+            record.name = select.textAt(2);
+            record.changedAt = select.integerAt(3);
+            state.localRenames.push_back(record);
+        }
+    }
+    {
         Statement select(database, "SELECT address, kind, body, changedAt FROM comments ORDER BY address, kind",
                          error);
         if (!select.valid())
@@ -710,9 +732,9 @@ bool Project::saveState(const QString &binaryPath, const ProgramState &state, QS
         QString ignored;
         database.exec("ROLLBACK", ignored);
     };
-    if (!database.exec("DELETE FROM meta; DELETE FROM renames; DELETE FROM comments;"
-                       " DELETE FROM bookmarks; DELETE FROM patches; DELETE FROM discovered;"
-                       " DELETE FROM types;",
+    if (!database.exec("DELETE FROM meta; DELETE FROM renames; DELETE FROM localRenames;"
+                       " DELETE FROM comments; DELETE FROM bookmarks; DELETE FROM patches;"
+                       " DELETE FROM discovered; DELETE FROM types;",
                        error)) {
         rollback();
         return false;
@@ -755,6 +777,26 @@ bool Project::saveState(const QString &binaryPath, const ProgramState &state, QS
             insert.bind(1, static_cast<qint64>(record.address));
             insert.bind(2, record.name);
             insert.bind(3, static_cast<qint64>(record.learned ? 1 : 0));
+            insert.bind(4, record.changedAt ? record.changedAt : now);
+            if (!insert.run(error)) {
+                rollback();
+                return false;
+            }
+        }
+    }
+    {
+        Statement insert(database,
+                         "INSERT INTO localRenames(function, original, name, changedAt)"
+                         " VALUES(?, ?, ?, ?)",
+                         error);
+        if (!insert.valid()) {
+            rollback();
+            return false;
+        }
+        for (const LocalRenameRecord &record : state.localRenames) {
+            insert.bind(1, static_cast<qint64>(record.function));
+            insert.bind(2, record.original);
+            insert.bind(3, record.name);
             insert.bind(4, record.changedAt ? record.changedAt : now);
             if (!insert.run(error)) {
                 rollback();

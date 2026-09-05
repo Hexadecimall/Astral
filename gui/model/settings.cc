@@ -87,6 +87,17 @@ patch.assembler = engine
 # C compiler on this machine; with it off, the source views say plainly that
 # the architecture is not supported and Astral runs nothing.
 patch.useCCompiler = false
+
+# How a program is decompiled and printed. Every setting the decompiler takes
+# is written here as `decompiler.<name>`, and one program can be given its own
+# with `decompiler.program.<program>.<name>`; the program's own wins while it
+# is open. Tools > Decompiler Settings edits them, and `astral options` prints
+# every name, the values it takes and the one in force when nothing is set.
+# A name with no line here is at its default.
+
+# Which view a program opens in: `code` for the C Astral emits, or `pseudo`
+# for the decompiler's own listing.
+decompiler.openView = code
 )");
 }
 

@@ -6,6 +6,7 @@
 #include "image.hh"
 #include "contribute.hh"
 #include "knowledge.hh"
+#include "optiontable.hh"
 #include "dotnet.hh"
 #include "session.hh"
 #include "source_learn.hh"
@@ -14,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <new>
 #include <sstream>
@@ -28,6 +30,9 @@ struct astral_program {
     std::string language_id;
     std::string compiler_spec;
     std::string format_name;
+    // Settings given to this program, by name. A setting the engine refused
+    // never reaches here, so what is written is what took effect.
+    std::map<std::string, std::string> settings;
 };
 
 struct astral_function {
@@ -378,6 +383,18 @@ astral_status astral_program_rename(astral_program *program, uint64_t address, c
     return ASTRAL_OK;
 }
 
+astral_status astral_program_rename_local(astral_program *program, uint64_t function,
+                                         const char *from, const char *to)
+{
+    if (program == nullptr || from == nullptr || to == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program or name");
+    std::string error;
+    if (!program->session->rename_local(function, from, to, error))
+        return fail(ASTRAL_ERR_INTERNAL, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
 int astral_program_instruction_length(astral_program *program, uint64_t address)
 {
     if (program == nullptr)
@@ -685,10 +702,224 @@ astral_status astral_program_set_option(astral_program *program, const char *nam
     if (program == nullptr || name == nullptr || value == nullptr)
         return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program, name or value");
     std::string error;
-    if (!program->session->set_option(name, value, error))
+    if (!program->session->set_option(name, value, "", "", error))
         return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
     clear_error();
     return ASTRAL_OK;
+}
+
+// ---------------------------------------------------------------- settings
+
+namespace {
+
+const OptionDescriptor *descriptor_at(int index)
+{
+    const std::vector<OptionDescriptor> &table = optionTable();
+    if (index < 0 || static_cast<size_t>(index) >= table.size())
+        return nullptr;
+    return &table[static_cast<size_t>(index)];
+}
+
+// What the setting stands at for this program: what was set, or its default.
+const std::string &setting_of(const astral_program *program, const OptionDescriptor &d)
+{
+    const auto found = program->settings.find(d.name);
+    return found == program->settings.end() ? d.fallback : found->second;
+}
+
+// Hands the engine one setting. `pending` is the value being tried, which is
+// not in the program's map yet, so a refusal leaves nothing behind.
+bool send_to_engine(astral_program *program, const OptionDescriptor &d,
+                    const std::string &pending, std::string &error)
+{
+    if (d.scope != OptionScope::Engine)
+        return true;
+    if (d.combined) {
+        // The engine takes the whole set of data-type splits at once, so every
+        // setting sharing this option is sent together whichever one changed.
+        std::string words[3];
+        int count = 0;
+        for (const OptionDescriptor &other : optionTable()) {
+            if (other.option != d.option)
+                continue;
+            const std::string &value = other.name == d.name ? pending
+                                                            : setting_of(program, other);
+            if (value == "on" && count < 3)
+                words[count++] = other.parameter;
+        }
+        return program->session->set_option(d.option, words[0], words[1], words[2], error);
+    }
+    if (!d.parameter.empty())
+        return program->session->set_option(d.option, d.parameter, pending, "", error);
+    return program->session->set_option(d.option, pending, "", "", error);
+}
+
+} // namespace
+
+int astral_option_count(void) { return static_cast<int>(optionTable().size()); }
+
+int astral_option_index(const char *name)
+{
+    if (name == nullptr)
+        return -1;
+    const std::vector<OptionDescriptor> &table = optionTable();
+    for (size_t i = 0; i < table.size(); ++i)
+        if (table[i].name == name)
+            return static_cast<int>(i);
+    return -1;
+}
+
+const char *astral_option_name(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->name);
+}
+
+const char *astral_option_group(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->group);
+}
+
+const char *astral_option_label(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->label);
+}
+
+const char *astral_option_explanation(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->explanation);
+}
+
+const char *astral_option_default(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->fallback);
+}
+
+const char *astral_option_engine_name(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? nullptr : cstr(d->option);
+}
+
+int astral_option_kind(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    if (d == nullptr)
+        return -1;
+    switch (d->kind) {
+    case OptionKind::Boolean:
+        return ASTRAL_OPTION_BOOLEAN;
+    case OptionKind::Integer:
+        return ASTRAL_OPTION_INTEGER;
+    case OptionKind::Choice:
+        break;
+    }
+    return ASTRAL_OPTION_CHOICE;
+}
+
+int astral_option_scope(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    if (d == nullptr)
+        return -1;
+    switch (d->scope) {
+    case OptionScope::Engine:
+        return ASTRAL_OPTION_ENGINE;
+    case OptionScope::Emission:
+        return ASTRAL_OPTION_EMISSION;
+    case OptionScope::Interface:
+        break;
+    }
+    return ASTRAL_OPTION_INTERFACE;
+}
+
+int astral_option_minimum(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? 0 : d->minimum;
+}
+
+int astral_option_maximum(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? 0 : d->maximum;
+}
+
+int astral_option_needs_reanalysis(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d != nullptr && d->needsReanalysis ? 1 : 0;
+}
+
+int astral_option_choice_count(int index)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    return d == nullptr ? 0 : static_cast<int>(d->choices.size());
+}
+
+const char *astral_option_choice(int index, int choice)
+{
+    const OptionDescriptor *d = descriptor_at(index);
+    if (d == nullptr || choice < 0 || static_cast<size_t>(choice) >= d->choices.size())
+        return nullptr;
+    return cstr(d->choices[static_cast<size_t>(choice)]);
+}
+
+astral_status astral_option_check(const char *name, const char *value)
+{
+    if (name == nullptr || value == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null name or value");
+    const OptionDescriptor *d = findOption(name);
+    if (d == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT,
+                    "no setting named '" + std::string(name) + "'");
+    std::string error;
+    if (!validOptionValue(*d, value, error))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
+    clear_error();
+    return ASTRAL_OK;
+}
+
+astral_status astral_program_set_setting(astral_program *program, const char *name,
+                                         const char *value)
+{
+    if (program == nullptr || name == nullptr || value == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program, name or value");
+    const OptionDescriptor *d = findOption(name);
+    if (d == nullptr)
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT,
+                    "no setting named '" + std::string(name) + "'");
+    std::string error;
+    if (!validOptionValue(*d, value, error))
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT, error);
+    if (!send_to_engine(program, *d, value, error)) {
+        // The engine keeps the last good configuration; put the setting back
+        // the way it was so a refused value is not half applied.
+        std::string ignored;
+        send_to_engine(program, *d, setting_of(program, *d), ignored);
+        return fail(ASTRAL_ERR_INVALID_ARGUMENT,
+                    "the decompiler refused '" + std::string(name) + " = " + value
+                        + "': " + error);
+    }
+    if (d->name == "autoNaming")
+        program->session->set_auto_naming(std::string(value) == "on");
+    program->settings[d->name] = value;
+    clear_error();
+    return ASTRAL_OK;
+}
+
+const char *astral_program_setting(astral_program *program, const char *name)
+{
+    if (program == nullptr || name == nullptr)
+        return nullptr;
+    const OptionDescriptor *d = findOption(name);
+    if (d == nullptr)
+        return nullptr;
+    return cstr(setting_of(program, *d));
 }
 
 char *astral_disassemble(astral_program *program, uint64_t address, int count)

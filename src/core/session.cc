@@ -609,7 +609,8 @@ bool Session::add_symbol(uint64_t address, const std::string &name, bool is_func
     }
 }
 
-bool Session::set_option(const std::string &name, const std::string &value, std::string &error)
+bool Session::set_option(const std::string &name, const std::string &p1, const std::string &p2,
+                         const std::string &p3, std::string &error)
 {
     try {
         ghidra::uint4 id = ghidra::ElementId::find(name, 0);
@@ -617,8 +618,24 @@ bool Session::set_option(const std::string &name, const std::string &value, std:
             error = "no decompiler option named '" + name + "'";
             return false;
         }
-        std::string message = arch_->options->set(id, value, "", "");
+        std::string message = arch_->options->set(id, p1, p2, p3);
         (void)message;
+        // Three of the decompiler's options name a category first and carry
+        // one setting each; every other option holds a single value, so a
+        // later command replaces the earlier one outright.
+        const bool byCategory = name == "braceformat" || name == "commentheader"
+                                || name == "commentinstruction";
+        const std::string key = byCategory ? name + "/" + p1 : name;
+        for (auto it = option_commands_.begin(); it != option_commands_.end(); ++it) {
+            const bool sameCategory = (*it)[0] == "braceformat" || (*it)[0] == "commentheader"
+                                      || (*it)[0] == "commentinstruction";
+            const std::string had = sameCategory ? (*it)[0] + "/" + (*it)[1] : (*it)[0];
+            if (had == key) {
+                option_commands_.erase(it);
+                break;
+            }
+        }
+        option_commands_.push_back({name, p1, p2, p3});
         return true;
     } catch (ghidra::ParseError &err) {
         error = err.explain;
@@ -626,6 +643,20 @@ bool Session::set_option(const std::string &name, const std::string &value, std:
     } catch (ghidra::LowlevelError &err) {
         error = err.explain;
         return false;
+    }
+}
+
+void Session::replay_options()
+{
+    for (const std::array<std::string, 4> &command : option_commands_) {
+        try {
+            ghidra::uint4 id = ghidra::ElementId::find(command[0], 0);
+            if (id != 0)
+                arch_->options->set(id, command[1], command[2], command[3]);
+        } catch (ghidra::LowlevelError &) {
+            // The command was accepted once; if a later state refuses it, the
+            // decompiler keeps what it had rather than the whole print failing.
+        }
     }
 }
 
@@ -1476,6 +1507,10 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
     std::ostringstream pretty;
     try {
         arch_->setPrintLanguage("astral-c");
+        // A printer just built carries the decompiler's defaults, not what
+        // this session was configured with.
+        if (!option_commands_.empty())
+            replay_options();
         arch_->print->setOutputStream(&pretty);
         arch_->print->docFunction(fd);
         readable = readable_listing(pretty.str());
@@ -1485,6 +1520,8 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
         readable = listing;
     }
     arch_->setPrintLanguage(chosen);
+    if (!option_commands_.empty())
+        replay_options();
 }
 
 // Reads everything Astral reports about a function out of the decompiled form.
@@ -2405,8 +2442,11 @@ std::unique_ptr<Session> Session::clone(std::string &error) const
     // The image is copied rather than shared: each engine writes its own
     // symbol table and patches its own copy of the bytes.
     std::unique_ptr<Session> other = Session::create(image_, archid_, error, false);
-    if (other)
+    if (other) {
         other->auto_naming_ = auto_naming_;
+        other->option_commands_ = option_commands_;
+        other->replay_options();
+    }
     return other;
 }
 

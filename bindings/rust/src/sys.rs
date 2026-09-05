@@ -269,6 +269,32 @@ extern "C" {
         value: *const c_char,
     ) -> c_int;
 
+    pub fn astral_option_count() -> c_int;
+    pub fn astral_option_index(name: *const c_char) -> c_int;
+    pub fn astral_option_name(index: c_int) -> *const c_char;
+    pub fn astral_option_group(index: c_int) -> *const c_char;
+    pub fn astral_option_label(index: c_int) -> *const c_char;
+    pub fn astral_option_explanation(index: c_int) -> *const c_char;
+    pub fn astral_option_default(index: c_int) -> *const c_char;
+    pub fn astral_option_engine_name(index: c_int) -> *const c_char;
+    pub fn astral_option_kind(index: c_int) -> c_int;
+    pub fn astral_option_scope(index: c_int) -> c_int;
+    pub fn astral_option_minimum(index: c_int) -> c_int;
+    pub fn astral_option_maximum(index: c_int) -> c_int;
+    pub fn astral_option_needs_reanalysis(index: c_int) -> c_int;
+    pub fn astral_option_choice_count(index: c_int) -> c_int;
+    pub fn astral_option_choice(index: c_int, choice: c_int) -> *const c_char;
+    pub fn astral_option_check(name: *const c_char, value: *const c_char) -> c_int;
+    pub fn astral_program_set_setting(
+        program: *mut astral_program,
+        name: *const c_char,
+        value: *const c_char,
+    ) -> c_int;
+    pub fn astral_program_setting(
+        program: *mut astral_program,
+        name: *const c_char,
+    ) -> *const c_char;
+
     pub fn astral_disassemble_readable(
         program: *mut astral_program,
         address: u64,

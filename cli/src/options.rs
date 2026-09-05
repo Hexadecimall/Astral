@@ -55,6 +55,9 @@ pub struct Options {
     pub tui: bool,
     pub why: bool,
     pub raw_names: bool,
+    /// Decompiler settings given as `--option name=value`, in the order they
+    /// were written, because a later one is meant to win.
+    pub settings: Vec<(String, String)>,
     pub c_options: astral::COptions,
     /// Threads for whole-program decompilation. None means one per core.
     pub threads: Option<i32>,
@@ -87,6 +90,7 @@ impl Default for Options {
             tui: false,
             why: false,
             raw_names: false,
+            settings: Vec::new(),
             c_options: astral::COptions::default(),
             threads: None,
             run_arguments: Vec::new(),
@@ -184,6 +188,20 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
                 };
             }
             "--no-color" | "--no-colour" => options.color = ColorMode::Never,
+            "--option" => {
+                let text = value("--option", &mut index)?;
+                let Some((name, setting)) = text.split_once('=') else {
+                    error(&format!("--option wants name=value, not {text}"));
+                    return Err(2);
+                };
+                // Refused here rather than after the binary is read, so a
+                // typo costs nothing and says what was expected.
+                if let Err(failure) = astral::check_option(name, setting) {
+                    error(&failure.message);
+                    return Err(2);
+                }
+                options.settings.push((name.to_string(), setting.to_string()));
+            }
             "--why" => options.why = true,
             "--raw-names" => options.raw_names = true,
             "--raw-listing" => options.raw_listing = true,

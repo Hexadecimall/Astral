@@ -3,6 +3,8 @@
 #ifndef ASTRAL_GUI_MAINWINDOW_HH
 #define ASTRAL_GUI_MAINWINDOW_HH
 
+#include "model/programdocument.hh"
+
 #include <QMainWindow>
 
 #include <functional>
@@ -20,6 +22,7 @@ class QTreeWidgetItem;
 class QPlainTextEdit;
 class QLineEdit;
 class QAction;
+class QToolButton;
 class QToolBar;
 class QStackedWidget;
 class QMenu;
@@ -55,6 +58,50 @@ public:
     void runDebugHook(const QString &target, const QString &arguments);
     void runAnalyzeHook();
     void runExportHook(const QString &outPath);
+    // Prints what the context menu offers for a word. A popup is not part of
+    // the window, so a picture of the window cannot show it.
+    void runMenuHook(const QString &word);
+    // Renames from a script, through the same code the menu item runs, and
+    // reports what every view would then show.
+    void runRenameHook();
+    // Opens the decompiler settings and writes out its groups, controls,
+    // values and defaults. A modal dialog is not part of the window, so a
+    // picture of the window cannot show one. `spec` is an optional list of
+    // `name=value` settings to put in and apply, and `program:` at its front
+    // asks for the open program's own values rather than the shared ones.
+    void runOptionsHook(const QString &spec, bool quitAfter = true);
+
+    // Tools > Decompiler Settings.
+    void showDecompilerSettings();
+
+    // What a context menu is about: the thing under the cursor, and where the
+    // click came from. Whatever of this is known is what decides which actions
+    // the menu offers, so a menu never carries an item that cannot act.
+    struct ContextTarget {
+        enum Origin { Source, Listing, Table, FunctionList, ProjectTree };
+        Origin origin = Source;
+        // The identifier under the cursor, empty when there was none.
+        QString word;
+        // What that word stands for in the program.
+        quint64 address = 0;
+        bool hasAddress = false;
+        bool isFunction = false;
+        // The word names a value inside `owner` rather than anything global.
+        bool isLocal = false;
+        quint64 owner = 0;
+        // The address of the listing line clicked, when there was one.
+        quint64 line = 0;
+        bool hasLine = false;
+        // The whole line the cursor sat in, for copying.
+        QString lineText;
+    };
+    // Fills a menu with everything that applies to `target`. Every menu in the
+    // window comes through here, so what right-clicking a name offers cannot
+    // drift from what right-clicking the same name in a table offers.
+    void fillContextMenu(QMenu *menu, const ContextTarget &target);
+    ContextTarget targetForWord(const QString &word, ContextTarget::Origin origin,
+                                const QString &lineText = QString()) const;
+    ContextTarget targetForAddress(quint64 address, ContextTarget::Origin origin) const;
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -97,7 +144,12 @@ private:
     void fillProgramNode(QTreeWidgetItem *root, ProgramDocument *document);
     void fillTables();
     void refreshBreakpointMarks();
+    // Debugging takes the window over: the panes that matter while a program
+    // is running come forward, and the layout goes back when it stops.
+    void setDebugging(bool debugging);
     void analyzeCurrent();
+    void analyzeWith(AnalysisRequest::Scope scope);
+    QMenu *buildAnalyzeMenu();
     void appendLog(const QString &line);
     void savePatched();
     void onPatchApplied(ProgramTab *tab);
@@ -107,14 +159,36 @@ private:
     // Renames the function under the cursor and re-reads everything that
     // printed the old name.
     void renameCurrent();
+    // Asks for a name for whatever `target` stands for, then applies it.
+    void renameTarget(const ContextTarget &target);
+    // Renames without asking, and re-reads every view that printed the old
+    // name. The dialog and the scripted run share this.
+    bool applyRename(const ContextTarget &target, const QString &name, bool learn);
+    // Every pane that could be showing a name reads it again.
+    void refreshAfterEdit(quint64 address);
+    // An edit was made that only a project can keep. Marks the project dirty,
+    // or says once that there is nowhere for it to go.
+    void noteProjectEdit();
+    // Makes a project around the program already open and puts it in.
+    void createProjectForCurrent();
+    void setCommentAt(quint64 address, const QString &kind);
+    void toggleBookmarkAt(quint64 address);
+    void forceReanalyse(quint64 address);
+    void showInListing(quint64 address);
+    void showNamingReason(quint64 address);
+    void copyToClipboard(const QString &text, const QString &what);
+    // The name to call an address in a menu item.
+    QString labelForAddress(quint64 address) const;
     void goToDefinition();
-    void fillContextMenu(QMenu *menu, const QString &word);
     void offerAnalysis(ProgramTab *tab);
     void showAnalysisRundown(ProgramTab *tab, int done, int failed, int discovered, qint64 ms);
     // Fills the references pane with what calls the current function and what
     // it calls, so a double click walks the call graph either way.
     void showReferences();
-    void updateReferences(quint64 address);
+    // `incoming` and `outgoing` say which half of the call graph is wanted, so
+    // asking what calls a function and what it calls are different answers.
+    void showReferencesFor(quint64 address, bool incoming, bool outgoing);
+    void updateReferences(quint64 address, bool incoming = true, bool outgoing = true);
     // Searches functions, symbols and strings for a piece of text.
     void findInProgram();
     void runSearch(const QString &needle);
@@ -124,7 +198,7 @@ private:
     void learnNames();
     // What Astral knows about the current function: why it chose the name,
     // what it recovered, and what it warned about.
-    void showFunctionFacts();
+    void showFunctionFacts(quint64 address = 0);
     void navigateHistory(int delta);
     void rememberLocation(quint64 address);
 
@@ -134,6 +208,8 @@ private:
     QDockWidget *referencesDock_ = nullptr;
     std::vector<quint64> history_;
     int historyAt_ = -1;
+    // An edit with no project to keep it is worth saying once, not every time.
+    bool warnedNoProject_ = false;
     bool navigatingHistory_ = false;
 
     TitleBar *titleBar_ = nullptr;
@@ -147,7 +223,11 @@ private:
     FunctionsPane *functionsPane_ = nullptr;
     ListingView *listingView_ = nullptr;
     DebuggerPane *debuggerPane_ = nullptr;
-    QDockWidget *debuggerDock_ = nullptr;
+    QDockWidget *registersDock_ = nullptr;
+    QDockWidget *stackDock_ = nullptr;
+    QDockWidget *outputDock_ = nullptr;
+    QByteArray beforeDebugging_;
+    bool debugging_ = false;
     ListingPane *listingPane_ = nullptr;
     QTreeWidget *projectTree_ = nullptr;
     ProjectController *project_ = nullptr;
@@ -158,9 +238,15 @@ private:
     TablePane *importsPane_ = nullptr;
     QPlainTextEdit *logView_ = nullptr;
     QAction *analyzeAction_ = nullptr;
+    QToolButton *analyzeButton_ = nullptr;
+    // What the next run should cover; the Analyze menu edits it.
+    AnalysisRequest analysisRequest_;
     QAction *savePatchedAction_ = nullptr;
     QDockWidget *listingDock_ = nullptr;
     QToolBar *navigationBar_ = nullptr;
+    // The transport, on a bar of its own that is only there while debugging.
+    QToolBar *debugBar_ = nullptr;
+    QAction *debuggerAction_ = nullptr;
     QLabel *statusArch_ = nullptr;
     QLabel *statusAddress_ = nullptr;
     QLabel *statusAnalysis_ = nullptr;

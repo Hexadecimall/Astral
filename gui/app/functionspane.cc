@@ -3,6 +3,7 @@
 
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QMenu>
 #include <QSortFilterProxyModel>
 #include <QTreeView>
 #include <QVBoxLayout>
@@ -45,6 +46,20 @@ FunctionsPane::FunctionsPane(QWidget *parent) : QWidget(parent)
     });
     connect(view_, &QTreeView::clicked, this, [this](const QModelIndex &index) {
         Q_EMIT functionActivated(index.data(FunctionListModel::AddressRole).toULongLong());
+    });
+
+    view_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(view_, &QTreeView::customContextMenuRequested, this, [this](const QPoint &at) {
+        const QModelIndex index = view_->indexAt(at);
+        if (!index.isValid())
+            return;
+        view_->setCurrentIndex(index);
+        QMenu menu(this);
+        Q_EMIT contextActionsWanted(&menu,
+                                    index.data(FunctionListModel::AddressRole).toULongLong());
+        if (menu.isEmpty())
+            return;
+        menu.exec(view_->viewport()->mapToGlobal(at));
     });
 }
 

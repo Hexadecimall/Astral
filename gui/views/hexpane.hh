@@ -30,7 +30,6 @@ private:
     void updateButtons();
 
     HexView *view_;
-    QPushButton *editButton_;
     QPushButton *applyButton_;
     QPushButton *revertButton_;
     QLabel *status_;

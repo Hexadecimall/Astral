@@ -313,6 +313,17 @@ void Program::set_option(const std::string &name, const std::string &value)
     check(astral_program_set_option(handle_, name.c_str(), value.c_str()));
 }
 
+void Program::set_setting(const std::string &name, const std::string &value)
+{
+    check(astral_program_set_setting(handle_, name.c_str(), value.c_str()));
+}
+
+std::string Program::setting(const std::string &name) const
+{
+    const char *value = astral_program_setting(handle_, name.c_str());
+    return value == nullptr ? std::string() : std::string(value);
+}
+
 std::string Program::disassemble(uint64_t address, int count) const
 {
     return take_string(astral_disassemble(handle_, address, count), ASTRAL_ERR_NO_SUCH_ADDRESS);
@@ -362,6 +373,11 @@ std::string Program::emit_c_all(const COptions &options) const
 void Program::rename(uint64_t address, const std::string &name, bool learn)
 {
     check(astral_program_rename(handle_, address, name.c_str(), learn ? 1 : 0));
+}
+
+void Program::rename_local(uint64_t function, const std::string &from, const std::string &to)
+{
+    check(astral_program_rename_local(handle_, function, from.c_str(), to.c_str()));
 }
 
 int Program::learn_symbols() { return astral_program_learn_symbols(handle_); }

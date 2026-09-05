@@ -1,6 +1,6 @@
 # astral
 
-A decompiler that emits C which compiles, as a Rust library.
+A decompiler that emits C you can read, as a Rust library.
 
 Astral is built on Ghidra's decompiler core, vendored and linked directly. There
 is no JVM, no Ghidra installation and no headless scripting: open a binary, get

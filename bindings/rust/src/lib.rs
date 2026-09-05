@@ -291,6 +291,105 @@ impl COptions {
     }
 }
 
+/// What kind of value a setting takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionKind {
+    /// `on` or `off`.
+    Boolean,
+    /// A whole number between the bounds.
+    Integer,
+    /// One of the listed choices, or, when none are listed, a name only the
+    /// open program can judge.
+    Choice,
+}
+
+/// Who acts on a setting's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionScope {
+    /// The decompiler's own option database.
+    Engine,
+    /// How Astral turns a decompiled function into C.
+    Emission,
+    /// The window's, and only remembered by the library.
+    Interface,
+}
+
+/// One row of the settings table: everything needed to show a setting, read it
+/// from a file, or refuse a bad value for it.
+#[derive(Debug, Clone)]
+pub struct OptionInfo {
+    pub name: String,
+    pub group: String,
+    pub label: String,
+    pub explanation: String,
+    /// The value in force when the setting has not been given one.
+    pub default_value: String,
+    /// The decompiler option this reaches, empty when nothing in the engine
+    /// corresponds to it.
+    pub engine_name: String,
+    pub kind: OptionKind,
+    pub scope: OptionScope,
+    pub minimum: i32,
+    pub maximum: i32,
+    /// Whether the function has to be analysed again for a change to show.
+    pub needs_reanalysis: bool,
+    pub choices: Vec<String>,
+}
+
+impl OptionInfo {
+    /// The type as `astral options` writes it.
+    pub fn kind_word(&self) -> String {
+        match self.kind {
+            OptionKind::Boolean => "on|off".to_string(),
+            OptionKind::Integer => format!("{}..{}", self.minimum, self.maximum),
+            OptionKind::Choice if self.choices.is_empty() => "name".to_string(),
+            OptionKind::Choice => self.choices.join("|"),
+        }
+    }
+}
+
+/// Every setting, in the order a dialog would show them.
+pub fn options() -> Vec<OptionInfo> {
+    let count = unsafe { sys::astral_option_count() };
+    (0..count)
+        .map(|index| unsafe {
+            let choices = (0..sys::astral_option_choice_count(index))
+                .map(|choice| cstr(sys::astral_option_choice(index, choice)))
+                .collect();
+            OptionInfo {
+                name: cstr(sys::astral_option_name(index)),
+                group: cstr(sys::astral_option_group(index)),
+                label: cstr(sys::astral_option_label(index)),
+                explanation: cstr(sys::astral_option_explanation(index)),
+                default_value: cstr(sys::astral_option_default(index)),
+                engine_name: cstr(sys::astral_option_engine_name(index)),
+                kind: match sys::astral_option_kind(index) {
+                    0 => OptionKind::Boolean,
+                    1 => OptionKind::Integer,
+                    _ => OptionKind::Choice,
+                },
+                scope: match sys::astral_option_scope(index) {
+                    0 => OptionScope::Engine,
+                    1 => OptionScope::Emission,
+                    _ => OptionScope::Interface,
+                },
+                minimum: sys::astral_option_minimum(index),
+                maximum: sys::astral_option_maximum(index),
+                needs_reanalysis: sys::astral_option_needs_reanalysis(index) != 0,
+                choices,
+            }
+        })
+        .collect()
+}
+
+/// Whether a setting of that name exists and would take the value. The error
+/// says what was wrong and what was expected.
+pub fn check_option(name: &str, value: &str) -> Result<()> {
+    let name = to_cstring(name)?;
+    let value = to_cstring(value)?;
+    check(unsafe { sys::astral_option_check(name.as_ptr(), value.as_ptr()) })
+}
+
 /// A loaded executable.
 pub struct Program {
     handle: *mut sys::astral_program,
@@ -504,6 +603,24 @@ impl Program {
         let name = to_cstring(name)?;
         let value = to_cstring(value)?;
         check(unsafe { sys::astral_program_set_option(self.handle, name.as_ptr(), value.as_ptr()) })
+    }
+
+    /// Applies one of the settings the option table describes. A value the
+    /// setting does not take leaves the program as it was.
+    pub fn set_setting(&mut self, name: &str, value: &str) -> Result<()> {
+        let name = to_cstring(name)?;
+        let value = to_cstring(value)?;
+        check(unsafe {
+            sys::astral_program_set_setting(self.handle, name.as_ptr(), value.as_ptr())
+        })
+    }
+
+    /// What a setting stands at now: what was set, or its default.
+    pub fn setting(&self, name: &str) -> String {
+        let Ok(name) = to_cstring(name) else {
+            return String::new();
+        };
+        unsafe { cstr(sys::astral_program_setting(self.handle, name.as_ptr())) }
     }
 
     pub fn disassemble(&self, address: u64, count: usize) -> Result<String> {

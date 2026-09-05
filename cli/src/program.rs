@@ -39,6 +39,14 @@ fn open(options: &Options) -> Option<Opened> {
     if let Some(count) = options.threads {
         program.set_threads(count);
     }
+    // The settings first, then the flags that stand for one, so writing both
+    // leaves the flag in charge.
+    for (name, value) in &options.settings {
+        if let Err(failure) = program.set_setting(name, value) {
+            library_error(&failure);
+            return None;
+        }
+    }
     if options.raw_names {
         program.set_auto_naming(false);
     }
@@ -286,6 +294,16 @@ pub fn decompile(options: &Options) -> i32 {
         let mut emit = options.c_options;
         // The explanations are off in emitted C unless they were asked for.
         emit.explain = options.why;
+        // What --option asked for, where no flag already said the same thing.
+        if program.setting("explainNames") == "on" {
+            emit.explain = true;
+        }
+        if program.setting("keepComments") == "off" {
+            emit.comments = false;
+        }
+        if program.setting("runtimeInclude") == "on" {
+            emit.self_contained = false;
+        }
         match program.emit_c(&wanted, emit) {
             Ok(text) => out.write(&paint_c(text)),
             Err(failure) => {

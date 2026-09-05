@@ -232,8 +232,12 @@ Decompiled ProgramDocument::decompileWith(astral::Program &program, quint64 addr
         result.signature = QString::fromStdString(function.signature());
         result.pseudoCode = QString::fromStdString(function.c_code());
         astral::COptions options;
+        // The view reads what a program refers to out of the runtime header
+        // and shows the reasoning behind every name it chose, whatever the
+        // settings say; only whether the decompiler's warnings are carried
+        // over is the reader's to decide.
         options.self_contained = false;
-        options.comments = true;
+        options.comments = program.setting("keepComments") != "off";
         options.explain = true;
         result.code = QString::fromStdString(program.emit_c({address}, options));
         result.address = function.address();
@@ -341,12 +345,19 @@ void ProgramDocument::decompile(quint64 address)
     });
 }
 
-void ProgramDocument::analyzeAll()
+void ProgramDocument::analyzeAll(const AnalysisRequest &request)
 {
     if (!analyzing_.testAndSetRelaxed(0, 1))
         return;
     cancel_.storeRelaxed(0);
-    QThreadPool::globalInstance()->start([this] {
+    if (request.forget) {
+        // Asking for everything again means the results held now are not
+        // wanted, so they go before the run starts rather than being reused.
+        QMutexLocker guard(&cacheLock_);
+        cache_.clear();
+        callers_.clear();
+    }
+    QThreadPool::globalInstance()->start([this, request] {
         QElapsedTimer timer;
         timer.start();
 
@@ -361,14 +372,31 @@ void ProgramDocument::analyzeAll()
             std::set<quint64> imports;
             std::atomic<int> done{0}, failed{0}, discovered{0};
         } shared;
-        for (quint64 e : entryPoints())
-            if (shared.seen.insert(e).second)
-                shared.work.push_back(e);
-        for (const FunctionEntry &f : functions_) {
+        // Imports are never decompiled, whatever the scope: they are a name
+        // and an address in another image.
+        for (const FunctionEntry &f : functions_)
             if (f.isImport)
                 shared.imports.insert(f.address);
-            else if (shared.seen.insert(f.address).second)
-                shared.work.push_back(f.address);
+
+        if (request.scope == AnalysisRequest::Scope::OneFunction) {
+            if (request.only != 0 && shared.seen.insert(request.only).second)
+                shared.work.push_back(request.only);
+        } else {
+            for (quint64 e : entryPoints())
+                if (shared.seen.insert(e).second)
+                    shared.work.push_back(e);
+            if (request.scope != AnalysisRequest::Scope::FromEntryPoints) {
+                for (const FunctionEntry &f : functions_) {
+                    if (f.isImport)
+                        continue;
+                    // Missing means what has no result yet; everything means
+                    // everything, and the cache was already dropped for it.
+                    if (request.scope == AnalysisRequest::Scope::Missing && cached(f.address))
+                        continue;
+                    if (shared.seen.insert(f.address).second)
+                        shared.work.push_back(f.address);
+                }
+            }
         }
 
         // One engine session per worker, built on the worker's own thread
@@ -376,10 +404,11 @@ void ProgramDocument::analyzeAll()
         // session stays free for the window. Small jobs get fewer workers:
         // a session costs more to build than a couple of functions cost to
         // decompile.
-        const int cores = std::clamp(QThread::idealThreadCount(), 1, 8);
+        const int wanted = request.threads > 0 ? request.threads : QThread::idealThreadCount();
+        const int cores = std::clamp(wanted, 1, 32);
         const int active = std::clamp(static_cast<int>((shared.work.size() + 3) / 4), 1, cores);
 
-        auto worker = [this, &shared]() {
+        auto worker = [this, &shared, &request]() {
             std::unique_ptr<astral::Program> owned;
             try {
                 owned = std::make_unique<astral::Program>(astral::Program::open(path_.toStdString()));
@@ -400,7 +429,13 @@ void ProgramDocument::analyzeAll()
                 std::vector<quint64> callees;
                 QString name;
                 if (const auto hit = cached(address)) {
+                    // A function decompiled before still says what it calls,
+                    // and on a stripped program those calls are the only way
+                    // the rest of it is ever found. Skipping the work must not
+                    // mean skipping what the work already learned.
                     name = hit->name;
+                    for (const CallSite &call : hit->callees)
+                        callees.push_back(call.address);
                 } else {
                     QString error;
                     Decompiled result;
@@ -421,9 +456,12 @@ void ProgramDocument::analyzeAll()
                 int total;
                 {
                     QMutexLocker guard(&shared.workLock);
-                    for (quint64 callee : callees)
-                        if (!shared.imports.count(callee) && shared.seen.insert(callee).second)
-                            shared.work.push_back(callee);
+                    // Following calls is what turns a list of known functions
+                    // into everything the program actually runs.
+                    if (request.discover)
+                        for (quint64 callee : callees)
+                            if (!shared.imports.count(callee) && shared.seen.insert(callee).second)
+                                shared.work.push_back(callee);
                     total = static_cast<int>(shared.work.size());
                 }
                 const int done = ++shared.done;
@@ -746,6 +784,57 @@ bool ProgramDocument::rename(quint64 address, const QString &name, bool learn, Q
     return true;
 }
 
+bool ProgramDocument::renameLocal(quint64 function, const QString &from, const QString &to,
+                                  QString &error)
+{
+    if (from == to)
+        return true;
+    {
+        QMutexLocker guard(&lock_);
+        try {
+            program_.rename_local(function, from.toStdString(), to.toStdString());
+        } catch (const astral::Error &e) {
+            error = QString::fromStdString(e.what());
+            return false;
+        }
+    }
+    // Only this function prints the value, so only its reading is stale.
+    invalidate(function);
+    recordLocalRename(function, from, to);
+    return true;
+}
+
+void ProgramDocument::invalidate(quint64 address)
+{
+    QMutexLocker guard(&cacheLock_);
+    cache_.erase(address);
+}
+
+void ProgramDocument::forgetAll()
+{
+    QMutexLocker guard(&cacheLock_);
+    cache_.clear();
+    callers_.clear();
+}
+
+bool ProgramDocument::setSetting(const QString &name, const QString &value, QString &error)
+{
+    QMutexLocker guard(&lock_);
+    try {
+        program_.set_setting(name.toStdString(), value.toStdString());
+        return true;
+    } catch (const std::exception &failure) {
+        error = QString::fromUtf8(failure.what());
+        return false;
+    }
+}
+
+QString ProgramDocument::setting(const QString &name)
+{
+    QMutexLocker guard(&lock_);
+    return QString::fromStdString(program_.setting(name.toStdString()));
+}
+
 // The journal is the only record of what the session changed: the engine
 // applies an edit and keeps no history of it, so a project reading state back
 // would otherwise have nothing to read.
@@ -775,6 +864,25 @@ void ProgramDocument::recordRename(quint64 address, const QString &name, bool le
         }
     }
     journal_.renames.push_back({address, name, learned, now});
+}
+
+void ProgramDocument::recordLocalRename(quint64 function, const QString &from, const QString &to)
+{
+    QMutexLocker guard(&journalLock_);
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    // Renaming a value that already carries a chosen name rewrites that row.
+    // What is stored has to stay keyed by the name a fresh decompilation
+    // produces, which is what the engine looks the choice up under.
+    for (LocalRenameRecord &record : journal_.localRenames) {
+        if (record.function != function)
+            continue;
+        if (record.name == from || record.original == from) {
+            record.name = to;
+            record.changedAt = now;
+            return;
+        }
+    }
+    journal_.localRenames.push_back({function, from, to, now});
 }
 
 void ProgramDocument::recordPatch(const QString &kind, quint64 address, const QByteArray &payload,
@@ -818,6 +926,52 @@ void ProgramDocument::recordBookmark(quint64 address, const QString &label)
     journal_.bookmarks.push_back({address, label, now});
 }
 
+QString ProgramDocument::commentAt(quint64 address, const QString &kind) const
+{
+    QMutexLocker guard(&journalLock_);
+    for (const CommentRecord &record : journal_.comments)
+        if (record.address == address && record.kind == kind)
+            return record.body;
+    return QString();
+}
+
+void ProgramDocument::removeComment(quint64 address, const QString &kind)
+{
+    QMutexLocker guard(&journalLock_);
+    for (auto it = journal_.comments.begin(); it != journal_.comments.end(); ++it) {
+        if (it->address == address && it->kind == kind) {
+            journal_.comments.erase(it);
+            return;
+        }
+    }
+}
+
+std::vector<BookmarkRecord> ProgramDocument::bookmarks() const
+{
+    QMutexLocker guard(&journalLock_);
+    return journal_.bookmarks;
+}
+
+bool ProgramDocument::hasBookmark(quint64 address) const
+{
+    QMutexLocker guard(&journalLock_);
+    for (const BookmarkRecord &record : journal_.bookmarks)
+        if (record.address == address)
+            return true;
+    return false;
+}
+
+void ProgramDocument::removeBookmark(quint64 address)
+{
+    QMutexLocker guard(&journalLock_);
+    for (auto it = journal_.bookmarks.begin(); it != journal_.bookmarks.end(); ++it) {
+        if (it->address == address) {
+            journal_.bookmarks.erase(it);
+            return;
+        }
+    }
+}
+
 int ProgramDocument::learnSymbols()
 {
     QMutexLocker guard(&lock_);
@@ -846,8 +1000,9 @@ QString ProgramDocument::exportC(QString &error)
     QMutexLocker guard(&lock_);
     try {
         astral::COptions options;
-        options.self_contained = true;
-        options.comments = true;
+        options.self_contained = program_.setting("runtimeInclude") != "on";
+        options.comments = program_.setting("keepComments") != "off";
+        options.explain = program_.setting("explainNames") == "on";
         return QString::fromStdString(program_.emit_c_all(options));
     } catch (const astral::Error &e) {
         error = QString::fromStdString(e.what());
@@ -860,8 +1015,9 @@ QString ProgramDocument::exportFunctionC(quint64 address, QString &error)
     QMutexLocker guard(&lock_);
     try {
         astral::COptions options;
-        options.self_contained = true;
-        options.comments = true;
+        options.self_contained = program_.setting("runtimeInclude") != "on";
+        options.comments = program_.setting("keepComments") != "off";
+        options.explain = program_.setting("explainNames") == "on";
         return QString::fromStdString(program_.emit_c({address}, options));
     } catch (const astral::Error &e) {
         error = QString::fromStdString(e.what());

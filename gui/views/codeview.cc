@@ -169,6 +169,19 @@ void CodeView::setGutterMarks(const std::vector<quint64> &marks, quint64 current
     gutter_->update();
 }
 
+void CodeView::scrollToAddress(quint64 address)
+{
+    for (int line = 0; line < document()->blockCount(); ++line) {
+        const auto at = addressAtLine(line);
+        if (!at || *at != address)
+            continue;
+        QTextCursor cursor(document()->findBlockByNumber(line));
+        setTextCursor(cursor);
+        centerCursor();
+        return;
+    }
+}
+
 void CodeView::paintGutter(QPaintEvent *event)
 {
     QPainter painter(gutter_);

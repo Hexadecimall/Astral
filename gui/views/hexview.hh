@@ -59,7 +59,7 @@ private:
     quint64 markSize_ = 0;
     // index into bytes_ -> the value read from the program
     QMap<qsizetype, unsigned char> dirty_;
-    bool editing_ = false;
+    bool editing_ = true;
 };
 
 } // namespace astral::gui

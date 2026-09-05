@@ -12,7 +12,7 @@
 namespace astral::gui {
 
 HexPane::HexPane(HexView *view, QWidget *parent)
-    : QWidget(parent), view_(view), editButton_(new QPushButton(tr("Edit"))),
+    : QWidget(parent), view_(view),
       applyButton_(new QPushButton(tr("Patch"))), revertButton_(new QPushButton(tr("Revert"))),
       status_(new QLabel)
 {
@@ -30,27 +30,16 @@ HexPane::HexPane(HexView *view, QWidget *parent)
     QPalette headerPalette = header->palette();
     headerPalette.setColor(QPalette::Window, Theme::current().colour(QStringLiteral("panel")));
     header->setPalette(headerPalette);
-    editButton_->setCheckable(true);
-    editButton_->setToolTip(tr("Type hex digits over the bytes to change them"));
     applyButton_->setToolTip(tr("Queue the changed bytes as a patch (Ctrl+Return)"));
-    for (QPushButton *button : {editButton_, applyButton_, revertButton_})
+    for (QPushButton *button : {applyButton_, revertButton_})
         button->setFocusPolicy(Qt::NoFocus);
     status_->setObjectName(QStringLiteral("muted"));
-    row->addWidget(editButton_);
     row->addWidget(applyButton_);
     row->addWidget(revertButton_);
     row->addWidget(status_, 1);
     layout->addWidget(header);
     layout->addWidget(view_, 1);
 
-    connect(editButton_, &QPushButton::toggled, this, [this](bool on) {
-        view_->setEditing(on);
-        editButton_->setText(on ? tr("Editing") : tr("Edit"));
-        if (!on)
-            view_->revert();
-        status_->setText(on ? tr("editing: type hex digits, apply with Ctrl+Return") : QString());
-        updateButtons();
-    });
     connect(applyButton_, &QPushButton::clicked, this, &HexPane::apply);
     connect(revertButton_, &QPushButton::clicked, this, [this] {
         view_->revert();
@@ -71,15 +60,17 @@ HexPane::HexPane(HexView *view, QWidget *parent)
 void HexPane::setDocument(ProgramDocument *document)
 {
     document_ = document;
+    // The bytes are always open to being typed over; nothing has to be
+    // announced first.
+    view_->setEditing(true);
     updateButtons();
 }
 
 void HexPane::updateButtons()
 {
+    // Only a changed byte makes Patch mean anything, so the buttons say
+    // whether anything has been typed over.
     const bool dirty = view_->dirtyCount() > 0;
-    editButton_->setEnabled(document_ != nullptr);
-    applyButton_->setVisible(view_->editing());
-    revertButton_->setVisible(view_->editing());
     applyButton_->setEnabled(dirty && document_ != nullptr);
     revertButton_->setEnabled(dirty);
 }

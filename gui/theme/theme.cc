@@ -252,6 +252,14 @@ QListWidget#searchResultsList { background: %panelRaised%; border: none; font-si
 QListWidget#searchResultsList::item { padding: 3px 10px; }
 QLabel#searchResultsSummary { background: %panel%; color: %textMuted%; font-size: 11px; border-top: 1px solid %border%; }
 QLabel#busyPill { background: %panelRaised%; color: %text%; border: 1px solid %accent%; border-radius: 12px; padding: 5px 14px; font-size: 12px; }
+QToolButton#transportButton { border: none; border-radius: 4px; padding: 3px 7px; font-size: 14px; color: %text%; }
+QToolButton#transportButton:hover { background: %hover%; }
+QToolButton#transportButton:disabled { color: %textDisabled%; }
+QComboBox#runConfigBox { padding: 2px 6px; }
+QToolButton#analyzeButton { border: 1px solid %border%; border-radius: 4px; padding: 3px 8px; color: %text%; }
+QToolButton#analyzeButton:hover { background: %hover%; border-color: %accent%; }
+QToolButton#analyzeButton::menu-button { border-left: 1px solid %border%; width: 14px; }
+QToolButton#analyzeButton:disabled { color: %textDisabled%; }
 QToolButton#headerButton { border: 1px solid %border%; border-radius: 4px; padding: 2px 10px; color: %text%; font-size: 11px; }
 QToolButton#headerButton:hover { background: %hover%; border-color: %accent%; }
 QToolButton#headerButton:disabled { color: %textDisabled%; }

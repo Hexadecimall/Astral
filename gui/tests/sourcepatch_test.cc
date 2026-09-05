@@ -27,7 +27,7 @@ private Q_SLOTS:
 private:
     // A fresh document, so one test's queued patch is not another's starting
     // point. Empty when the subject could not be built or opened.
-    std::unique_ptr<ProgramDocument> openSubject(const QString &architecture);
+    std::unique_ptr<ProgramDocument> openSubject(const QString &architecture, QString &why);
     // Astral's own C for `check`, and where it sits.
     bool recover(ProgramDocument *document, QString &code, quint64 &address, quint64 &size);
 
@@ -38,9 +38,7 @@ private:
 namespace {
 
 const char *const kSubject = R"(#include <stdio.h>
-#include <cstdint>
 #include <string.h>
-#include <utility>
 int check(const char *key) { return strcmp(key, "astral") == 0; }
 
 int main(int argc, char **argv) {
@@ -51,30 +49,48 @@ int main(int argc, char **argv) {
 }
 )";
 
-// Builds the subject for one architecture. Empty when it cannot be built.
-QString build(const QTemporaryDir &dir, const QString &architecture)
+// Builds the subject for one architecture. Empty when it cannot be built, and
+// `why` then carries the reason in the toolchain's own words. A build that
+// fails for its own reasons must never read as a missing compiler: that
+// mistake once left both suites reporting green while running nothing.
+QString build(const QTemporaryDir &dir, const QString &architecture, QString &why)
 {
     const QString cc = QStandardPaths::findExecutable(QStringLiteral("cc"));
-    if (cc.isEmpty() || !dir.isValid())
+    if (cc.isEmpty()) {
+        why = QStringLiteral("no C compiler named cc is on PATH");
         return QString();
+    }
+    if (!dir.isValid()) {
+        why = QStringLiteral("no temporary directory: ") + dir.errorString();
+        return QString();
+    }
     const QString source = dir.filePath(QStringLiteral("subject.c"));
     if (!QFile::exists(source)) {
         QFile file(source);
-        if (!file.open(QIODevice::WriteOnly))
+        if (!file.open(QIODevice::WriteOnly)) {
+            why = QStringLiteral("the subject source could not be written: ") + file.errorString();
             return QString();
+        }
         file.write(kSubject);
     }
     const QString out = dir.filePath(QStringLiteral("subject-") + architecture);
     if (QFile::exists(out))
         return out;
+    const QStringList arguments = {QStringLiteral("-O0"), QStringLiteral("-arch"), architecture,
+                                   QStringLiteral("-o"), out, source};
     QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
     // -O0 keeps the comparison in a function of its own: with optimisation the
     // compiler inlines it into main and there is nothing named to patch.
-    process.start(cc, {QStringLiteral("-O0"), QStringLiteral("-arch"), architecture,
-                       QStringLiteral("-o"), out, source});
+    process.start(cc, arguments);
     process.waitForFinished(60000);
-    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0)
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        why = QStringLiteral("%1 %2\nexit %3\n%4")
+                  .arg(cc, arguments.join(QLatin1Char(' ')))
+                  .arg(process.exitCode())
+                  .arg(QString::fromUtf8(process.readAll()).trimmed());
         return QString();
+    }
     return out;
 }
 
@@ -82,14 +98,19 @@ QString build(const QTemporaryDir &dir, const QString &architecture)
 
 void SourcePatchTest::initTestCase()
 {
-    subject_ = build(dir_, QStringLiteral("arm64"));
-    if (subject_.isEmpty())
-        QSKIP("no C compiler to build the subject with");
+    // A C compiler is what these tests are made of, not an extra they can do
+    // without: with no subject there is nothing to decompile and nothing to
+    // patch. Skipping here would report success for a suite that ran nothing,
+    // so this fails instead, and says what the toolchain said.
+    QString why;
+    subject_ = build(dir_, QStringLiteral("arm64"), why);
+    QVERIFY2(!subject_.isEmpty(), qPrintable(QStringLiteral("the subject would not build: ") + why));
 }
 
-std::unique_ptr<ProgramDocument> SourcePatchTest::openSubject(const QString &architecture)
+std::unique_ptr<ProgramDocument> SourcePatchTest::openSubject(const QString &architecture,
+                                                              QString &why)
 {
-    const QString path = build(dir_, architecture);
+    const QString path = build(dir_, architecture, why);
     if (path.isEmpty())
         return nullptr;
     QEventLoop loop;
@@ -124,8 +145,9 @@ bool SourcePatchTest::recover(ProgramDocument *document, QString &code, quint64 
 
 void SourcePatchTest::changingALiteralWritesOneSmallRegion()
 {
-    auto document = openSubject(QStringLiteral("arm64"));
-    QVERIFY2(document, "the subject did not open");
+    QString why;
+    auto document = openSubject(QStringLiteral("arm64"), why);
+    QVERIFY2(document, qPrintable(QStringLiteral("the subject did not open: ") + why));
     QVERIFY(SourcePatcher::supports(document->languageId()));
     QString before;
     quint64 address = 0, size = 0;
@@ -151,8 +173,9 @@ void SourcePatchTest::changingALiteralWritesOneSmallRegion()
 
 void SourcePatchTest::renamingALocalWritesNothing()
 {
-    auto document = openSubject(QStringLiteral("arm64"));
-    QVERIFY2(document, "the subject did not open");
+    QString why;
+    auto document = openSubject(QStringLiteral("arm64"), why);
+    QVERIFY2(document, qPrintable(QStringLiteral("the subject did not open: ") + why));
     QString before;
     quint64 address = 0, size = 0;
     QVERIFY2(recover(document.get(), before, address, size), "check did not decompile");
@@ -161,8 +184,10 @@ void SourcePatchTest::renamingALocalWritesNothing()
     static const QRegularExpression declaration(
         QStringLiteral(R"(\b(?:int|int32_t|uint32_t|long|bool)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=)"));
     const auto match = declaration.match(before);
-    if (!match.hasMatch())
-        QSKIP("the recovered source declares no local to rename");
+    // The subject is fixed, so the recovered source always declares one. If it
+    // stops doing so the decompiler changed shape, which is a finding, not a
+    // reason to pass the test without exercising anything.
+    QVERIFY2(match.hasMatch(), qPrintable(before));
     const QString name = match.captured(1);
     QString after = before;
     after.replace(QRegularExpression(QStringLiteral(R"(\b%1\b)").arg(name)),
@@ -187,9 +212,14 @@ void SourcePatchTest::namesAnArchitectureItCannotWrite()
     QCOMPARE(SourcePatcher::architectureName(QStringLiteral("x86:LE:64:default")),
              QStringLiteral("x86-64"));
 
-    auto document = openSubject(QStringLiteral("x86_64"));
-    if (!document)
-        QSKIP("no x86-64 program to refuse");
+    QString crossWhy;
+    auto document = openSubject(QStringLiteral("x86_64"), crossWhy);
+    if (!document) {
+        // Cross-building for another architecture needs a toolchain this
+        // machine may not carry. The static judgement above is checked either
+        // way; only the live refusal needs the program.
+        QSKIP(qPrintable(QStringLiteral("no x86-64 subject to refuse: ") + crossWhy));
+    }
     QVERIFY(!SourcePatcher::supports(document->languageId()));
     SourcePatcher patcher(document.get());
     const SourcePatchOutcome outcome =

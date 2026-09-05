@@ -4,6 +4,7 @@
 #define ASTRAL_GUI_DEBUGGERPANE_HH
 
 #include "model/debugsession.hh"
+#include "model/runconfig.hh"
 
 #include <QWidget>
 
@@ -11,7 +12,7 @@
 
 class QAction;
 class QLabel;
-class QLineEdit;
+class QComboBox;
 class QPlainTextEdit;
 class QToolButton;
 class QTreeWidget;
@@ -27,8 +28,19 @@ public:
 
     // The program to debug. Any run in progress is dropped.
     void setProgram(const QString &path);
+    // Opens the editor for the ways this program can be run.
+    void editConfigurations();
     // Where a run should begin, and what to show as the current function.
     void setEntry(quint64 address, const QString &name);
+
+    // Debugging takes the window over rather than living in a tab, so the
+    // parts are handed out separately and docked where they belong.
+    QWidget *controls() const { return controls_; }
+    QWidget *registersView() const;
+    QWidget *stackView() const;
+    QWidget *outputView() const;
+    // True once a run has started and has not finished.
+    bool isDebugging() const;
 
     bool hasBreakpoint(quint64 address) const;
     void toggleBreakpoint(quint64 address);
@@ -40,6 +52,8 @@ public:
 Q_SIGNALS:
     // The program stopped somewhere; the listing follows it.
     void locationChanged(quint64 address);
+    // A run began, or the program finished. The window changes shape.
+    void debuggingChanged(bool debugging);
     void breakpointsChanged();
     void logMessage(const QString &line);
 
@@ -47,6 +61,8 @@ private:
     void buildControls(QVBoxLayout *layout);
     void applyState(const DebugState &state);
     void setBusy(bool busy);
+    void loadConfigurations();
+    RunConfiguration current() const;
 
     std::unique_ptr<DebugSession> session_;
     QString path_;
@@ -58,9 +74,11 @@ private:
     QToolButton *outButton_ = nullptr;
     QToolButton *goButton_ = nullptr;
     QToolButton *stopButton_ = nullptr;
-    QLineEdit *argumentsBox_ = nullptr;
-    QLineEdit *inputBox_ = nullptr;
+    QComboBox *configBox_ = nullptr;
+    std::vector<RunConfiguration> configurations_;
     QLabel *status_ = nullptr;
+    QWidget *controls_ = nullptr;
+    bool debugging_ = false;
     QTreeWidget *registers_ = nullptr;
     QTreeWidget *stack_ = nullptr;
     QPlainTextEdit *output_ = nullptr;

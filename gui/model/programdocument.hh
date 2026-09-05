@@ -92,6 +92,29 @@ struct Decompiled {
     QStringList appliedRenames;
 };
 
+// What an analysis run should cover. Analysing a whole program is the slow
+// thing this tool does, so it is worth being able to ask for less of it.
+struct AnalysisRequest {
+    enum class Scope {
+        Everything,        // every function the program is known to have
+        Missing,           // only the ones not decompiled yet
+        FromEntryPoints,   // start at the entry points and follow the calls
+        OneFunction,       // a single function, and what it calls
+    };
+
+    Scope scope = Scope::Missing;
+    // Follow calls into code the symbol table never named. This is what finds
+    // functions in a stripped binary, and it is what makes a run open-ended.
+    bool discover = true;
+    // Throw away what was decompiled before, so everything is done again.
+    // Needed after a patch, when the old results describe code that is gone.
+    bool forget = false;
+    // How many engines to run at once. Zero means one per core.
+    int threads = 0;
+    // The function to start from, for OneFunction.
+    quint64 only = 0;
+};
+
 class ProgramDocument : public QObject {
     Q_OBJECT
 public:
@@ -130,7 +153,7 @@ public:
     std::optional<Decompiled> cached(quint64 address) const;
     // Decompiles every function in turn on a worker thread, reporting
     // analysisProgress as it goes. Repeated calls while running are ignored.
-    void analyzeAll();
+    void analyzeAll(const AnalysisRequest &request = AnalysisRequest());
     // Adds a function found by analysis; the list stays address-ordered.
     void addDiscovered(quint64 address, const QString &name);
     void cancelAnalysis() { cancel_.storeRelaxed(1); }
@@ -161,6 +184,22 @@ public:
     // recorded against a fingerprint of the body so the same code is
     // recognised in other programs.
     bool rename(quint64 address, const QString &name, bool learn, QString &error);
+    // Gives one value inside a function a new name. `from` is the name the
+    // decompiled body prints for it now; every use of it takes the new name.
+    bool renameLocal(quint64 function, const QString &from, const QString &to, QString &error);
+    // Drops what was decompiled for an address, so the next look at it is a
+    // fresh reading of the bytes.
+    void invalidate(quint64 address);
+    // The same for every address. What a printing option changed shows only
+    // once the cached text is gone.
+    void forgetAll();
+
+    // One of the settings the library's option table describes. A value the
+    // engine refuses leaves the program as it was and fills `error`.
+    bool setSetting(const QString &name, const QString &value, QString &error);
+    // What the setting stands at for this program: what was set, or its
+    // default.
+    QString setting(const QString &name);
     // Records every named function against its fingerprint. Returns how many.
     int learnSymbols();
 
@@ -187,6 +226,12 @@ public:
     void resetJournal(const ProgramState &state);
     void recordComment(quint64 address, const QString &kind, const QString &body);
     void recordBookmark(quint64 address, const QString &label);
+    // The note kept against an address, empty when there is none.
+    QString commentAt(quint64 address, const QString &kind) const;
+    void removeComment(quint64 address, const QString &kind);
+    std::vector<BookmarkRecord> bookmarks() const;
+    bool hasBookmark(quint64 address) const;
+    void removeBookmark(quint64 address);
 
 Q_SIGNALS:
     void functionReady(const Decompiled &function);
@@ -220,6 +265,7 @@ private:
     mutable QMutex journalLock_;
     ProgramState journal_;
     void recordRename(quint64 address, const QString &name, bool learned);
+    void recordLocalRename(quint64 function, const QString &from, const QString &to);
     void recordPatch(const QString &kind, quint64 address, const QByteArray &payload,
                      const QString &note);
     mutable QMutex cacheLock_;

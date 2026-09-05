@@ -54,6 +54,7 @@ set(GUI_SOURCES
     model/project.cc
     model/functionlistmodel.cc
     model/settings.cc
+    model/decompilersettings.cc
     model/runconfig.cc
     model/debugsession.cc
     model/patchbuilder.cc
@@ -66,6 +67,7 @@ set(GUI_SOURCES
     views/hexview.cc
     views/debuggerpane.cc
     views/runconfigdialog.cc
+    views/optionsdialog.cc
     views/hexpane.cc
     views/listingpane.cc
     theme/theme.cc
@@ -244,6 +246,19 @@ target_link_libraries(astral_gui_document_test PRIVATE Qt6::Widgets Qt6::Test as
 add_test(NAME gui_document COMMAND astral_gui_document_test -platform offscreen)
 set_tests_properties(gui_document PROPERTIES
     ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
+
+# The decompiler's settings: where a value is written, which of two wins, and
+# what happens to one the library refuses. The library is linked in because it
+# owns the list of settings and decides what each one takes.
+add_executable(astral_gui_options_test tests/decompilersettings_test.cc
+               model/decompilersettings.cc model/settings.cc model/programdocument.cc
+               model/functionlistmodel.cc)
+set_target_properties(astral_gui_options_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_options_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_options_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_options_test PRIVATE Qt6::Widgets Qt6::Test astral_static)
+add_test(NAME gui_options COMMAND astral_gui_options_test -platform offscreen)
 
 # The project store is checked without the engine: a manifest, a database and
 # the records that go through them are all it touches.

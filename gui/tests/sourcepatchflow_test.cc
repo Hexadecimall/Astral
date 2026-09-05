@@ -2,9 +2,9 @@
 // the key in that C, patch from it, write the binary and run it. The proof is
 // that the program now answers to the new key and refuses the old one.
 //
-// Everything the run needs is built in a temporary directory. Without a C
-// compiler to build the subject there is nothing to decompile, and the run
-// reports that instead of failing.
+// Everything the run needs is built in a temporary directory. A subject that
+// will not build is a failure, not a quiet exit: this run reported success
+// while doing nothing once, and nobody noticed for hours.
 #include "model/programdocument.hh"
 #include "model/sourcepatcher.hh"
 
@@ -24,7 +24,6 @@ namespace {
 
 const char *const kSubject = R"(#include <stdio.h>
 #include <string.h>
-#include <utility>
 int check(const char *key) { return strcmp(key, "astral") == 0; }
 
 int main(int argc, char **argv) {
@@ -65,13 +64,13 @@ int main(int argc, char **argv)
     QCoreApplication app(argc, argv);
     const QString cc = QStandardPaths::findExecutable(QStringLiteral("cc"));
     if (cc.isEmpty()) {
-        std::puts("no C compiler to build the subject with; nothing to run");
-        return 0;
+        std::puts("FAIL no C compiler named cc is on PATH, and the subject is built with one");
+        return 1;
     }
     QTemporaryDir dir;
     if (!dir.isValid()) {
-        std::puts("no temporary directory; nothing to run");
-        return 0;
+        std::printf("FAIL no temporary directory: %s\n", qPrintable(dir.errorString()));
+        return 1;
     }
     const QString source = dir.filePath(QStringLiteral("subject.c"));
     QFile file(source);
@@ -79,14 +78,20 @@ int main(int argc, char **argv)
     file.write(kSubject);
     file.close();
     const QString binary = dir.filePath(QStringLiteral("subject"));
+    const QStringList arguments = {QStringLiteral("-O0"), QStringLiteral("-o"), binary, source};
     QProcess build;
+    build.setProcessChannelMode(QProcess::MergedChannels);
     // -O0 keeps the comparison in a function of its own: at -O1 the compiler
     // inlines it into main and there is nothing named to patch.
-    build.start(cc, {QStringLiteral("-O0"), QStringLiteral("-o"), binary, source});
+    build.start(cc, arguments);
     build.waitForFinished(60000);
-    if (build.exitCode() != 0) {
-        std::puts("the subject would not build; nothing to run");
-        return 0;
+    if (build.exitStatus() != QProcess::NormalExit || build.exitCode() != 0) {
+        // Whatever the compiler said is the only useful thing here. Saying
+        // "no compiler" instead sends the reader somewhere there is no bug.
+        std::printf("FAIL the subject would not build: %s %s\nexit %d\n%s\n", qPrintable(cc),
+                    qPrintable(arguments.join(QLatin1Char(' '))), build.exitCode(),
+                    qPrintable(QString::fromUtf8(build.readAll()).trimmed()));
+        return 1;
     }
 
     int code = 0;
@@ -107,9 +112,11 @@ int main(int argc, char **argv)
         return 1;
     }
     if (!SourcePatcher::supports(document->languageId())) {
-        std::printf("Astral cannot compile for %s; nothing to run\n",
+        // The subject was built for this machine, so this is a real gap
+        // between what Astral compiles and what it runs on, not a skip.
+        std::printf("FAIL the subject is %s and Astral compiles only arm64\n",
                     qPrintable(SourcePatcher::architectureName(document->languageId())));
-        return 0;
+        return 1;
     }
 
     const auto entry = document->functionNamed(QStringLiteral("check"));

@@ -224,6 +224,15 @@ ASTRAL_API astral_status astral_program_add_symbol(astral_program *program, uint
 ASTRAL_API astral_status astral_program_rename(astral_program *program, uint64_t address,
                                                const char *name, int learn);
 
+/* Rename a local variable or a parameter inside the function at `function`.
+ *
+ * `from` is the name the decompiler prints for the value now; `to` is the name
+ * to print instead. Every use of the value is affected, because the body is
+ * printed again from the renamed symbol. The choice is kept on the program, so
+ * it survives the function being analysed again. */
+ASTRAL_API astral_status astral_program_rename_local(astral_program *program, uint64_t function,
+                                                     const char *from, const char *to);
+
 /* Record every named function in this program against a fingerprint of its
  * body, so the same code is recognised in programs that carry no symbols.
  * Returns how many were added, or a negative astral_status on failure. */
@@ -319,6 +328,59 @@ ASTRAL_API int astral_program_auto_naming(const astral_program *program);
 /* Set a decompiler option by its Ghidra name, e.g. "maxinstruction", "1000". */
 ASTRAL_API astral_status astral_program_set_option(astral_program *program, const char *name,
                                                    const char *value);
+
+/* --------------------------------------------------------------- settings --
+ *
+ * The settings that change how a program is decompiled and printed, described
+ * one row at a time so a dialog, a command line and a settings file can all be
+ * built from the same list. A setting names itself (`maxlinewidth`), and where
+ * the decompiler option takes a category first, the category is spelled after
+ * a dot (`braceformat.function`).
+ */
+
+typedef enum {
+    ASTRAL_OPTION_BOOLEAN = 0, /* "on" or "off" */
+    ASTRAL_OPTION_INTEGER = 1, /* a whole number between the bounds below */
+    ASTRAL_OPTION_CHOICE = 2   /* one of the listed choices, or, when none are
+                                  listed, a name only the program can judge */
+} astral_option_value_kind;
+
+typedef enum {
+    ASTRAL_OPTION_ENGINE = 0,    /* reaches the decompiler's option database */
+    ASTRAL_OPTION_EMISSION = 1,  /* changes the C Astral writes out */
+    ASTRAL_OPTION_INTERFACE = 2  /* the window's, and only remembered here */
+} astral_option_apply_scope;
+
+ASTRAL_API int astral_option_count(void);
+/* -1 when no setting has that name. */
+ASTRAL_API int astral_option_index(const char *name);
+ASTRAL_API const char *astral_option_name(int index);
+ASTRAL_API const char *astral_option_group(int index);
+ASTRAL_API const char *astral_option_label(int index);
+ASTRAL_API const char *astral_option_explanation(int index);
+/* The value in force when the setting has not been given one. */
+ASTRAL_API const char *astral_option_default(int index);
+/* The decompiler option this reaches, empty when nothing in the engine does. */
+ASTRAL_API const char *astral_option_engine_name(int index);
+ASTRAL_API int astral_option_kind(int index);
+ASTRAL_API int astral_option_scope(int index);
+ASTRAL_API int astral_option_minimum(int index);
+ASTRAL_API int astral_option_maximum(int index);
+/* Whether the function has to be analysed again for a change to show. */
+ASTRAL_API int astral_option_needs_reanalysis(int index);
+ASTRAL_API int astral_option_choice_count(int index);
+ASTRAL_API const char *astral_option_choice(int index, int choice);
+
+/* Whether the setting would accept the value, with no program needed. The
+ * message says what was wrong and what was expected. */
+ASTRAL_API astral_status astral_option_check(const char *name, const char *value);
+
+/* Applies a setting to an open program. A value the engine refuses leaves the
+ * program as it was and is not remembered. */
+ASTRAL_API astral_status astral_program_set_setting(astral_program *program, const char *name,
+                                                    const char *value);
+/* What the setting stands at now: what was set, or its default. */
+ASTRAL_API const char *astral_program_setting(astral_program *program, const char *name);
 
 /* ------------------------------------------------------------- disassembly */
 

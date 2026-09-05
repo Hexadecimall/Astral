@@ -33,6 +33,8 @@ public:
     void paintGutter(QPaintEvent *event);
     // Draws a dot beside each of these addresses, and an arrow at `current`.
     void setGutterMarks(const std::vector<quint64> &marks, quint64 current);
+    // Puts the line holding this address in the middle of the view.
+    void scrollToAddress(quint64 address);
 
 Q_SIGNALS:
     // The gutter was clicked on this line, which is where a breakpoint is set.

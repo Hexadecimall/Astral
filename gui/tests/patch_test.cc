@@ -35,12 +35,18 @@ int check(const char *key)
 int main(int argc, char **argv) { return argc == 2 ? check(argv[1]) : 2; }
 )";
 
-bool compile(const QTemporaryDir &dir, const QStringList &extra, const QString &out)
+// Builds the subject. `why` says what went wrong, and whether the compiler was
+// missing or present and unhappy: those need different answers from the caller,
+// and merging them once hid two dead tests behind a green run.
+bool compile(const QTemporaryDir &dir, const QStringList &extra, const QString &out, QString &why)
 {
     const QString cc = QStandardPaths::findExecutable(QStringLiteral("cc"));
-    if (cc.isEmpty())
+    if (cc.isEmpty()) {
+        why = QStringLiteral("no C compiler named cc is on PATH");
         return false;
+    }
     QProcess p;
+    p.setProcessChannelMode(QProcess::MergedChannels);
     p.start(cc, QStringList{QStringLiteral("-O2"), QStringLiteral("-w"), QStringLiteral("-fno-asynchronous-unwind-tables"),
                             QStringLiteral("-fno-stack-protector"), QStringLiteral("-target"),
                             QStringLiteral("arm64-apple-macos11"), QStringLiteral("-x"), QStringLiteral("c"),
@@ -48,7 +54,13 @@ bool compile(const QTemporaryDir &dir, const QStringList &extra, const QString &
     p.write(kSource);
     p.closeWriteChannel();
     p.waitForFinished();
-    return p.exitCode() == 0;
+    if (p.exitStatus() != QProcess::NormalExit || p.exitCode() != 0) {
+        why = QStringLiteral("the subject would not build: exit %1\n%2")
+                  .arg(p.exitCode())
+                  .arg(QString::fromUtf8(p.readAll()).trimmed());
+        return false;
+    }
+    return true;
 }
 
 QByteArray slurp(const QString &path)
@@ -65,8 +77,14 @@ void PatchTest::roundTripsArm64MachO()
     QTemporaryDir dir;
     const QString object = dir.filePath(QStringLiteral("t.o"));
     const QString linked = dir.filePath(QStringLiteral("t"));
-    if (!compile(dir, {QStringLiteral("-c")}, object) || !compile(dir, {}, linked))
-        QSKIP("no working C compiler for arm64-apple-macos");
+    QString why;
+    if (!compile(dir, {QStringLiteral("-c")}, object, why) || !compile(dir, {}, linked, why)) {
+        // A compiler that is present and refuses the subject is a fault to
+        // look at, not a machine to excuse.
+        if (!why.startsWith(QStringLiteral("no C compiler")))
+            QFAIL(qPrintable(why));
+        QSKIP(qPrintable(why));
+    }
 
     QString error;
     auto function = readObjectFunction(slurp(object), QStringLiteral("check"), error);
@@ -132,8 +150,12 @@ void PatchTest::reportsUnresolved()
 {
     QTemporaryDir dir;
     const QString object = dir.filePath(QStringLiteral("t.o"));
-    if (!compile(dir, {QStringLiteral("-c")}, object))
-        QSKIP("no working C compiler for arm64-apple-macos");
+    QString why;
+    if (!compile(dir, {QStringLiteral("-c")}, object, why)) {
+        if (!why.startsWith(QStringLiteral("no C compiler")))
+            QFAIL(qPrintable(why));
+        QSKIP(qPrintable(why));
+    }
     QString error;
     auto function = readObjectFunction(slurp(object), QStringLiteral("check"), error);
     QVERIFY2(function.has_value(), qPrintable(error));

@@ -14,13 +14,14 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QShortcut>
+#include <QTextDocument>
 #include <QVBoxLayout>
 #include <utility>
 
 namespace astral::gui {
 
 ListingPane::ListingPane(ListingView *view, QWidget *parent)
-    : QWidget(parent), view_(view), editButton_(new QPushButton(tr("Edit"))),
+    : QWidget(parent), view_(view),
       assembleButton_(new QPushButton(tr("Patch"))), revertButton_(new QPushButton(tr("Revert"))),
       status_(new QLabel)
 {
@@ -38,25 +39,24 @@ ListingPane::ListingPane(ListingView *view, QWidget *parent)
     QPalette headerPalette = header->palette();
     headerPalette.setColor(QPalette::Window, Theme::current().colour(QStringLiteral("panel")));
     header->setPalette(headerPalette);
-    editButton_->setCheckable(true);
-    editButton_->setToolTip(tr("Edit the disassembly and assemble it back into the program"));
     assembleButton_->setToolTip(tr("Assemble the edited listing in place (Ctrl+Return)"));
-    for (QPushButton *button : {editButton_, assembleButton_, revertButton_})
+    for (QPushButton *button : {assembleButton_, revertButton_})
         button->setFocusPolicy(Qt::NoFocus);
     status_->setObjectName(QStringLiteral("muted"));
-    row->addWidget(editButton_);
     row->addWidget(assembleButton_);
     row->addWidget(revertButton_);
     row->addWidget(status_, 1);
     layout->addWidget(header);
     layout->addWidget(view_, 1);
 
-    connect(editButton_, &QPushButton::toggled, this, [this](bool on) { setEditing(on); });
     connect(assembleButton_, &QPushButton::clicked, this, &ListingPane::assemble);
     connect(revertButton_, &QPushButton::clicked, this, [this] {
         view_->setPlainText(pristine_);
         status_->setText(tr("reverted to the disassembly"));
     });
+    // Typing is what turns Patch on, so the buttons follow the text.
+    connect(view_->document(), &QTextDocument::contentsChanged, this, &ListingPane::updateButtons);
+
     auto *shortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
     shortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(shortcut, &QShortcut::activated, this, &ListingPane::assemble);
@@ -67,10 +67,7 @@ ListingPane::ListingPane(ListingView *view, QWidget *parent)
 void ListingPane::setListing(const QString &text)
 {
     pristine_ = text;
-    editing_ = false;
-    const QSignalBlocker blocker(editButton_);
-    editButton_->setChecked(false);
-    view_->setEditable(false);
+    view_->setEditable(true);
     view_->setPlainText(text);
     status_->clear();
     updateButtons();
@@ -85,24 +82,12 @@ void ListingPane::setProgram(ProgramDocument *document, quint64 address)
 
 void ListingPane::updateButtons()
 {
+    // Patch means something only once the text differs from what was read,
+    // so the buttons themselves say whether anything has been changed.
     const bool possible = document_ != nullptr && !pristine_.isEmpty();
-    editButton_->setEnabled(possible);
-    assembleButton_->setEnabled(possible && editing_ && !busy_);
-    revertButton_->setEnabled(editing_ && !busy_);
-    assembleButton_->setVisible(editing_);
-    revertButton_->setVisible(editing_);
-}
-
-void ListingPane::setEditing(bool editing)
-{
-    editing_ = editing;
-    // The button label carries the state; a checked flat button reads as off.
-    editButton_->setText(editing ? tr("Editing") : tr("Edit"));
-    view_->setEditable(editing);
-    if (!editing)
-        view_->setPlainText(pristine_);
-    status_->setText(editing ? tr("editing: assemble with Ctrl+Return") : QString());
-    updateButtons();
+    const bool changed = possible && view_->toPlainText() != pristine_;
+    assembleButton_->setEnabled(changed && !busy_);
+    revertButton_->setEnabled(changed && !busy_);
 }
 
 quint64 ListingPane::span() const
@@ -171,7 +156,7 @@ ListingLine readLine(const QString &line)
 
 void ListingPane::assemble()
 {
-    if (!editing_ || busy_ || document_ == nullptr)
+    if (busy_ || document_ == nullptr)
         return;
 
     // Astral assembles its own instructions. Reaching for the system
@@ -200,8 +185,7 @@ void ListingPane::assemble()
                             if (outcome.ok) {
                                 Q_EMIT logMessage(tr("patch 0x%1: %2").arg(address_, 0, 16).arg(outcome.report));
                                 status_->setText(tr("queued %1 bytes").arg(outcome.bytes.size()));
-                                editButton_->setChecked(false);
-                                setEditing(false);
+                                view_->setPlainText(pristine_);
                                 Q_EMIT patchApplied();
                                 return;
                             }
@@ -271,8 +255,7 @@ void ListingPane::assembleWithEngine()
                          static_cast<int>(written.size()))
                           .arg(written.join(QStringLiteral(", "))));
     status_->setText(tr("queued %n instruction(s)", nullptr, static_cast<int>(written.size())));
-    editButton_->setChecked(false);
-    setEditing(false);
+    view_->setPlainText(pristine_);
     Q_EMIT patchApplied();
 }
 

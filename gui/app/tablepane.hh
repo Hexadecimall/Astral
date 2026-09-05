@@ -7,6 +7,7 @@
 #include <vector>
 
 class QLineEdit;
+class QMenu;
 class QSortFilterProxyModel;
 class QStandardItemModel;
 class QTreeView;
@@ -31,6 +32,8 @@ public:
 
 Q_SIGNALS:
     void addressActivated(quint64 address);
+    // A menu wants the actions that apply to the row under the pointer.
+    void contextActionsWanted(QMenu *menu, quint64 address);
 
 private:
     QLineEdit *filter_;

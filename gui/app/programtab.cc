@@ -35,7 +35,10 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
     // Both source views offer the same actions on the word under the cursor.
     for (DecompilerView *view : {decompiler_, pseudo_})
         connect(view->codeView(), &CodeView::contextMenuAboutToShow, this,
-                [this](QMenu *menu, const QString &word) { Q_EMIT contextActionsWanted(menu, word); });
+                [this, view](QMenu *menu, const QString &word) {
+                    Q_EMIT contextActionsWanted(menu, word,
+                                                view->codeView()->textCursor().block().text());
+                });
     auto placeholder = [](const QString &text) {
         auto *label = new QLabel(text);
         label->setAlignment(Qt::AlignCenter);

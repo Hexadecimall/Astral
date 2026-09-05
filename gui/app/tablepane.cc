@@ -2,6 +2,7 @@
 
 #include <QFontDatabase>
 #include <QHeaderView>
+#include <QMenu>
 #include <QLineEdit>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
@@ -53,6 +54,23 @@ TablePane::TablePane(const QStringList &headers, const QString &filterHint, QWid
     };
     connect(view_, &QTreeView::activated, this, activate);
     connect(view_, &QTreeView::doubleClicked, this, activate);
+
+    view_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(view_, &QTreeView::customContextMenuRequested, this, [this](const QPoint &at) {
+        const QModelIndex index = view_->indexAt(at);
+        if (!index.isValid())
+            return;
+        // Right-clicking a row selects it, so what the menu is about and what
+        // the table shows as chosen are the same row.
+        view_->setCurrentIndex(index);
+        const quint64 address =
+            proxy_->index(index.row(), 0, index.parent()).data(kAddressRole).toULongLong();
+        QMenu menu(this);
+        Q_EMIT contextActionsWanted(&menu, address);
+        if (menu.isEmpty())
+            return;
+        menu.exec(view_->viewport()->mapToGlobal(at));
+    });
 }
 
 void TablePane::setRows(const std::vector<Row> &rows, const QList<int> &monoColumns,

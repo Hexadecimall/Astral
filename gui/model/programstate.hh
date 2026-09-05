@@ -21,6 +21,16 @@ struct RenameRecord {
     qint64 changedAt = 0;
 };
 
+// A name given to one value inside a function. `original` is the name the
+// decompiler prints for it on a fresh run, which is the key the engine looks
+// the choice up under; `name` is what to print instead.
+struct LocalRenameRecord {
+    quint64 function = 0;
+    QString original;
+    QString name;
+    qint64 changedAt = 0;
+};
+
 // A note attached to an address. `kind` separates notes that belong to
 // different views of the same address, so a listing note and a decompiler
 // note can coexist.
@@ -73,6 +83,7 @@ struct ProgramState {
     QString hash;
 
     std::vector<RenameRecord> renames;
+    std::vector<LocalRenameRecord> localRenames;
     std::vector<CommentRecord> comments;
     std::vector<BookmarkRecord> bookmarks;
     std::vector<PatchRecord> patches;
@@ -81,8 +92,8 @@ struct ProgramState {
 
     bool empty() const
     {
-        return renames.empty() && comments.empty() && bookmarks.empty() && patches.empty()
-               && discovered.empty() && types.empty();
+        return renames.empty() && localRenames.empty() && comments.empty() && bookmarks.empty()
+               && patches.empty() && discovered.empty() && types.empty();
     }
 };
 

@@ -84,6 +84,17 @@ int main(int argc, char **argv)
         QTimer::singleShot(1500, &window, [&window, debugAt] {
             window.runDebugHook(debugAt, qEnvironmentVariable("ASTRAL_GUI_DEBUG_ARGS"));
         });
+    const QString menuWord = qEnvironmentVariable("ASTRAL_GUI_MENU");
+    if (!menuWord.isEmpty())
+        QTimer::singleShot(1500, &window, [&window, menuWord] { window.runMenuHook(menuWord); });
+    if (qEnvironmentVariableIsSet("ASTRAL_GUI_RENAME") || qEnvironmentVariableIsSet("ASTRAL_GUI_PROJECT"))
+        QTimer::singleShot(1500, &window, &astral::gui::MainWindow::runRenameHook);
+    if (qEnvironmentVariableIsSet("ASTRAL_GUI_OPTIONS")) {
+        const QString spec = qEnvironmentVariable("ASTRAL_GUI_OPTIONS");
+        const bool quitAfter = !parser.isSet(shotOption);
+        QTimer::singleShot(2200, &window,
+                           [&window, spec, quitAfter] { window.runOptionsHook(spec, quitAfter); });
+    }
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_ANALYZE"))
         QTimer::singleShot(1500, &window, [&window] { window.runAnalyzeHook(); });
     const QString probe = qEnvironmentVariable("ASTRAL_GUI_SEARCH");

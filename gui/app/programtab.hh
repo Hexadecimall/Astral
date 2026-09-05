@@ -52,8 +52,9 @@ public:
     void reportPatchFailed(const QString &reason);
 Q_SIGNALS:
     void viewChanged(int index);
-    // A menu wants the actions that apply to `word` at `pos`.
-    void contextActionsWanted(QMenu *menu, const QString &word);
+    // A menu wants the actions that apply to `word`. `line` is the whole line
+    // the cursor sat in, which is one of the things the menu can copy.
+    void contextActionsWanted(QMenu *menu, const QString &word, const QString &line);
     void logMessage(const QString &line);
     // A patch landed in the engine queue and is ready to write out.
     void patchApplied();

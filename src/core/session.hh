@@ -4,6 +4,7 @@
 #include "image.hh"
 #include "patch.hh"
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -114,10 +115,29 @@ public:
     // body is recognised in other programs.
     bool rename(uint64_t address, const std::string &name, bool learn, std::string &error);
 
+    // Gives a local variable or a parameter of the function at
+    // `function_address` a new name. `from` is the name the decompiler prints
+    // for it now. The decompiler names values afresh on every run, so the
+    // choice is kept and reapplied rather than written into the body once.
+    bool rename_local(uint64_t function_address, const std::string &from, const std::string &to,
+                      std::string &error);
+    // The names chosen inside one function, as printed name to chosen name.
+    // Empty when nothing there has been renamed.
+    std::vector<std::pair<std::string, std::string>> local_renames(uint64_t function_address) const;
+
     // Whether to name placeholders from evidence. On by default.
     void set_auto_naming(bool on) { auto_naming_ = on; }
     bool auto_naming() const { return auto_naming_; }
-    bool set_option(const std::string &name, const std::string &value, std::string &error);
+    // Hands one option command to the decompiler's option database. The
+    // engine takes up to three parameters; which of them mean what is the
+    // option's own business.
+    bool set_option(const std::string &name, const std::string &p1, const std::string &p2,
+                    const std::string &p3, std::string &error);
+    // Hands the decompiler every option command that succeeded, again. A
+    // printer built after an option was set knows nothing of it, and neither
+    // does a second engine cloned for another thread, so both are caught up
+    // this way rather than by threading the options through their creation.
+    void replay_options();
 
     // Runs the program, stepping its instructions as p-code over memory Astral
     // owns. Nothing is handed to the operating system: a call into the C
@@ -224,6 +244,9 @@ private:
     // form, so producing it there is work nobody asked for.
     bool want_readable_ = true;
     void analyse_function(void *funcdata, FunctionResult &out);
+    // Puts the user's chosen names on this function's values and prints the
+    // body again, so the names appear everywhere the values are used.
+    void apply_local_renames(void *funcdata, FunctionResult &out);
     void apply_learned_names();
     void apply_known_prototype(const std::string &name);
     std::string name_for_entry(uint64_t address) const;
@@ -252,6 +275,10 @@ private:
     // pass of whole-program emission) can still explain a name that an earlier
     // pass already applied.
     std::map<uint64_t, std::string> naming_reasons_;
+    // Per function, the names the user chose for its values. The key is the
+    // name the decompiler produces on a fresh run, so the choice survives the
+    // analysis being thrown away and done again.
+    std::map<uint64_t, std::vector<std::pair<std::string, std::string>>> local_renames_;
     std::string archid_;
     // The architecture holds a pointer to this for its whole life, so it has to
     // outlive every use of the architecture rather than being a local.
@@ -260,6 +287,9 @@ private:
     mutable std::map<std::string, GlobalSymbol> globals_;
     mutable bool globals_valid_ = false;
     bool auto_naming_ = true;
+    // Every option command that took, in the order it was given. One entry per
+    // setting rather than per call, so setting the same thing twice leaves one.
+    std::vector<std::array<std::string, 4>> option_commands_;
 };
 
 // Compiles a SLEIGH specification. Returns false and fills `error` on failure.

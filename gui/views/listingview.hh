@@ -1,4 +1,5 @@
-// Disassembly with the engine's patches on the right-click menu.
+// Disassembly. The menu it raises is the window's, built from the line and
+// the word the cursor sits in.
 #ifndef ASTRAL_GUI_LISTINGVIEW_HH
 #define ASTRAL_GUI_LISTINGVIEW_HH
 
@@ -12,9 +13,6 @@ public:
     explicit ListingView(QWidget *parent = nullptr);
 
 Q_SIGNALS:
-    void nopRequested(quint64 address, int count);
-    void invertRequested(quint64 address);
-    void returnRequested(quint64 address);
     void navigateRequested(quint64 address);
 
 protected:

@@ -12,11 +12,15 @@
 #include "views/listingpane.hh"
 #include "views/debuggerpane.hh"
 #include "views/listingview.hh"
+#include "views/optionsdialog.hh"
+#include "model/decompilersettings.hh"
 
 #include <QDateTime>
 
 #include <cstdio>
+#include <memory>
 #include <QFile>
+#include <QThread>
 #include <QTimer>
 #include <QInputDialog>
 #include <QTreeWidgetItem>
@@ -25,6 +29,7 @@
 #include "platform/window.hh"
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QComboBox>
@@ -53,6 +58,7 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <utility>
@@ -64,6 +70,20 @@ namespace {
 // items carry the binary they stand for here instead.
 constexpr int kProgramPathRole = Qt::UserRole + 1;
 
+
+// True while one of the hooks is driving the window. A question put to
+// nobody stops a run that has no one to answer it.
+bool scriptedRun()
+{
+    static const char *const hooks[] = {
+        "ASTRAL_GUI_EXPORT",  "ASTRAL_GUI_EDIT",    "ASTRAL_GUI_ASM",  "ASTRAL_GUI_DUMP_LISTING",
+        "ASTRAL_GUI_DEBUG",   "ASTRAL_GUI_ANALYZE", "ASTRAL_GUI_MENU", "ASTRAL_GUI_RENAME",
+        "ASTRAL_GUI_PROJECT"};
+    for (const char *hook : hooks)
+        if (qEnvironmentVariableIsSet(hook))
+            return true;
+    return false;
+}
 
 // A pane body used until the real widget for it exists: a filter box over an
 // empty list, so the layout can be judged with the right proportions.
@@ -210,6 +230,12 @@ void MainWindow::showWorkspace()
     navigationBar_->show();
     statusBar()->show();
     restoreLayout();
+    // A restored layout can bring back a toolbar that belongs to a state the
+    // window is not in, so the debugger's bar is put right after the layout
+    // rather than trusting what was saved.
+    if (debugBar_ != nullptr)
+        debugBar_->setVisible(debugging_);
+
     // A layout with nothing visible is never what anyone meant; it is what
     // the welcome screen looks like to saveState.
     bool anyVisible = false;
@@ -242,10 +268,19 @@ void MainWindow::openPath(const QString &path)
             return;
         }
         WelcomePage::rememberRecent(path);
+        // Configured before the first function is read, so nothing is
+        // recovered under settings that are about to change.
+        QStringList refused;
+        if (!DecompilerSettings::applyTo(*document, refused))
+            for (const QString &problem : refused)
+                appendLog(tr("settings: %1").arg(problem));
         auto *tab = new ProgramTab(std::move(document));
         connect(tab, &ProgramTab::logMessage, this, &MainWindow::appendLog);
         connect(tab, &ProgramTab::patchApplied, this, [this, tab] { onPatchApplied(tab); });
-        connect(tab, &ProgramTab::contextActionsWanted, this, &MainWindow::fillContextMenu);
+        connect(tab, &ProgramTab::contextActionsWanted, this,
+                [this](QMenu *menu, const QString &word, const QString &line) {
+                    fillContextMenu(menu, targetForWord(word, ContextTarget::Source, line));
+                });
         connect(tab, &ProgramTab::viewChanged, this, [this, tab](int index) {
             if (tab == currentTab() && viewBar_->currentIndex() != index)
                 viewBar_->setCurrentIndex(index);
@@ -305,9 +340,197 @@ void MainWindow::openPath(const QString &path)
         showWorkspace();
         bindCurrentTab();
         tab->showFunction(tab->document()->entryPoint());
+        // Which view a program opens in is a setting like any other, so it is
+        // read from the same place rather than fixed here.
+        const QString wantedView = DecompilerSettings::value(
+            QStringLiteral("openView"), DecompilerSettings::programKey(path));
+        if (wantedView == QStringLiteral("pseudo"))
+            selectView(wantedView);
         statusBar()->clearMessage();
         offerAnalysis(tab);
     });
+}
+
+void MainWindow::runMenuHook(const QString &word)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || !tab->document()->cached(tab->currentAddress())) {
+        QTimer::singleShot(250, this, [this, word] { runMenuHook(word); });
+        return;
+    }
+    // `listing:0x...` asks for the menu a listing line raises, which is the
+    // only way to see the patch items without a pointer.
+    ContextTarget target;
+    if (word.startsWith(QStringLiteral("listing:"))) {
+        bool ok = false;
+        const quint64 line = QStringView(word).mid(QStringLiteral("listing:0x").size())
+                                 .toULongLong(&ok, 16);
+        target = targetForWord(QString(), ContextTarget::Listing);
+        target.line = ok ? line : 0;
+        target.hasLine = ok;
+    } else {
+        target = targetForWord(word, ContextTarget::Source);
+    }
+    QMenu menu(this);
+    fillContextMenu(&menu, target);
+    std::fprintf(stderr, "menu for %s:\n", qPrintable(word));
+    for (QAction *action : menu.actions()) {
+        if (action->isSeparator()) {
+            std::fprintf(stderr, "  --\n");
+            continue;
+        }
+        const QString keys = action->shortcut().toString(QKeySequence::PortableText);
+        std::fprintf(stderr, "  %s%s\n", qPrintable(action->text()),
+                     keys.isEmpty() ? "" : qPrintable(QStringLiteral("  [%1]").arg(keys)));
+    }
+    QTimer::singleShot(100, qApp, &QCoreApplication::quit);
+}
+
+void MainWindow::showDecompilerSettings()
+{
+    ProgramTab *tab = currentTab();
+    OptionsDialog dialog(tab != nullptr ? tab->document() : nullptr, this);
+    connect(&dialog, &OptionsDialog::printingChanged, this, [this] {
+        // Printing settings change the text alone, so the function is written
+        // out again from what was already recovered.
+        if (ProgramTab *open = currentTab()) {
+            open->document()->forgetAll();
+            open->refreshCurrent();
+        }
+    });
+    connect(&dialog, &OptionsDialog::analysisChanged, this, [this] {
+        // What is recovered changes only when the code is read again, so the
+        // window says so rather than leaving the settings looking inert.
+        if (currentTab() == nullptr)
+            return;
+        const auto answer = QMessageBox::question(
+            this, tr("Analysis settings changed"),
+            tr("These settings change what the decompiler recovers, so they show only once "
+               "the code has been read again. Analyze the program now?"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+        if (answer == QMessageBox::Yes)
+            analyzeCurrent();
+    });
+    dialog.exec();
+}
+
+void MainWindow::runOptionsHook(const QString &spec, bool quitAfter)
+{
+    ProgramTab *tab = currentTab();
+    OptionsDialog dialog(tab != nullptr ? tab->document() : nullptr, this);
+    QString rest = spec;
+    if (rest.startsWith(QStringLiteral("program:"))) {
+        dialog.setPerProgram(true);
+        rest = rest.mid(QStringLiteral("program:").size());
+    }
+    std::fprintf(stderr, "options-before\n%s", qPrintable(dialog.describe()));
+    // A modal dialog is not part of the window, so a picture of the window
+    // cannot show one; it has to be asked for its own.
+    const QString picture = qEnvironmentVariable("ASTRAL_GUI_OPTIONS_SHOT");
+    if (!picture.isEmpty()) {
+        dialog.show();
+        dialog.grab().save(picture);
+    }
+    QStringList problems;
+    for (const QString &pair : rest.split(QLatin1Char(','), Qt::SkipEmptyParts)) {
+        const int equals = pair.indexOf(QLatin1Char('='));
+        if (equals <= 0)
+            continue;
+        const QString name = pair.left(equals).trimmed();
+        const QString value = pair.mid(equals + 1).trimmed();
+        if (!dialog.setShown(name, value))
+            problems << tr("no setting named %1").arg(name);
+    }
+    if (!rest.isEmpty())
+        dialog.apply(problems);
+    std::fprintf(stderr, "options-after\n%s", qPrintable(dialog.describe()));
+    for (const QString &problem : problems)
+        std::fprintf(stderr, "options-refused %s\n", qPrintable(problem));
+    if (ProgramTab *open = currentTab()) {
+        open->document()->forgetAll();
+        open->refreshCurrent();
+    }
+    // A picture of the window is taken on its own timer, so the hook leaves
+    // the application running when one was asked for.
+    if (quitAfter)
+        QTimer::singleShot(2500, qApp, &QCoreApplication::quit);
+}
+
+void MainWindow::runRenameHook()
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || !tab->document()->cached(tab->currentAddress())) {
+        QTimer::singleShot(250, this, &MainWindow::runRenameHook);
+        return;
+    }
+
+    // A project first, so what the renames record has somewhere to go.
+    const QString directory = qEnvironmentVariable("ASTRAL_GUI_PROJECT");
+    if (!directory.isEmpty() && !project_->isOpen()) {
+        QString error;
+        if (!project_->openAt(directory, error) && !project_->createAt(directory, error))
+            appendLog(tr("project %1: %2").arg(directory, error));
+        if (project_->isOpen() && !project_->project()->contains(tab->document()->path())
+            && !project_->addProgram(tab->document()->path(), error))
+            appendLog(tr("project %1: %2").arg(directory, error));
+        addProgramAction_->setEnabled(project_->isOpen());
+    }
+
+    // Each step is `word=name`. The word is looked up exactly as the menu
+    // looks it up, so this runs the same code the menu item runs. A rename
+    // throws away what was read, and reading it again is not immediate, so the
+    // steps are taken one at a time as the body comes back.
+    auto steps = std::make_shared<QStringList>(
+        qEnvironmentVariable("ASTRAL_GUI_RENAME").split(QLatin1Char(';'), Qt::SkipEmptyParts));
+    auto next = std::make_shared<std::function<void()>>();
+    *next = [this, steps, next] {
+        ProgramTab *here = currentTab();
+        if (here == nullptr || !here->document()->cached(here->currentAddress())) {
+            QTimer::singleShot(100, this, [next] { (*next)(); });
+            return;
+        }
+        if (!steps->isEmpty()) {
+            const QString step = steps->takeFirst();
+            const int split = step.indexOf(QLatin1Char('='));
+            if (split > 0) {
+                const QString word = step.left(split).trimmed();
+                const QString name = step.mid(split + 1).trimmed();
+                ContextTarget target = targetForWord(word, ContextTarget::Source);
+                if (!target.hasAddress && !target.isLocal) {
+                    std::fprintf(stderr, "rename: %s is not a name here\n", qPrintable(word));
+                } else {
+                    std::fprintf(stderr, "rename: %s -> %s (%s)\n", qPrintable(word),
+                                 qPrintable(name), target.isLocal ? "value" : "symbol");
+                    applyRename(target, name, false);
+                }
+            }
+            QTimer::singleShot(100, this, [next] { (*next)(); });
+            return;
+        }
+
+        if (project_->isOpen())
+            saveProject(false);
+
+        // Everything a view would be showing goes to stderr, where the test
+        // reads it back.
+        ProgramDocument *doc = here->document();
+        std::fprintf(stderr, "== functions\n");
+        for (const FunctionEntry &f : doc->functions())
+            std::fprintf(stderr, "  %s 0x%llx\n", qPrintable(f.name),
+                         static_cast<unsigned long long>(f.address));
+        std::fprintf(stderr, "== symbols\n");
+        for (const SymbolEntry &sym : doc->symbols())
+            std::fprintf(stderr, "  %s 0x%llx\n", qPrintable(sym.name),
+                         static_cast<unsigned long long>(sym.address));
+        if (const auto body = doc->cached(here->currentAddress())) {
+            std::fprintf(stderr, "== signature\n  %s\n", qPrintable(body->signature));
+            std::fprintf(stderr, "== code\n%s\n", qPrintable(body->code));
+            std::fprintf(stderr, "== pseudo\n%s\n", qPrintable(body->pseudoCode));
+        }
+        std::fprintf(stderr, "== listing\n%s\n", qPrintable(here->listing()));
+        QTimer::singleShot(100, qApp, &QCoreApplication::quit);
+    };
+    (*next)();
 }
 
 void MainWindow::runExportHook(const QString &outPath)
@@ -337,8 +560,7 @@ void MainWindow::runDebugHook(const QString &target, const QString &arguments)
         QTimer::singleShot(250, this, [this, target, arguments] { runDebugHook(target, arguments); });
         return;
     }
-    debuggerDock_->show();
-    debuggerDock_->raise();
+    setDebugging(true);
     const auto address = tab->document()->resolveName(target);
     debuggerPane_->runForTesting(address.value_or(0),
                                  arguments.split(QLatin1Char(' '), Qt::SkipEmptyParts));
@@ -351,6 +573,17 @@ void MainWindow::runAnalyzeHook()
         QTimer::singleShot(250, this, &MainWindow::runAnalyzeHook);
         return;
     }
+    const QString scope = qEnvironmentVariable("ASTRAL_GUI_ANALYZE_SCOPE");
+    if (scope == QStringLiteral("everything")) {
+        analysisRequest_.scope = AnalysisRequest::Scope::Everything;
+        analysisRequest_.forget = true;
+    } else if (scope == QStringLiteral("entry")) {
+        analysisRequest_.scope = AnalysisRequest::Scope::FromEntryPoints;
+    } else if (scope == QStringLiteral("one")) {
+        analysisRequest_.scope = AnalysisRequest::Scope::OneFunction;
+    }
+    if (qEnvironmentVariable("ASTRAL_GUI_ANALYZE_DISCOVER") == QStringLiteral("0"))
+        analysisRequest_.discover = false;
     connect(tab->document(), &ProgramDocument::analysisFinished, this,
             [](int, int, qint64) { QTimer::singleShot(300, qApp, &QCoreApplication::quit); });
     analyzeCurrent();
@@ -492,6 +725,43 @@ void MainWindow::bindCurrentTab()
     fillTables();
 }
 
+void MainWindow::setDebugging(bool debugging)
+{
+    if (debugging == debugging_) {
+        // The menu entry and a run that started on its own both arrive here,
+        // so the tick stays true to what is showing either way.
+        if (debuggerAction_ != nullptr)
+            debuggerAction_->setChecked(debugging);
+        return;
+    }
+    debugging_ = debugging;
+    if (debuggerAction_ != nullptr)
+        debuggerAction_->setChecked(debugging);
+    if (debugBar_ != nullptr)
+        debugBar_->setVisible(debugging);
+    if (debugging) {
+        // Keep the layout the program was being read in, so stopping puts it
+        // back rather than leaving the window rearranged.
+        beforeDebugging_ = saveState();
+        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_}) {
+            pane->show();
+            pane->raise();
+        }
+        if (listingDock_ != nullptr) {
+            listingDock_->show();
+            listingDock_->raise();
+        }
+        resizeDocks({registersDock_, stackDock_}, {260, 200}, Qt::Vertical);
+        statusAnalysis_->setText(tr("debugging"));
+    } else {
+        if (!beforeDebugging_.isEmpty())
+            restoreState(beforeDebugging_);
+        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_})
+            pane->hide();
+        statusAnalysis_->setText(tr("idle"));
+    }
+}
+
 void MainWindow::refreshBreakpointMarks()
 {
     if (listingView_ == nullptr || debuggerPane_ == nullptr)
@@ -617,6 +887,31 @@ void MainWindow::fillProgramNode(QTreeWidgetItem *root, ProgramDocument *documen
         item->setToolTip(0, QStringLiteral("0x%1").arg(f.address, 0, 16));
         item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(f.address));
     }
+
+    // What the user marked, so a bookmark and a note are places that can be
+    // walked back to rather than rows in a file nothing reads out.
+    const ProgramState kept = document->journal();
+    if (!kept.bookmarks.empty()) {
+        auto *marks = new QTreeWidgetItem(root, {tr("Bookmarks (%1)").arg(kept.bookmarks.size())});
+        marks->setExpanded(true);
+        for (const BookmarkRecord &mark : kept.bookmarks) {
+            auto *item = new QTreeWidgetItem(marks, {QStringLiteral("0x%1  %2")
+                                                         .arg(mark.address, 0, 16).arg(mark.label)});
+            item->setFont(0, mono);
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(mark.address));
+        }
+    }
+    if (!kept.comments.empty()) {
+        auto *notes = new QTreeWidgetItem(root, {tr("Notes (%1)").arg(kept.comments.size())});
+        notes->setExpanded(true);
+        for (const CommentRecord &note : kept.comments) {
+            auto *item = new QTreeWidgetItem(notes, {QStringLiteral("0x%1  %2")
+                                                         .arg(note.address, 0, 16).arg(note.body)});
+            item->setFont(0, mono);
+            item->setToolTip(0, note.body);
+            item->setData(0, Qt::UserRole, QVariant::fromValue<qulonglong>(note.address));
+        }
+    }
 }
 
 void MainWindow::offerAnalysis(ProgramTab *tab)
@@ -700,14 +995,102 @@ void MainWindow::showAnalysisRundown(ProgramTab *tab, int done, int failed, int 
         settings.setBool(key, false);
 }
 
+QMenu *MainWindow::buildAnalyzeMenu()
+{
+    auto *menu = new QMenu(this);
+
+    // What to cover. One of these runs immediately and becomes the default
+    // for the button, so the choice is made once and repeated by clicking.
+    auto *scopes = new QActionGroup(menu);
+    struct Choice {
+        AnalysisRequest::Scope scope;
+        QString text;
+        QString tip;
+    };
+    const Choice choices[] = {
+        {AnalysisRequest::Scope::Missing, tr("What Is Missing"),
+         tr("Only the functions with no result yet. The usual choice.")},
+        {AnalysisRequest::Scope::Everything, tr("Everything, Again"),
+         tr("Throw away what was decompiled and do all of it again. "
+            "What a patch makes necessary.")},
+        {AnalysisRequest::Scope::FromEntryPoints, tr("From the Entry Points"),
+         tr("Start where the program starts and follow the calls. "
+            "Reaches only what actually runs.")},
+        {AnalysisRequest::Scope::OneFunction, tr("This Function and What It Calls"),
+         tr("The function on screen, and everything it reaches.")},
+    };
+    for (const Choice &choice : choices) {
+        QAction *action = menu->addAction(choice.text, this,
+                                          [this, s = choice.scope] { analyzeWith(s); });
+        action->setToolTip(choice.tip);
+        action->setCheckable(true);
+        action->setChecked(choice.scope == analysisRequest_.scope);
+        action->setActionGroup(scopes);
+    }
+
+    menu->addSeparator();
+    QAction *discover = menu->addAction(tr("Find Unnamed Functions"));
+    discover->setToolTip(tr("Follow calls into code the symbol table never named. "
+                            "This is what finds functions in a stripped binary."));
+    discover->setCheckable(true);
+    discover->setChecked(analysisRequest_.discover);
+    connect(discover, &QAction::toggled, this, [this](bool on) { analysisRequest_.discover = on; });
+
+    menu->addSeparator();
+    auto *threads = menu->addMenu(tr("Engines"));
+    threads->setToolTip(tr("How many to run at once"));
+    auto *threadGroup = new QActionGroup(threads);
+    const int cores = QThread::idealThreadCount();
+    for (int count : {0, 1, 2, 4, 8, cores}) {
+        if (count > cores && count != 0)
+            continue;
+        QAction *action = threads->addAction(
+            count == 0 ? tr("One per core (%1)").arg(cores) : tr("%n", nullptr, count));
+        action->setCheckable(true);
+        action->setChecked(count == analysisRequest_.threads);
+        action->setActionGroup(threadGroup);
+        connect(action, &QAction::toggled, this, [this, count](bool on) {
+            if (on)
+                analysisRequest_.threads = count;
+        });
+    }
+
+    menu->addSeparator();
+    menu->addAction(tr("Stop"), this, [this] {
+        if (ProgramTab *tab = currentTab())
+            tab->document()->cancelAnalysis();
+    });
+    // Tooltips in a menu are off by default, and these are where the
+    // explanation of each choice lives.
+    menu->setToolTipsVisible(true);
+    return menu;
+}
+
+void MainWindow::analyzeWith(AnalysisRequest::Scope scope)
+{
+    analysisRequest_.scope = scope;
+    analysisRequest_.forget = scope == AnalysisRequest::Scope::Everything;
+    analyzeCurrent();
+}
+
 void MainWindow::analyzeCurrent()
 {
     ProgramTab *tab = currentTab();
     if (!tab)
         return;
     analyzeAction_->setEnabled(false);
-    appendLog(tr("analysis of %1 started").arg(QFileInfo(tab->document()->path()).fileName()));
-    tab->document()->analyzeAll();
+    AnalysisRequest request = analysisRequest_;
+    request.only = tab->currentAddress();
+    static const QStringList names = {tr("everything, again"), tr("what is missing"),
+                                      tr("from the entry points"), tr("this function")};
+    const int which = request.scope == AnalysisRequest::Scope::Everything        ? 0
+                      : request.scope == AnalysisRequest::Scope::Missing         ? 1
+                      : request.scope == AnalysisRequest::Scope::FromEntryPoints ? 2
+                                                                                 : 3;
+    appendLog(tr("analysis of %1 started: %2%3")
+                  .arg(QFileInfo(tab->document()->path()).fileName(), names[which],
+                       request.discover ? tr(", finding unnamed functions") : QString()));
+    tab->document()->analyzeAll(request);
 }
 
 void MainWindow::appendLog(const QString &line)
@@ -1012,6 +1395,16 @@ void MainWindow::showProjectTreeMenu(const QPoint &at)
 {
     QTreeWidgetItem *item = projectTree_->itemAt(at);
     QMenu menu(this);
+    // An item that stands for an address gets exactly what the same address
+    // gets anywhere else in the window.
+    const QVariant address = item ? item->data(0, Qt::UserRole) : QVariant();
+    if (address.isValid() && address.toULongLong() != 0) {
+        projectTree_->setCurrentItem(item);
+        fillContextMenu(&menu, targetForAddress(address.toULongLong(),
+                                                ContextTarget::ProjectTree));
+        if (!menu.isEmpty())
+            menu.addSeparator();
+    }
     if (project_->isOpen()) {
         menu.addAction(tr("Add Program to Project..."), this, &MainWindow::addProgramToProject);
         const QVariant member = item ? item->data(0, kProgramPathRole) : QVariant();
@@ -1078,55 +1471,501 @@ void MainWindow::goToDefinition()
     tab->showAddress(*address);
 }
 
-void MainWindow::fillContextMenu(QMenu *menu, const QString &word)
+QString MainWindow::labelForAddress(quint64 address) const
+{
+    ProgramTab *tab = currentTab();
+    if (tab != nullptr) {
+        if (const auto function = tab->document()->functionAt(address))
+            return function->name;
+        for (const SymbolEntry &symbol : tab->document()->symbols())
+            if (symbol.address == address && !symbol.name.isEmpty())
+                return symbol.name;
+    }
+    return QStringLiteral("0x%1").arg(address, 0, 16);
+}
+
+MainWindow::ContextTarget MainWindow::targetForWord(const QString &word,
+                                                    ContextTarget::Origin origin,
+                                                    const QString &lineText) const
+{
+    ContextTarget target;
+    target.origin = origin;
+    target.word = word.trimmed();
+    target.lineText = lineText;
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || target.word.isEmpty())
+        return target;
+    ProgramDocument *doc = tab->document();
+    if (const auto address = doc->resolveName(target.word)) {
+        target.address = *address;
+        target.hasAddress = true;
+        target.isFunction = doc->functionAt(*address).has_value();
+        return target;
+    }
+    // Not a name the program defines. It may still be one of the values inside
+    // the function on screen, which only the decompiled body knows about.
+    const quint64 here = tab->currentAddress();
+    if (const auto function = doc->cached(here)) {
+        for (const std::vector<VariableEntry> *values : {&function->parameters, &function->locals})
+            for (const VariableEntry &value : *values)
+                if (value.name == target.word) {
+                    target.isLocal = true;
+                    target.owner = here;
+                    return target;
+                }
+    }
+    return target;
+}
+
+MainWindow::ContextTarget MainWindow::targetForAddress(quint64 address,
+                                                       ContextTarget::Origin origin) const
+{
+    ContextTarget target;
+    target.origin = origin;
+    target.address = address;
+    target.hasAddress = address != 0;
+    target.word = target.hasAddress ? labelForAddress(address) : QString();
+    ProgramTab *tab = currentTab();
+    if (tab != nullptr && target.hasAddress)
+        target.isFunction = tab->document()->functionAt(address).has_value();
+    return target;
+}
+
+void MainWindow::fillContextMenu(QMenu *menu, const ContextTarget &target)
 {
     ProgramTab *tab = currentTab();
     if (tab == nullptr)
         return;
     ProgramDocument *doc = tab->document();
-    const auto address = doc->resolveName(word);
-    if (address) {
-        const auto entry = doc->functionAt(*address);
-        const QString label = entry ? entry->name : QStringLiteral("0x%1").arg(*address, 0, 16);
+
+    // Groups are divided by a line, and a group that turns out to have nothing
+    // in it leaves none behind.
+    int marker = static_cast<int>(menu->actions().size());
+    auto section = [menu, &marker] {
+        if (static_cast<int>(menu->actions().size()) > marker)
+            menu->addSeparator();
+        marker = static_cast<int>(menu->actions().size());
+    };
+
+    const QString label = target.hasAddress ? labelForAddress(target.address) : target.word;
+    const quint64 lineAddress = target.hasLine ? target.line : 0;
+    // The function the menu is about. A word that names one names it; a value
+    // belongs to the one it is declared in; anything else belongs to the one
+    // being read, so a click in the middle of a body still offers what can be
+    // said about that body.
+    const quint64 subject = target.isFunction  ? target.address
+                            : target.isLocal   ? target.owner
+                                               : tab->currentAddress();
+    const QString subjectLabel = subject != 0 ? labelForAddress(subject) : QString();
+    const auto function = subject != 0 ? doc->cached(subject) : std::nullopt;
+    const QString commentKind = target.origin == ContextTarget::Listing
+                                    ? QStringLiteral("listing")
+                                    : QStringLiteral("code");
+
+    // ------------------------------------------------------------ navigate
+    if (target.hasAddress) {
         menu->addAction(tr("Go to Definition of %1").arg(label), QKeySequence(Qt::CTRL | Qt::Key_B),
-                        this, [tab, address] { tab->showAddress(*address); });
+                        this, [this, target] { currentTab()->showAddress(target.address); });
         menu->addAction(tr("Cross References to %1").arg(label),
-                        QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X), this, [this, tab, address] {
-                            tab->showFunction(*address);
-                            showReferences();
-                        });
-        menu->addAction(tr("Show %1 in Hex").arg(label), this, [tab, address] {
-            tab->setView(ProgramTab::Hex);
-            tab->showAddress(*address);
+                        QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X), this,
+                        [this, target] { showReferencesFor(target.address, true, false); });
+        if (target.isFunction && function && !function->callees.empty()) {
+            menu->addAction(tr("Cross References from %1").arg(label), this,
+                            [this, target] { showReferencesFor(target.address, false, true); });
+        }
+        menu->addAction(tr("Show %1 in Listing").arg(label), this,
+                        [this, target] { showInListing(target.address); });
+        menu->addAction(tr("Show %1 in Hex").arg(label), this, [this, target] {
+            ProgramTab *here = currentTab();
+            here->setView(ProgramTab::Hex);
+            here->showAddress(target.address);
         });
-        menu->addSeparator();
+    }
+    if (target.hasLine && !target.hasAddress) {
+        menu->addAction(tr("Show 0x%1 in Hex").arg(lineAddress, 0, 16), this,
+                        [this, lineAddress] {
+                            ProgramTab *here = currentTab();
+                            here->setView(ProgramTab::Hex);
+                            here->showAddress(lineAddress);
+                        });
+    }
+    menu->addAction(tr("Go to Address..."), QKeySequence(Qt::CTRL | Qt::Key_G), this, [this] {
+        searchBox_->setFocus();
+        searchBox_->selectAll();
+    });
+    if (historyAt_ > 0)
+        menu->addAction(tr("Back"), QKeySequence(Qt::CTRL | Qt::Key_BracketLeft), this,
+                        [this] { navigateHistory(-1); });
+
+    // ---------------------------------------------------------------- edit
+    section();
+    if (target.isLocal) {
+        menu->addAction(tr("Rename %1...").arg(target.word), QKeySequence(Qt::CTRL | Qt::Key_R),
+                        this, [this, target] { renameTarget(target); });
+    } else if (target.hasAddress) {
         menu->addAction(tr("Rename %1...").arg(label), QKeySequence(Qt::CTRL | Qt::Key_R), this,
-                        [this, tab, address] {
-                            tab->showFunction(*address);
-                            renameCurrent();
+                        [this, target] { renameTarget(target); });
+    }
+    const quint64 noteAt = target.hasAddress ? target.address : lineAddress;
+    if (noteAt != 0) {
+        const bool has = !doc->commentAt(noteAt, commentKind).isEmpty();
+        menu->addAction(has ? tr("Edit Note on %1...").arg(labelForAddress(noteAt))
+                            : tr("Set Note on %1...").arg(labelForAddress(noteAt)),
+                        QKeySequence(Qt::CTRL | Qt::Key_Semicolon), this,
+                        [this, noteAt, commentKind] { setCommentAt(noteAt, commentKind); });
+        if (has) {
+            menu->addAction(tr("Remove Note"), this, [this, noteAt, commentKind] {
+                currentTab()->document()->removeComment(noteAt, commentKind);
+                noteProjectEdit();
+                fillProjectTree();
+            });
+        }
+    }
+
+    // ------------------------------------------------------------ analysis
+    section();
+    if (subject != 0 && doc->functionAt(subject)) {
+        menu->addAction(tr("Decompile %1").arg(subjectLabel), this,
+                        [this, subject] { currentTab()->showFunction(subject); });
+        menu->addAction(tr("Force Re-analyse %1").arg(subjectLabel), this,
+                        [this, subject] { forceReanalyse(subject); });
+    }
+    if (function) {
+        menu->addAction(tr("What Astral Knows About %1").arg(subjectLabel),
+                        QKeySequence(Qt::CTRL | Qt::Key_K), this,
+                        [this, subject] { showFunctionFacts(subject); });
+        if (!function->namingReason.isEmpty())
+            menu->addAction(tr("Why Is It Called %1?").arg(subjectLabel), this,
+                            [this, subject] { showNamingReason(subject); });
+    }
+
+    // --------------------------------------------------------------- marks
+    section();
+    const quint64 markAt = lineAddress != 0 ? lineAddress : target.address;
+    if (markAt != 0) {
+        menu->addAction(debuggerPane_->hasBreakpoint(markAt)
+                            ? tr("Clear Breakpoint at 0x%1").arg(markAt, 0, 16)
+                            : tr("Set Breakpoint at 0x%1").arg(markAt, 0, 16),
+                        this, [this, markAt] {
+                            debuggerPane_->toggleBreakpoint(markAt);
+                            refreshBreakpointMarks();
                         });
-        menu->addAction(tr("Copy Address"), this, [address] {
-            QApplication::clipboard()->setText(QStringLiteral("0x%1").arg(*address, 0, 16));
+        menu->addAction(doc->hasBookmark(markAt) ? tr("Remove Bookmark") : tr("Bookmark This..."),
+                        this, [this, markAt] { toggleBookmarkAt(markAt); });
+    }
+
+    // --------------------------------------------------------------- patch
+    if (target.origin == ContextTarget::Listing && lineAddress != 0) {
+        section();
+        menu->addAction(tr("Patch: no-op this instruction"), this, [this, lineAddress] {
+            applyPatch([this, lineAddress](QString &error) {
+                return currentTab()->document()->patchNop(lineAddress, 1, error);
+            }, tr("no-op 1 instruction at 0x%1").arg(lineAddress, 0, 16));
         });
-    } else if (!word.isEmpty()) {
-        QAction *dead = menu->addAction(tr("%1 is not a known name").arg(word));
-        dead->setEnabled(false);
+        menu->addAction(tr("Patch: no-op N instructions..."), this, [this, lineAddress] {
+            bool ok = false;
+            const int count = QInputDialog::getInt(this, tr("No-op"), tr("Instructions"), 1, 1,
+                                                   4096, 1, &ok);
+            if (!ok)
+                return;
+            applyPatch([this, lineAddress, count](QString &error) {
+                return currentTab()->document()->patchNop(lineAddress, count, error);
+            }, tr("no-op %n instruction(s) at 0x%1", nullptr, count).arg(lineAddress, 0, 16));
+        });
+        menu->addAction(tr("Patch: invert this branch"), this, [this, lineAddress] {
+            applyPatch([this, lineAddress](QString &error) {
+                return currentTab()->document()->patchInvert(lineAddress, error);
+            }, tr("invert branch at 0x%1").arg(lineAddress, 0, 16));
+        });
+        menu->addAction(tr("Patch: make function return a value..."), this, [this, lineAddress] {
+            bool ok = false;
+            const QString text = QInputDialog::getText(
+                this, tr("Return value"),
+                tr("Make the function at 0x%1 return:").arg(lineAddress, 0, 16),
+                QLineEdit::Normal, QStringLiteral("0"), &ok);
+            if (!ok)
+                return;
+            bool parsed = false;
+            const quint64 value = text.startsWith(QStringLiteral("0x"))
+                                      ? QStringView(text).mid(2).toULongLong(&parsed, 16)
+                                      : text.toULongLong(&parsed, 10);
+            if (!parsed) {
+                statusBar()->showMessage(tr("Not a number: %1").arg(text), 3000);
+                return;
+            }
+            applyPatch([this, lineAddress, value](QString &error) {
+                return currentTab()->document()->patchReturn(lineAddress, value, error);
+            }, tr("return %1 from the function at 0x%2").arg(value).arg(lineAddress, 0, 16));
+        });
+    }
+
+    // ---------------------------------------------------------------- copy
+    section();
+    if (!target.word.isEmpty()) {
+        menu->addAction(tr("Copy Name"), this,
+                        [this, target] { copyToClipboard(target.word, tr("name")); });
+    }
+    if (target.hasAddress || lineAddress != 0) {
+        const quint64 address = target.hasAddress ? target.address : lineAddress;
+        menu->addAction(tr("Copy Address"), this, [this, address] {
+            copyToClipboard(QStringLiteral("0x%1").arg(address, 0, 16), tr("address"));
+        });
+    }
+    if (!target.lineText.trimmed().isEmpty()) {
+        menu->addAction(tr("Copy Line"), this, [this, target] {
+            copyToClipboard(target.lineText, tr("line"));
+        });
+    }
+    if (function) {
+        menu->addAction(tr("Copy %1 as C").arg(subjectLabel), this, [this, subject] {
+            if (const auto body = currentTab()->document()->cached(subject))
+                copyToClipboard(body->code, tr("C"));
+        });
+        menu->addAction(tr("Copy %1 as Pseudo-C").arg(subjectLabel), this, [this, subject] {
+            if (const auto body = currentTab()->document()->cached(subject))
+                copyToClipboard(body->pseudoCode, tr("pseudo-C"));
+        });
+    }
+    if (subject != 0 && doc->functionAt(subject)) {
+        menu->addAction(tr("Copy Disassembly of %1").arg(subjectLabel), this, [this, subject] {
+            ProgramDocument *here = currentTab()->document();
+            const auto entry = here->functionAt(subject);
+            const auto body = here->cached(subject);
+            const quint64 size = body ? body->size : entry ? entry->size : 0;
+            copyToClipboard(here->disassemble(subject, size), tr("disassembly"));
+        });
     }
 }
 
-void MainWindow::renameCurrent()
+void MainWindow::copyToClipboard(const QString &text, const QString &what)
+{
+    QApplication::clipboard()->setText(text);
+    statusBar()->showMessage(tr("Copied the %1").arg(what), 2000);
+}
+
+void MainWindow::showInListing(quint64 address)
 {
     ProgramTab *tab = currentTab();
     if (tab == nullptr)
         return;
-    const quint64 address = tab->currentAddress();
+    const auto owner = tab->document()->functionAt(address);
+    if (owner && owner->address != tab->currentAddress())
+        tab->showFunction(owner->address);
+    if (listingDock_ != nullptr) {
+        listingDock_->show();
+        listingDock_->raise();
+    }
+    // Changing function replaces the listing, so the scroll waits for the
+    // text that replaces it.
+    QTimer::singleShot(0, this, [this, address] { listingView_->scrollToAddress(address); });
+}
+
+void MainWindow::forceReanalyse(quint64 address)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    tab->document()->invalidate(address);
+    appendLog(tr("re-reading the function at 0x%1").arg(address, 0, 16));
+    tab->showFunction(address);
+}
+
+void MainWindow::showNamingReason(quint64 address)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    const auto function = tab->document()->cached(address);
+    if (!function || function->namingReason.isEmpty()) {
+        statusBar()->showMessage(tr("that name came from the program itself"), 3000);
+        return;
+    }
+    QMessageBox::information(this, tr("Why It Is Called That"),
+                             tr("%1 is called that because %2.")
+                                 .arg(function->name, function->namingReason));
+}
+
+void MainWindow::setCommentAt(quint64 address, const QString &kind)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || address == 0)
+        return;
     ProgramDocument *doc = tab->document();
-    const auto entry = doc->functionAt(address);
-    const QString current = entry ? entry->name : QString();
     bool accepted = false;
-    const QString name = QInputDialog::getText(this, tr("Rename Function"),
-                                               tr("Name for the function at 0x%1:")
-                                                   .arg(address, 0, 16),
+    const QString body = QInputDialog::getText(this, tr("Note"),
+                                               tr("Note on %1:").arg(labelForAddress(address)),
+                                               QLineEdit::Normal, doc->commentAt(address, kind),
+                                               &accepted);
+    if (!accepted)
+        return;
+    if (body.trimmed().isEmpty())
+        doc->removeComment(address, kind);
+    else
+        doc->recordComment(address, kind, body.trimmed());
+    appendLog(tr("note on 0x%1: %2").arg(address, 0, 16).arg(body.trimmed()));
+    noteProjectEdit();
+    fillProjectTree();
+}
+
+void MainWindow::toggleBookmarkAt(quint64 address)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr || address == 0)
+        return;
+    ProgramDocument *doc = tab->document();
+    if (doc->hasBookmark(address)) {
+        doc->removeBookmark(address);
+        appendLog(tr("bookmark removed from 0x%1").arg(address, 0, 16));
+    } else {
+        bool accepted = false;
+        const QString label = QInputDialog::getText(this, tr("Bookmark"), tr("Call it:"),
+                                                    QLineEdit::Normal, labelForAddress(address),
+                                                    &accepted);
+        if (!accepted)
+            return;
+        doc->recordBookmark(address, label.trimmed().isEmpty() ? labelForAddress(address)
+                                                               : label.trimmed());
+        appendLog(tr("bookmarked 0x%1").arg(address, 0, 16));
+    }
+    noteProjectEdit();
+    fillProjectTree();
+}
+
+void MainWindow::noteProjectEdit()
+{
+    if (project_->isOpen()) {
+        project_->markDirty();
+        return;
+    }
+    if (warnedNoProject_)
+        return;
+    warnedNoProject_ = true;
+    const QString message = tr("No project is open, so this edit lasts only as long as Astral "
+                               "is running.");
+    appendLog(message);
+    if (scriptedRun())
+        return;
+    if (QMessageBox::question(this, tr("Nothing Is Keeping This"),
+                              tr("%1\n\nMake a project around this program now?").arg(message),
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes)
+        == QMessageBox::Yes)
+        createProjectForCurrent();
+}
+
+void MainWindow::createProjectForCurrent()
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    QString directory = QFileDialog::getSaveFileName(this, tr("New Project"), QString(),
+                                                     tr("Astral Project (*.astralproj)"));
+    if (directory.isEmpty())
+        return;
+    if (!directory.endsWith(Project::suffix()))
+        directory += Project::suffix();
+    QString error;
+    if (!project_->createAt(directory, error)) {
+        QMessageBox::warning(this, tr("Cannot Create Project"), error);
+        return;
+    }
+    if (!project_->addProgram(tab->document()->path(), error)) {
+        QMessageBox::warning(this, tr("Cannot Add Program"), error);
+        return;
+    }
+    WelcomePage::rememberRecent(project_->directory());
+    setWindowTitle(QStringLiteral("%1 - Astral").arg(project_->displayName()));
+    addProgramAction_->setEnabled(true);
+    appendLog(tr("created project %1 around %2")
+                  .arg(project_->directory(), QFileInfo(tab->document()->path()).fileName()));
+    saveProject(false);
+    fillProjectTree();
+}
+
+void MainWindow::refreshAfterEdit(quint64 address)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    tab->functionModel()->setFunctions(tab->document()->functions());
+    fillTables();
+    fillProjectTree();
+    // Whatever is on screen printed the old name too, so that is what gets
+    // read again: renaming from a call site leaves the reader where they were,
+    // looking at the new name. The renamed function is read afresh whenever it
+    // is next opened, because the edit dropped everything the document held.
+    const quint64 showing = tab->currentAddress() != 0 ? tab->currentAddress() : address;
+    updateReferences(showing);
+    tab->showFunction(showing);
+}
+
+bool MainWindow::applyRename(const ContextTarget &target, const QString &name, bool learn)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return false;
+    ProgramDocument *doc = tab->document();
+    const QString wanted = name.trimmed();
+    if (wanted.isEmpty())
+        return false;
+    QString error;
+
+    if (target.isLocal) {
+        if (!doc->renameLocal(target.owner, target.word, wanted, error)) {
+            QMessageBox::warning(this, tr("Rename Failed"), error);
+            return false;
+        }
+        appendLog(tr("renamed %1 to %2 in the function at 0x%3")
+                      .arg(target.word, wanted).arg(target.owner, 0, 16));
+        noteProjectEdit();
+        refreshAfterEdit(target.owner);
+        return true;
+    }
+
+    if (!target.hasAddress)
+        return false;
+    if (!doc->rename(target.address, wanted, learn, error)) {
+        QMessageBox::warning(this, tr("Rename Failed"), error);
+        return false;
+    }
+    appendLog(tr("renamed 0x%1 to %2%3").arg(target.address, 0, 16)
+                  .arg(wanted, learn ? tr(" (remembered)") : QString()));
+    noteProjectEdit();
+    // Every caller printed the old name, so the whole reading of the program
+    // is stale; the document drops it, and the panes are filled again here.
+    refreshAfterEdit(target.address);
+    return true;
+}
+
+void MainWindow::renameTarget(const ContextTarget &target)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    if (!target.isLocal && !target.hasAddress) {
+        statusBar()->showMessage(target.word.isEmpty()
+                                     ? tr("Put the cursor on a name first")
+                                     : tr("%1 is not something this program names").arg(target.word),
+                                 3000);
+        return;
+    }
+
+    if (target.isLocal) {
+        bool accepted = false;
+        const QString name = QInputDialog::getText(
+            this, tr("Rename Value"),
+            tr("Name for %1 in %2:").arg(target.word, labelForAddress(target.owner)),
+            QLineEdit::Normal, target.word, &accepted);
+        if (accepted)
+            applyRename(target, name, false);
+        return;
+    }
+
+    const auto entry = tab->document()->functionAt(target.address);
+    const QString current = entry ? entry->name : labelForAddress(target.address);
+    bool accepted = false;
+    const QString name = QInputDialog::getText(this, tr("Rename"),
+                                               tr("Name for %1 at 0x%2:")
+                                                   .arg(current).arg(target.address, 0, 16),
                                                QLineEdit::Normal, current, &accepted);
     if (!accepted || name.trimmed().isEmpty())
         return;
@@ -1137,22 +1976,23 @@ void MainWindow::renameCurrent()
                                                  .arg(name.trimmed()),
                                              QMessageBox::Yes | QMessageBox::No,
                                              QMessageBox::Yes) == QMessageBox::Yes;
-    QString error;
-    if (!doc->rename(address, name.trimmed(), learn, error)) {
-        QMessageBox::warning(this, tr("Rename Failed"), error);
-        return;
-    }
-    appendLog(tr("renamed 0x%1 to %2%3").arg(address, 0, 16).arg(name.trimmed(),
-                                                                 learn ? tr(" (remembered)")
-                                                                       : QString()));
-    project_->markDirty();
-    tab->functionModel()->setFunctions(doc->functions());
-    fillTables();
-    fillProjectTree();
-    tab->showFunction(address);
+    applyRename(target, name, learn);
 }
 
-void MainWindow::updateReferences(quint64 address)
+void MainWindow::renameCurrent()
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    // The keyboard shortcut acts on whatever the cursor sits in, the same as
+    // the menu item does; the current function is what it falls back to.
+    ContextTarget target = targetForWord(tab->currentWord(), ContextTarget::Source);
+    if (!target.isLocal && !target.hasAddress)
+        target = targetForAddress(tab->currentAddress(), ContextTarget::Source);
+    renameTarget(target);
+}
+
+void MainWindow::updateReferences(quint64 address, bool incoming, bool outgoing)
 {
     if (referencesPane_ == nullptr)
         return;
@@ -1163,19 +2003,49 @@ void MainWindow::updateReferences(quint64 address)
     }
     ProgramDocument *doc = tab->document();
     std::vector<TablePane::Row> rows;
-    for (const Reference &ref : doc->callersOf(address)) {
-        rows.push_back({{tr("called by"), ref.fromName,
-                         QStringLiteral("0x%1").arg(ref.from, 0, 16)},
-                        ref.from});
+    if (incoming) {
+        for (const Reference &ref : doc->callersOf(address)) {
+            rows.push_back({{tr("called by"), ref.fromName,
+                             QStringLiteral("0x%1").arg(ref.from, 0, 16)},
+                            ref.from});
+        }
     }
-    if (const auto function = doc->cached(address)) {
-        for (const CallSite &call : function->callees) {
-            rows.push_back({{tr("calls"), call.name,
-                             QStringLiteral("0x%1").arg(call.address, 0, 16)},
-                            call.address});
+    if (outgoing) {
+        if (const auto function = doc->cached(address)) {
+            for (const CallSite &call : function->callees) {
+                rows.push_back({{tr("calls"), call.name,
+                                 QStringLiteral("0x%1").arg(call.address, 0, 16)},
+                                call.address});
+            }
         }
     }
     referencesPane_->setRows(rows, {2});
+}
+
+void MainWindow::showReferencesFor(quint64 address, bool incoming, bool outgoing)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+    // What refers to a function is only known from bodies already read, so
+    // the one asked about is read first if it has not been.
+    if (!tab->document()->cached(address))
+        tab->document()->decompile(address);
+    updateReferences(address, incoming, outgoing);
+    if (referencesDock_ != nullptr) {
+        referencesDock_->show();
+        referencesDock_->raise();
+    }
+    if (!incoming)
+        return;
+    ProgramDocument *doc = tab->document();
+    const int indexed = doc->indexedFunctions();
+    const int total = static_cast<int>(doc->functions().size());
+    if (indexed < total) {
+        statusBar()->showMessage(tr("callers known for %1 of %2 functions; "
+                                    "run Analyze Program for the rest")
+                                     .arg(indexed).arg(total), 6000);
+    }
 }
 
 void MainWindow::showReferences()
@@ -1276,12 +2146,14 @@ void MainWindow::learnNames()
     statusBar()->showMessage(tr("learned %n name(s)", nullptr, learned), 4000);
 }
 
-void MainWindow::showFunctionFacts()
+void MainWindow::showFunctionFacts(quint64 address)
 {
     ProgramTab *tab = currentTab();
     if (tab == nullptr)
         return;
-    const auto function = tab->document()->cached(tab->currentAddress());
+    if (address == 0)
+        address = tab->currentAddress();
+    const auto function = tab->document()->cached(address);
     if (!function) {
         statusBar()->showMessage(tr("decompile this function first"), 3000);
         return;
@@ -1307,6 +2179,13 @@ void MainWindow::showFunctionFacts()
         lines << tr("names chosen: %1").arg(function->appliedRenames.join(QStringLiteral("; ")));
     for (const QString &comment : function->comments)
         lines << tr("note: %1").arg(comment);
+    // Notes the user wrote are facts about the function too, and the only
+    // place they are otherwise visible is the project tree.
+    for (const QString &kind : {QStringLiteral("code"), QStringLiteral("listing")}) {
+        const QString written = tab->document()->commentAt(address, kind);
+        if (!written.isEmpty())
+            lines << tr("your note: %1").arg(written);
+    }
     QMessageBox::information(this, tr("What Astral Knows"), lines.join(QStringLiteral("\n")));
 }
 
@@ -1344,7 +2223,10 @@ void MainWindow::buildMenus()
     edit->addSeparator();
     edit->addAction(tr("Rename..."), QKeySequence(Qt::CTRL | Qt::Key_R), this, &MainWindow::renameCurrent);
     edit->addAction(tr("Change Type"), QKeySequence(Qt::CTRL | Qt::Key_T), this, [] {});
-    edit->addAction(tr("Comment"), QKeySequence(Qt::CTRL | Qt::Key_Semicolon), this, [] {});
+    edit->addAction(tr("Note..."), QKeySequence(Qt::CTRL | Qt::Key_Semicolon), this, [this] {
+        if (ProgramTab *tab = currentTab())
+            setCommentAt(tab->currentAddress(), QStringLiteral("code"));
+    });
     edit->addSeparator();
     edit->addAction(tr("Find..."), QKeySequence::Find, this, &MainWindow::findInProgram);
 
@@ -1364,6 +2246,10 @@ void MainWindow::buildMenus()
                         &MainWindow::goToDefinition);
     navigate->addAction(tr("Cross References"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X), this,
                         &MainWindow::showReferences);
+    navigate->addAction(tr("Show in Listing"), this, [this] {
+        if (ProgramTab *tab = currentTab())
+            showInListing(tab->currentAddress());
+    });
     navigate->addSeparator();
     // The views of the current program, in the order the tabs sit in.
     const QStringList viewNames = {tr("Code"), tr("Pseudo-C"), tr("Graph"), tr("Hex")};
@@ -1379,12 +2265,16 @@ void MainWindow::buildMenus()
     QMenu *analysis = titleBar_->menuBar()->addMenu(tr("&Analysis"));
     analysis->addAction(tr("Analyze Program"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A), this,
                         &MainWindow::analyzeCurrent);
-    analysis->addAction(tr("Define Function"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D), this, [] {});
-    analysis->addAction(tr("Undefine"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_U), this, [] {});
+    analysis->addAction(tr("Define Function"), this, [] {})->setEnabled(false);
+    analysis->addAction(tr("Undefine"), this, [] {})->setEnabled(false);
 
     QMenu *tools = titleBar_->menuBar()->addMenu(tr("&Tools"));
-    tools->addAction(tr("What Astral Knows About This Function"), QKeySequence(Qt::CTRL | Qt::Key_K), this, &MainWindow::showFunctionFacts);
+    tools->addAction(tr("What Astral Knows About This Function"), QKeySequence(Qt::CTRL | Qt::Key_K),
+                     this, [this] { showFunctionFacts(); });
     tools->addAction(tr("Learn Names From This Program"), this, &MainWindow::learnNames);
+    tools->addSeparator();
+    tools->addAction(tr("Decompiler Settings..."), QKeySequence(Qt::CTRL | Qt::Key_Comma), this,
+                     &MainWindow::showDecompilerSettings);
     tools->addSeparator();
     tools->addAction(tr("Show Queued Patches"), this, [this] {
         if (ProgramTab *tab = currentTab())
@@ -1446,6 +2336,7 @@ void MainWindow::buildToolBar()
     searchBox_->setPlaceholderText(tr("Go to an address or name, or search"));
     searchBox_->setClearButtonEnabled(true);
     searchBox_->setMinimumWidth(420);
+    searchBox_->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     searchBox_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     // Searching runs a moment after typing stops, so every keystroke does not
     // walk the whole program.
@@ -1472,11 +2363,24 @@ void MainWindow::buildToolBar()
             tab->showAddress(address);
     });
 
-    auto *spacer = new QWidget;
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-    bar->addWidget(spacer);
-    analyzeAction_ = bar->addAction(tr("Analyze"), this, &MainWindow::analyzeCurrent);
-    analyzeAction_->setToolTip(tr("Decompile every function now, so navigation is instant"));
+    // A fixed gap, not a stretch: the button belongs beside what it acts on,
+    // and a stretch pushes it to wherever the window happens to end.
+    auto *gap = new QWidget;
+    gap->setFixedWidth(12);
+    bar->addWidget(gap);
+    // Analysis is the slow thing this tool does, so the button runs it and the
+    // arrow beside it says how much of it to run.
+    analyzeButton_ = new QToolButton;
+    analyzeButton_->setObjectName(QStringLiteral("analyzeButton"));
+    analyzeButton_->setText(tr("Analyze"));
+    analyzeButton_->setPopupMode(QToolButton::MenuButtonPopup);
+    analyzeButton_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    analyzeButton_->setMenu(buildAnalyzeMenu());
+    analyzeAction_ = new QAction(tr("Analyze"), this);
+    analyzeAction_->setToolTip(tr("Decompile what the settings beside this ask for"));
+    connect(analyzeAction_, &QAction::triggered, this, &MainWindow::analyzeCurrent);
+    analyzeButton_->setDefaultAction(analyzeAction_);
+    bar->addWidget(analyzeButton_);
 }
 
 QDockWidget *MainWindow::addPane(const QString &title, const QString &objectName, QWidget *body,
@@ -1536,6 +2440,10 @@ void MainWindow::buildDocks()
         if (ProgramTab *tab = currentTab())
             tab->showFunction(address);
     });
+    connect(functionsPane_, &FunctionsPane::contextActionsWanted, this,
+            [this](QMenu *menu, quint64 address) {
+                fillContextMenu(menu, targetForAddress(address, ContextTarget::FunctionList));
+            });
     QDockWidget *functions = addPane(tr("Functions"), QStringLiteral("functionsPane"),
                                      functionsPane_, Qt::LeftDockWidgetArea);
     splitDockWidget(project, functions, Qt::Vertical);
@@ -1547,34 +2455,16 @@ void MainWindow::buildDocks()
         if (ProgramTab *tab = currentTab())
             tab->showFunction(address);
     });
-    connect(listingView_, &ListingView::nopRequested, this, [this](quint64 address, int count) {
-        applyPatch([this, address, count](QString &error) {
-            return currentTab()->document()->patchNop(address, count, error);
-        }, tr("no-op %n instruction(s) at 0x%1", nullptr, count).arg(address, 0, 16));
-    });
-    connect(listingView_, &ListingView::invertRequested, this, [this](quint64 address) {
-        applyPatch([this, address](QString &error) {
-            return currentTab()->document()->patchInvert(address, error);
-        }, tr("invert branch at 0x%1").arg(address, 0, 16));
-    });
-    connect(listingView_, &ListingView::returnRequested, this, [this](quint64 address) {
-        bool ok = false;
-        const QString text = QInputDialog::getText(this, tr("Return value"),
-                                                   tr("Make the function at 0x%1 return:").arg(address, 0, 16),
-                                                   QLineEdit::Normal, QStringLiteral("0"), &ok);
-        if (!ok)
-            return;
-        bool parsed = false;
-        const quint64 value = text.startsWith(QStringLiteral("0x")) ? text.mid(2).toULongLong(&parsed, 16)
-                                                                     : text.toULongLong(&parsed, 10);
-        if (!parsed) {
-            statusBar()->showMessage(tr("Not a number: %1").arg(text), 3000);
-            return;
-        }
-        applyPatch([this, address, value](QString &error) {
-            return currentTab()->document()->patchReturn(address, value, error);
-        }, tr("return %1 from 0x%2").arg(value).arg(address, 0, 16));
-    });
+    connect(listingView_, &CodeView::contextMenuAboutToShow, this,
+            [this](QMenu *menu, const QString &word) {
+                ContextTarget target = targetForWord(word, ContextTarget::Listing,
+                                                     listingView_->textCursor().block().text());
+                if (const auto at = listingView_->addressAtCursor()) {
+                    target.line = *at;
+                    target.hasLine = true;
+                }
+                fillContextMenu(menu, target);
+            });
     listingPane_ = new ListingPane(listingView_);
     connect(listingPane_, &ListingPane::logMessage, this, &MainWindow::appendLog);
     connect(listingPane_, &ListingPane::patchApplied, this, [this] {
@@ -1605,17 +2495,43 @@ void MainWindow::buildDocks()
             if (ProgramTab *tab = currentTab())
                 tab->showAddress(address);
         });
+    // Every table offers the same actions on the row it is showing, because
+    // they all go through the one builder.
+    for (TablePane *pane : {referencesPane_, symbolsPane_, stringsPane_, segmentsPane_, importsPane_})
+        connect(pane, &TablePane::contextActionsWanted, this, [this](QMenu *menu, quint64 address) {
+            fillContextMenu(menu, targetForAddress(address, ContextTarget::Table));
+        });
     debuggerPane_ = new DebuggerPane;
     connect(debuggerPane_, &DebuggerPane::logMessage, this, &MainWindow::appendLog);
     connect(debuggerPane_, &DebuggerPane::breakpointsChanged, this, &MainWindow::refreshBreakpointMarks);
+    connect(debuggerPane_, &DebuggerPane::debuggingChanged, this, &MainWindow::setDebugging);
     connect(debuggerPane_, &DebuggerPane::locationChanged, this, [this](quint64 address) {
-        // Follow the program: show where it stopped, and mark the instruction.
+        // Follow the program: show where it stopped, mark the instruction,
+        // and bring it into view rather than leaving it scrolled away.
         if (ProgramTab *tab = currentTab())
             tab->showAddress(address);
         refreshBreakpointMarks();
+        if (listingView_ != nullptr)
+            listingView_->scrollToAddress(address);
     });
-    debuggerDock_ = addPane(tr("Debugger"), QStringLiteral("debuggerPane"), debuggerPane_,
-                            Qt::BottomDockWidgetArea);
+    // While a program is running, its registers, its stack and what it wrote
+    // are the window, so each gets a dock of its own beside the code.
+    registersDock_ = addPane(tr("Registers"), QStringLiteral("registersPane"),
+                             debuggerPane_->registersView(), Qt::RightDockWidgetArea);
+    stackDock_ = addPane(tr("Call Stack"), QStringLiteral("stackPane"),
+                         debuggerPane_->stackView(), Qt::RightDockWidgetArea);
+    outputDock_ = addPane(tr("Program Output"), QStringLiteral("programOutputPane"),
+                          debuggerPane_->outputView(), Qt::BottomDockWidgetArea);
+    for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_})
+        pane->hide();
+    // The transport gets a bar of its own rather than crowding the one that
+    // is always there. It appears with the debugger and goes with it.
+    debugBar_ = addToolBar(tr("Debugger"));
+    debugBar_->setObjectName(QStringLiteral("debugBar"));
+    debugBar_->setMovable(false);
+    debugBar_->addWidget(debuggerPane_->controls());
+    debugBar_->hide();
+
     // A click in the listing's gutter is how a breakpoint is set.
     connect(listingView_, &CodeView::gutterClicked, this, [this](int line) {
         if (const auto address = listingView_->addressAtLine(line))
@@ -1624,7 +2540,6 @@ void MainWindow::buildDocks()
 
     QList<QDockWidget *> bottom = {
         xrefs,
-        debuggerDock_,
         addPane(tr("Symbols"), QStringLiteral("symbolsPane"), symbolsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Strings"), QStringLiteral("stringsPane"), stringsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Segments"), QStringLiteral("segmentsPane"), segmentsPane_, Qt::BottomDockWidgetArea),

@@ -6,6 +6,7 @@
 
 class QAbstractItemModel;
 class QLineEdit;
+class QMenu;
 class QSortFilterProxyModel;
 class QTreeView;
 
@@ -20,6 +21,8 @@ public:
 
 Q_SIGNALS:
     void functionActivated(quint64 address);
+    // A menu wants the actions that apply to the function under the pointer.
+    void contextActionsWanted(QMenu *menu, quint64 address);
 
 private:
     QLineEdit *filter_;

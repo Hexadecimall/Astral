@@ -172,6 +172,11 @@ public:
 
     void add_symbol(uint64_t address, const std::string &name, bool is_function = true);
     void set_option(const std::string &name, const std::string &value);
+    // Applies one of the settings the option table describes. Throws when the
+    // value is not one the setting takes, leaving the program untouched.
+    void set_setting(const std::string &name, const std::string &value);
+    // What the setting stands at now: what was set, or its default.
+    std::string setting(const std::string &name) const;
 
     std::string disassemble(uint64_t address, int count) const;
     // The same instructions written to be read: calls and branches by name,
@@ -192,6 +197,10 @@ public:
     // recorded against a fingerprint of the body, so the same code is
     // recognised in another program.
     void rename(uint64_t address, const std::string &name, bool learn = false);
+    // Renames a local variable or a parameter of the function at `function`.
+    // `from` is the name the decompiler prints for it now; every use of the
+    // value takes the new name, and the choice outlives the analysis.
+    void rename_local(uint64_t function, const std::string &from, const std::string &to);
     // Records every named function against its fingerprint. Returns how many.
     int learn_symbols();
     // How many threads whole-program decompilation may use. Zero means one per

@@ -7,7 +7,7 @@ libdir=${prefix}/@ASTRAL_DYNAMIC_LIB_DIR@
 specdir=${prefix}/share/astral/specs
 
 Name: astral
-Description: A decompiler that emits C which compiles
+Description: A decompiler that emits C you can read
 URL: https://github.com/@ASTRAL_PROJECT@
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir}

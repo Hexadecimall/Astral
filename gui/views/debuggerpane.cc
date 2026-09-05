@@ -4,10 +4,13 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
-#include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QSplitter>
 #include <QTabWidget>
+#include "views/runconfigdialog.hh"
+
+#include <QComboBox>
+#include <QSignalBlocker>
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -46,62 +49,79 @@ DebuggerPane::DebuggerPane(QWidget *parent) : QWidget(parent)
     layout->setSpacing(0);
     buildControls(layout);
 
-    auto *tabs = new QTabWidget;
-    tabs->setDocumentMode(true);
+    // The three views are docked by the window, not stacked in here.
     registers_ = table({tr("Register"), tr("Value")});
     stack_ = table({tr("Address"), tr("Function")});
     output_ = new QPlainTextEdit;
     output_->setReadOnly(true);
     output_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     output_->setPlaceholderText(tr("What the program writes, and the calls it makes"));
-    tabs->addTab(registers_, tr("Registers"));
-    tabs->addTab(stack_, tr("Stack"));
-    tabs->addTab(output_, tr("Output"));
-    layout->addWidget(tabs, 1);
 }
 
 DebuggerPane::~DebuggerPane() = default;
 
+QWidget *DebuggerPane::registersView() const { return registers_; }
+QWidget *DebuggerPane::stackView() const { return stack_; }
+QWidget *DebuggerPane::outputView() const { return output_; }
+bool DebuggerPane::isDebugging() const { return debugging_; }
+
 void DebuggerPane::buildControls(QVBoxLayout *layout)
 {
     auto *bar = new QWidget;
+    controls_ = bar;
     bar->setObjectName(QStringLiteral("decompilerHeader"));
     bar->setAttribute(Qt::WA_StyledBackground, true);
     auto *row = new QHBoxLayout(bar);
     row->setContentsMargins(8, 5, 8, 5);
     row->setSpacing(6);
 
-    startButton_ = control(tr("Start"), tr("Back to the first instruction, nothing executed"));
-    stepButton_ = control(tr("Step"), tr("One instruction, entering any call it makes"));
-    overButton_ = control(tr("Over"), tr("One instruction, running any call to completion"));
-    outButton_ = control(tr("Out"), tr("Until the frame it is in returns"));
-    goButton_ = control(tr("Continue"), tr("Until a breakpoint, or the end"));
-    stopButton_ = control(tr("Stop"), tr("Ask a run in progress to stop"));
-    for (QToolButton *button : {startButton_, stepButton_, overButton_, outButton_, goButton_, stopButton_})
+    // Which way to run it, and the editor for those ways. This is where
+    // arguments and input live now, kept and named rather than retyped.
+    configBox_ = new QComboBox;
+    configBox_->setObjectName(QStringLiteral("runConfigBox"));
+    configBox_->setMinimumWidth(150);
+    configBox_->setToolTip(tr("How to run it. Edit these to set arguments, input and where to begin."));
+    row->addWidget(configBox_);
+
+    startButton_ = control(QStringLiteral("\u25B6"), tr("Run"));
+    stepButton_ = control(QStringLiteral("\u2193"), tr("Step: one instruction, entering any call"));
+    overButton_ = control(QStringLiteral("\u21B7"), tr("Step over: run any call to completion"));
+    outButton_ = control(QStringLiteral("\u2191"), tr("Step out: until this frame returns"));
+    goButton_ = control(QStringLiteral("\u25B7\u25B7"), tr("Continue: until a breakpoint, or the end"));
+    stopButton_ = control(QStringLiteral("\u25A0"), tr("Stop"));
+    for (QToolButton *button : {startButton_, stepButton_, overButton_, outButton_, goButton_, stopButton_}) {
+        button->setObjectName(QStringLiteral("transportButton"));
         row->addWidget(button);
+    }
+    // The steps mean nothing until something is stopped, so they stay out of
+    // the way until there is.
+    for (QToolButton *button : {stepButton_, overButton_, outButton_, goButton_, stopButton_})
+        button->hide();
 
-    row->addSpacing(10);
-    argumentsBox_ = new QLineEdit;
-    argumentsBox_->setPlaceholderText(tr("arguments, separated by spaces"));
-    argumentsBox_->setMinimumWidth(180);
-    row->addWidget(argumentsBox_, 1);
-    inputBox_ = new QLineEdit;
-    inputBox_->setPlaceholderText(tr("input"));
-    inputBox_->setMaximumWidth(140);
-    row->addWidget(inputBox_);
-
-    status_ = new QLabel(tr("no program"));
+    status_ = new QLabel;
     status_->setObjectName(QStringLiteral("muted"));
-    row->addSpacing(10);
+    row->addSpacing(8);
     row->addWidget(status_);
     layout->addWidget(bar);
+
+    connect(configBox_, &QComboBox::activated, this, [this](int index) {
+        if (index == configBox_->count() - 1) {
+            editConfigurations();
+            return;
+        }
+        if (index >= 0 && index < static_cast<int>(configurations_.size()))
+            RunConfigurations::setChosen(path_, configurations_[index].name);
+    });
 
     connect(startButton_, &QToolButton::clicked, this, [this] {
         if (!session_)
             return;
-        session_->setArguments(argumentsBox_->text().split(QLatin1Char(' '), Qt::SkipEmptyParts));
-        session_->setInput(inputBox_->text());
+        const RunConfiguration one = current();
+        session_->setArguments(one.arguments);
+        session_->setInput(one.input);
         QMetaObject::invokeMethod(session_.get(), "start", Qt::QueuedConnection);
+        if (!one.stopAtStart)
+            QMetaObject::invokeMethod(session_.get(), "go", Qt::QueuedConnection);
     });
     auto drive = [this](const char *slot) {
         if (session_)
@@ -149,7 +169,8 @@ void DebuggerPane::setProgram(const QString &path)
                     new QTreeWidgetItem(stack_, {QStringLiteral("0x%1").arg(frame.address, 0, 16),
                                                  frame.function});
             });
-    status_->setText(tr("ready"));
+    loadConfigurations();
+    status_->clear();
     startButton_->setEnabled(true);
 }
 
@@ -182,7 +203,6 @@ void DebuggerPane::runForTesting(quint64 breakpoint, const QStringList &argument
 {
     if (!session_)
         return;
-    argumentsBox_->setText(arguments.join(QLatin1Char(' ')));
     session_->setArguments(arguments);
     if (breakpoint != 0)
         toggleBreakpoint(breakpoint);
@@ -190,15 +210,63 @@ void DebuggerPane::runForTesting(quint64 breakpoint, const QStringList &argument
     QMetaObject::invokeMethod(session_.get(), "go", Qt::QueuedConnection);
 }
 
+void DebuggerPane::loadConfigurations()
+{
+    configurations_ = RunConfigurations::forProgram(path_);
+    const QString chosen = RunConfigurations::chosen(path_);
+    const QSignalBlocker blocker(configBox_);
+    configBox_->clear();
+    int select = 0;
+    for (size_t i = 0; i < configurations_.size(); ++i) {
+        configBox_->addItem(configurations_[i].name);
+        if (configurations_[i].name == chosen)
+            select = static_cast<int>(i);
+    }
+    configBox_->addItem(tr("Edit Configurations..."));
+    configBox_->setCurrentIndex(select);
+}
+
+RunConfiguration DebuggerPane::current() const
+{
+    const int index = configBox_->currentIndex();
+    if (index >= 0 && index < static_cast<int>(configurations_.size()))
+        return configurations_[index];
+    return RunConfigurations::byDefault();
+}
+
+void DebuggerPane::editConfigurations()
+{
+    if (path_.isEmpty())
+        return;
+    RunConfigDialog dialog(path_, configurations_, RunConfigurations::chosen(path_), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        loadConfigurations();
+        return;
+    }
+    RunConfigurations::save(path_, dialog.configurations());
+    RunConfigurations::setChosen(path_, dialog.chosen());
+    loadConfigurations();
+}
+
 void DebuggerPane::applyState(const DebugState &state)
 {
+    if (state.live != debugging_) {
+        debugging_ = state.live;
+        Q_EMIT debuggingChanged(debugging_);
+    }
     status_->setText(state.reason.isEmpty() ? tr("stopped") : state.reason);
     status_->setToolTip(tr("%1 steps").arg(state.steps));
     if (state.address != 0)
         Q_EMIT locationChanged(state.address);
+    // Once something is stopped there are steps to take; until then there
+    // are not, and the buttons are not there to be wondered about.
     const bool live = state.live;
-    for (QToolButton *button : {stepButton_, overButton_, outButton_, goButton_})
+    for (QToolButton *button : {stepButton_, overButton_, outButton_, goButton_}) {
+        button->setVisible(live);
         button->setEnabled(live);
+    }
+    stopButton_->setVisible(live);
+    configBox_->setEnabled(!live);
 }
 
 void DebuggerPane::setBusy(bool busy)

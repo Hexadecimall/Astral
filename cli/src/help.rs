@@ -11,7 +11,7 @@ use crate::out::{Sink, Stream};
 pub fn usage(stream: Stream) -> i32 {
     let mut out = Sink::new(stream);
     out.write(&format!(
-        "astral {} - a decompiler that emits C which compiles\n\
+        "astral {} - a decompiler that emits C you can read\n\
          \n\
          usage: astral <command> [options]\n\
          \n",
@@ -32,6 +32,7 @@ pub fn usage(stream: Stream) -> i32 {
         "│  ├─     --raw-names        name nothing from evidence\n",
         "│  ├─     --runtime-include  #include <astral/decompiled.h> in emitted C\n",
         "│  ├─     --no-comments      leave the decompiler's warnings out\n",
+        "│  ├─     --option <n=v>     a decompiler setting (repeatable)\n",
         "│  ├─ -l, --language <id>    force a language, e.g. x86:LE:64:default\n",
         "│  ├─ -r, --raw <hex>        treat the file as a flat image at this address\n",
         "│  └─ -s, --specs <dir>      SLEIGH specification root\n",
@@ -79,6 +80,8 @@ pub fn usage(stream: Stream) -> i32 {
         "│  ├─ --ghidra <version>     vendor that release, then rebuild\n",
         "│  ├─ --languages <list>     processors to compile specs for, or ALL\n",
         "│  └─ --prefix <dir>         install somewhere else\n",
+        "├─ options  Every decompiler setting, its type and its default\n",
+        "│  └─ <name>                 one setting, with what it is for\n",
         "├─ languages  Processors this build can read\n",
         "├─ crap-ya-dont-need  Commands nobody asked for\n",
         "│  ├─ binary <file>          decompile it to binary. All of it.\n",
@@ -114,6 +117,8 @@ pub fn decompile(stream: Stream) -> i32 {
         "      --raw-names        name nothing from evidence\n",
         "      --runtime-include  #include <astral/decompiled.h> in emitted C\n",
         "      --no-comments      leave the decompiler's warnings out\n",
+        "      --option <n=v>     a decompiler setting, e.g. maxlinewidth=80.\n",
+        "                         Repeatable; astral options lists them all\n",
         "  -l, --language <id>    force a language, e.g. x86:LE:64:default\n",
         "  -r, --raw <hex>        treat the file as a flat image at this address\n",
         "  -s, --specs <dir>      SLEIGH specification root\n",
@@ -154,6 +159,21 @@ pub fn disassemble(stream: Stream) -> i32 {
         "  -l, --language <id>    force a language\n",
         "  -r, --raw <hex>        treat the file as a flat image at this address\n",
         "  -s, --specs <dir>      SLEIGH specification root\n",
+    ));
+    stream.code()
+}
+
+pub fn options(stream: Stream) -> i32 {
+    Sink::new(stream).write(concat!(
+        "usage: astral options [name]\n",
+        "\n",
+        "Every setting that changes how a program is decompiled or printed,\n",
+        "with the values it takes and the one in force when nothing is set.\n",
+        "Naming one prints that setting on its own. The same names are what\n",
+        "astral decompile --option takes and what the settings file holds.\n",
+        "\n",
+        "  A setting marked (analysis) only shows once the function is read\n",
+        "  again; the rest change the printing alone.\n",
     ));
     stream.code()
 }

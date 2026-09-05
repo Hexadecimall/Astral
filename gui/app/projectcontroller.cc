@@ -108,6 +108,18 @@ bool ProjectController::applyStateTo(ProgramDocument *document, QStringList &war
         }
     }
 
+    // Names given to values inside a function. These are replayed after the
+    // function renames because the engine keys them by the function's address,
+    // which a rename never moves.
+    for (const LocalRenameRecord &record : state.localRenames) {
+        QString failure;
+        if (!document->renameLocal(record.function, record.original, record.name, failure)) {
+            warnings << QStringLiteral("%1 in the function at 0x%2 could not be renamed to %3: %4")
+                            .arg(record.original).arg(record.function, 0, 16)
+                            .arg(record.name, failure);
+        }
+    }
+
     for (const PatchRecord &record : state.patches) {
         QString failure;
         bool ok = false;

@@ -2125,7 +2125,10 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             out << '\n';
         out << '\n';
     }
-    return out.str();
+    // Once more over the finished unit. A function's locals are written from the
+    // types it recorded, so a sixteen-byte local assigned to whole is only
+    // visible as one here, after those types have been spelled out.
+    return rewrite_wide_values(out.str());
 }
 
 } // namespace astral_internal

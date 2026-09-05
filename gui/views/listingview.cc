@@ -1,8 +1,6 @@
 #include "views/listingview.hh"
 
 #include <QContextMenuEvent>
-#include <QInputDialog>
-#include <QMenu>
 #include <QMouseEvent>
 #include <QRegularExpression>
 
@@ -15,31 +13,10 @@ ListingView::ListingView(QWidget *parent) : CodeView(parent)
 
 void ListingView::contextMenuEvent(QContextMenuEvent *event)
 {
-    QTextCursor cursor = cursorForPosition(event->pos());
-    setTextCursor(cursor);
-    const auto address = addressAtCursor();
-    QMenu menu(this);
-    if (address) {
-        menu.addAction(tr("Patch: no-op this instruction"), this, [this, address] {
-            Q_EMIT nopRequested(*address, 1);
-        });
-        menu.addAction(tr("Patch: no-op N instructions..."), this, [this, address] {
-            bool ok = false;
-            const int count = QInputDialog::getInt(this, tr("No-op"), tr("Instructions"), 1, 1, 4096, 1, &ok);
-            if (ok)
-                Q_EMIT nopRequested(*address, count);
-        });
-        menu.addAction(tr("Patch: invert this branch"), this, [this, address] {
-            Q_EMIT invertRequested(*address);
-        });
-        menu.addAction(tr("Patch: make function return a value..."), this, [this, address] {
-            Q_EMIT returnRequested(*address);
-        });
-        menu.addSeparator();
-    }
-    menu.addAction(tr("Copy"), this, &QPlainTextEdit::copy)->setEnabled(textCursor().hasSelection());
-    menu.addAction(tr("Select All"), this, &QPlainTextEdit::selectAll);
-    menu.exec(event->globalPos());
+    // The line under the pointer is what the menu is about, so the cursor goes
+    // there before the window is asked what applies to it.
+    setTextCursor(cursorForPosition(event->pos()));
+    CodeView::contextMenuEvent(event);
 }
 
 void ListingView::mouseDoubleClickEvent(QMouseEvent *event)
