@@ -450,6 +450,24 @@ void rewrite_array_return(FunctionResult &function, int bytes)
 // C requires main to return int. The decompiler often cannot recover that, so
 // the emitted definition is coerced rather than left as something a compiler
 // rejects outright.
+
+// Pointer stars as a person writes them: no gap between one star and the next,
+// and the star against the name rather than floating between the two.
+std::string tidy_pointer_spacing(std::string text)
+{
+    for (size_t at = text.find("* *"); at != std::string::npos; at = text.find("* *", at))
+        text.erase(at + 1, 1);
+    // "char * name" becomes "char *name"; a star followed by a space and then
+    // an identifier only ever means a pointer parameter or result.
+    for (size_t at = text.find("* "); at != std::string::npos; at = text.find("* ", at + 1)) {
+        const size_t next = at + 2;
+        if (next < text.size() &&
+            (std::isalpha(static_cast<unsigned char>(text[next])) || text[next] == '_'))
+            text.erase(at + 1, 1);
+    }
+    return text;
+}
+
 void coerce_main(FunctionResult &function)
 {
     if (function.name != "main")
@@ -1499,7 +1517,7 @@ std::string copy_propagate(const std::string &source)
 void realize_c(FunctionResult &function)
 {
     function.c_code_real = rewrite_code_calls(rewrite_pieces(function.c_code));
-    function.signature_real = function.signature;
+    function.signature_real = tidy_pointer_spacing(function.signature);
 
     int bytes = 0;
     if (array_bytes(function.return_type, bytes))

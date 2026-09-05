@@ -864,3 +864,163 @@ noreturn std::terminate
 noreturn __cxa_throw
 noreturn __cxa_rethrow
 noreturn _Unwind_Resume
+
+# Environment, size parsing and BSD file-flag helpers. Without these the
+# emitter guesses a signature and the guess contradicts the real header.
+hdr setenv stdlib.h
+hdr unsetenv stdlib.h
+hdr putenv stdlib.h
+hdr getenv stdlib.h
+hdr strtonum stdlib.h
+hdr getbsize stdlib.h
+hdr humanize_number libutil.h
+hdr fflagstostr unistd.h
+hdr strtofflags unistd.h
+hdr user_from_uid unistd.h
+hdr group_from_gid unistd.h
+proto setenv    extern int4 setenv(char *name, char *value, int4 overwrite);
+proto unsetenv  extern int4 unsetenv(char *name);
+proto putenv    extern int4 putenv(char *entry);
+proto strtonum  extern int8 strtonum(char *text, int8 low, int8 high, char **error);
+proto getbsize  extern char *getbsize(int4 *header_length, int8 *block_size);
+proto fflagstostr extern char *fflagstostr(uint8 flags);
+proto strtofflags extern int4 strtofflags(char **text, uint8 *set, uint8 *clear);
+proto user_from_uid extern char *user_from_uid(uint4 uid, int4 nouser);
+proto group_from_gid extern char *group_from_gid(uint4 gid, int4 nogroup);
+proto humanize_number extern int4 humanize_number(char *buf, int8 len, int8 bytes, char *suffix, int4 scale, int4 flags);
+
+# The standard library as Astral understands it. Without a real prototype
+# the emitter guesses a signature from the call, and a guess that
+# contradicts the system header is a file that will not compile.
+hdr alarm unistd.h
+proto alarm              extern uint4 alarm(uint4 seconds);
+hdr alphasort dirent.h
+proto alphasort          extern int4 alphasort(void *a, void *b);
+hdr basename libgen.h
+proto basename           extern char *basename(char *path);
+proto bsearch            extern void *bsearch(void *key, void *base, uint8 count, uint8 size, void *compare);
+proto chmod              extern int4 chmod(char *path, uint2 mode);
+hdr chown unistd.h
+proto chown              extern int4 chown(char *path, uint4 uid, uint4 gid);
+hdr clock_gettime time.h
+proto clock_gettime      extern int4 clock_gettime(int4 clock, void *spec);
+hdr closedir dirent.h
+proto closedir           extern int4 closedir(void *dir);
+proto creat              extern int4 creat(char *path, uint2 mode);
+hdr difftime time.h
+proto difftime           extern float8 difftime(int8 later, int8 earlier);
+hdr dirname libgen.h
+proto dirname            extern char *dirname(char *path);
+hdr div stdlib.h
+proto div                extern int8 div(int4 numerator, int4 denominator);
+hdr fchmod sys/stat.h
+proto fchmod             extern int4 fchmod(int4 fd, uint2 mode);
+hdr fchown unistd.h
+proto fchown             extern int4 fchown(int4 fd, uint4 uid, uint4 gid);
+hdr fnmatch fnmatch.h
+proto fnmatch            extern int4 fnmatch(char *pattern, char *text, int4 flags);
+proto fork               extern int4 fork(void);
+proto ftruncate          extern int4 ftruncate(int4 fd, int8 length);
+proto getcwd             extern char *getcwd(char *buffer, uint8 size);
+hdr getegid unistd.h
+proto getegid            extern uint4 getegid(void);
+hdr getgid unistd.h
+proto getgid             extern uint4 getgid(void);
+hdr getgrgid grp.h
+proto getgrgid           extern void *getgrgid(uint4 gid);
+hdr getgrnam grp.h
+proto getgrnam           extern void *getgrnam(char *name);
+hdr getopt_long getopt.h
+proto getopt_long        extern int4 getopt_long(int4 argc, char **argv, char *shortopts, void *longopts, int4 *index);
+hdr getpagesize unistd.h
+proto getpagesize        extern int4 getpagesize(void);
+proto getpid             extern int4 getpid(void);
+hdr getpwnam pwd.h
+proto getpwnam           extern void *getpwnam(char *name);
+hdr getpwuid pwd.h
+proto getpwuid           extern void *getpwuid(uint4 uid);
+hdr glob glob.h
+proto glob               extern int4 glob(char *pattern, int4 flags, void *error, void *result);
+hdr globfree glob.h
+proto globfree           extern void globfree(void *result);
+hdr gmtime time.h
+proto gmtime             extern void *gmtime(int8 *when);
+hdr index strings.h
+proto index              extern char *index(char *s, int4 c);
+hdr ioctl sys/ioctl.h
+proto ioctl              extern int4 ioctl(int4 fd, uint8 request, void *argument);
+hdr link unistd.h
+proto link               extern int4 link(char *from, char *to);
+hdr llabs stdlib.h
+proto llabs              extern int8 llabs(int8 value);
+hdr mbrtowc wchar.h
+proto mbrtowc            extern uint8 mbrtowc(int4 *wide, char *text, uint8 length, void *state);
+hdr memccpy string.h
+proto memccpy            extern void *memccpy(void *dst, void *src, int4 c, uint8 n);
+proto mkdir              extern int4 mkdir(char *path, uint2 mode);
+hdr mkdtemp stdlib.h
+proto mkdtemp            extern char *mkdtemp(char *tmpl);
+hdr mkfifo sys/stat.h
+proto mkfifo             extern int4 mkfifo(char *path, uint2 mode);
+hdr nl_langinfo langinfo.h
+proto nl_langinfo        extern char *nl_langinfo(int4 item);
+hdr openat fcntl.h
+proto openat             extern int4 openat(int4 dirfd, char *path, int4 flags);
+hdr opendir dirent.h
+proto opendir            extern void *opendir(char *path);
+hdr pclose stdio.h
+proto pclose             extern int4 pclose(void *stream);
+proto pipe               extern int4 pipe(int4 *fds);
+hdr poll poll.h
+proto poll               extern int4 poll(void *fds, uint4 count, int4 timeout);
+hdr popen stdio.h
+proto popen              extern void *popen(char *command, char *mode);
+hdr readdir dirent.h
+proto readdir            extern void *readdir(void *dir);
+hdr regcomp regex.h
+proto regcomp            extern int4 regcomp(void *compiled, char *pattern, int4 flags);
+hdr regexec regex.h
+proto regexec            extern int4 regexec(void *compiled, char *text, uint8 count, void *matches, int4 flags);
+hdr regfree regex.h
+proto regfree            extern void regfree(void *compiled);
+hdr rewinddir dirent.h
+proto rewinddir          extern void rewinddir(void *dir);
+hdr rindex strings.h
+proto rindex             extern char *rindex(char *s, int4 c);
+hdr rmdir unistd.h
+proto rmdir              extern int4 rmdir(char *path);
+hdr scandir dirent.h
+proto scandir            extern int4 scandir(char *path, void *list, void *select, void *compare);
+hdr select sys/select.h
+proto select             extern int4 select(int4 limit, void *read, void *write, void *error, void *timeout);
+hdr setgid unistd.h
+proto setgid             extern int4 setgid(uint4 gid);
+hdr sigaddset signal.h
+proto sigaddset          extern int4 sigaddset(void *set, int4 number);
+hdr sigemptyset signal.h
+proto sigemptyset        extern int4 sigemptyset(void *set);
+hdr sigprocmask signal.h
+proto sigprocmask        extern int4 sigprocmask(int4 how, void *set, void *old);
+hdr stpcpy string.h
+proto stpcpy             extern char *stpcpy(char *dst, char *src);
+proto strcasecmp         extern int4 strcasecmp(char *a, char *b);
+proto strncasecmp        extern int4 strncasecmp(char *a, char *b, uint8 n);
+hdr strsignal string.h
+proto strsignal          extern char *strsignal(int4 signal);
+proto strtod             extern float8 strtod(char *text, char **end);
+hdr tcgetattr termios.h
+proto tcgetattr          extern int4 tcgetattr(int4 fd, void *settings);
+hdr tcsetattr termios.h
+proto tcsetattr          extern int4 tcsetattr(int4 fd, int4 when, void *settings);
+hdr ttyname unistd.h
+proto ttyname            extern char *ttyname(int4 fd);
+hdr umask sys/stat.h
+proto umask              extern uint2 umask(uint2 mask);
+hdr wait sys/wait.h
+proto wait               extern int4 wait(int4 *status);
+hdr waitpid sys/wait.h
+proto waitpid            extern int4 waitpid(int4 pid, int4 *status, int4 options);
+hdr wcrtomb wchar.h
+proto wcrtomb            extern uint8 wcrtomb(char *text, int4 wide, void *state);
+hdr wcwidth wchar.h
+proto wcwidth            extern int4 wcwidth(int4 wide);

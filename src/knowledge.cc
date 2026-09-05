@@ -156,8 +156,18 @@ void Knowledge::parse(const std::string &text, bool from_user)
             if (from_user)
                 ++learned_;
         } else if (kind == "lit") {
+            // The literals come first and the name last. A literal may be
+            // several words ("invalid option"), so the split is at the last
+            // run of spaces, not the first: splitting at the first made the
+            // name the whole rest of the line, and a name with spaces and
+            // pipes in it is not something a C compiler will take.
             std::string key, value;
-            if (!split_first(rest, key, value))
+            const size_t split = rest.find_last_of(" \t");
+            if (split == std::string::npos)
+                continue;
+            key = trim(rest.substr(0, split));
+            value = trim(rest.substr(split + 1));
+            if (key.empty() || value.empty())
                 continue;
             Literal literal;
             for (const std::string &word : split_on(key, '|'))

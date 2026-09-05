@@ -46,6 +46,22 @@ namespace {
 
 bool g_initialized = false;
 
+// A name Astral chose has to be something a C compiler will take. Knowledge
+// records are edited by hand and contributed by other people, so a name can
+// arrive with a space or a punctuation mark in it; letting that reach the
+// output turns a whole file into a syntax error.
+bool is_c_identifier(const std::string &name)
+{
+    if (name.empty())
+        return false;
+    if (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_')
+        return false;
+    for (char c : name)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+            return false;
+    return true;
+}
+
 // A LoadImage backed by an in-memory BinaryImage.
 class ImageLoadImage : public ghidra::LoadImage {
 public:
@@ -1103,7 +1119,9 @@ bool Session::decompile(uint64_t address, const std::string &name, FunctionResul
         }
 
         if (auto_naming_) {
-            const std::string chosen = apply_naming(fd, out);
+            std::string chosen = apply_naming(fd, out);
+            if (!chosen.empty() && !is_c_identifier(chosen))
+                chosen.clear(); // a name that will not compile is no name
             if (!chosen.empty()) {
                 // The recovered name is cached in the function and in every
                 // call site that refers to it, so the function is rebuilt under
@@ -1691,66 +1709,105 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
     if (addrs.empty())
         return;
 
-    // Size each array up to the next referenced address in the same segment, or
-    // the segment's end, capped so an over-read stays bounded.
     std::vector<uint64_t> sorted(addrs.begin(), addrs.end());
     std::sort(sorted.begin(), sorted.end());
-    // A fixed window rather than the distance to the next referenced address:
-    // the decompiler often reaches one array through several bases a few bytes
-    // apart (opcodes at N, operands at N+1), and truncating the first at the
-    // second would leave it a byte long. Overlapping windows are harmless -
-    // each holds the real bytes at its own base - and reading past the segment
-    // just zero-fills.
+
+    // How far past a referenced address to keep, when nothing else says where
+    // the data ends. The decompiler often reaches one table through several
+    // bases a few bytes apart, so the reach has to cover more than the first
+    // byte.
     const uint64_t kWindow = 8192;
-    std::map<std::string, int> slug_counts;
-    std::ostringstream defs;
-    for (size_t i = 0; i < sorted.size(); ++i) {
-        uint64_t a = sorted[i];
-        uint64_t seg_end = a;
+    auto segment_end = [&](uint64_t a) {
         for (const Segment &s : image.segments)
             if (a >= s.address && a < s.address + s.size)
-                seg_end = s.address + s.size;
-        uint64_t size = seg_end - a;
-        if (size > kWindow)
-            size = kWindow;
-        if (size == 0)
-            size = 1;
-        std::vector<uint8_t> bytes(size, 0);
-        image.read(a, bytes.data(), bytes.size());
-        char name[40];
+                return s.address + s.size;
+        return a + 1;
+    };
+
+    std::map<std::string, int> slug_counts;
+    std::ostringstream defs;
+    // Where each referenced address ends up: the array that covers it, and how
+    // far into that array it sits.
+    std::map<uint64_t, std::pair<std::string, uint64_t>> placement;
+
+    for (size_t i = 0; i < sorted.size();) {
+        const uint64_t base = sorted[i];
+        const uint64_t limit = segment_end(base);
+
         // A referenced constant that is really a C string is emitted as a named
-        // string literal, so the source reads sArg1 = \"arg1\" rather than a wall
-        // of bytes. Anything else stays a byte array (camelCase datNNN).
-        size_t slen = 0;
-        std::string slug;
-        if (looks_like_string(bytes, slen))
-            slug = string_slug(bytes, slen);
-        if (!slug.empty()) {
-            // Distinct names within this unit; the emit that uses it runs on
-            // one thread after every function is decompiled.
-            std::map<std::string, int> &used_slugs = slug_counts;
-            int &n = used_slugs[slug];
-            std::string sname = n == 0 ? slug : slug + std::to_string(n + 1);
-            ++n;
-            std::snprintf(name, sizeof name, "%s", sname.c_str());
-            defs << "static const char " << name << "[] = " << c_string_literal(bytes, slen)
-                 << ";\n";
-        } else {
-            std::snprintf(name, sizeof name, "dat%llx", static_cast<unsigned long long>(a));
-            defs << "static unsigned char " << name << "[" << size << "] = {";
-            for (size_t b = 0; b < bytes.size(); ++b) {
-                if (b % 16 == 0)
-                    defs << "\n  ";
-                char byte[8];
-                std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
-                defs << byte;
+        // string literal, so the source reads sArg1 = "arg1" rather than a wall
+        // of bytes.
+        {
+            uint64_t peek = std::min(limit - base, kWindow);
+            std::vector<uint8_t> bytes(peek == 0 ? 1 : peek, 0);
+            image.read(base, bytes.data(), bytes.size());
+            size_t slen = 0;
+            std::string slug;
+            if (looks_like_string(bytes, slen))
+                slug = string_slug(bytes, slen);
+            if (!slug.empty()) {
+                int &n = slug_counts[slug];
+                std::string sname = n == 0 ? slug : slug + std::to_string(n + 1);
+                ++n;
+                defs << "static const char " << sname << "[] = " << c_string_literal(bytes, slen)
+                     << ";\n";
+                placement.emplace(base, std::make_pair(sname, 0));
+                ++i;
+                continue;
             }
-            defs << "\n};\n";
+        }
+
+        // Otherwise take every following address that the window from this one
+        // already reaches, and cover them all with a single array. Emitting a
+        // fresh window per address instead means the same bytes appear once for
+        // every base the code happens to use, which on a real program is most
+        // of the output.
+        uint64_t end = std::min(base + kWindow, limit);
+        size_t j = i;
+        while (j < sorted.size() && sorted[j] < end) {
+            const uint64_t reach = std::min(sorted[j] + kWindow, segment_end(sorted[j]));
+            if (reach > end && segment_end(sorted[j]) == limit)
+                end = reach;
+            ++j;
+        }
+        if (end <= base)
+            end = base + 1;
+
+        char name[40];
+        std::snprintf(name, sizeof name, "dat%llx", static_cast<unsigned long long>(base));
+        const size_t size = static_cast<size_t>(end - base);
+        std::vector<uint8_t> bytes(size, 0);
+        image.read(base, bytes.data(), bytes.size());
+        defs << "static unsigned char " << name << "[" << size << "] = {";
+        for (size_t b = 0; b < bytes.size(); ++b) {
+            if (b % 16 == 0)
+                defs << "\n  ";
+            char byte[8];
+            std::snprintf(byte, sizeof byte, "0x%02x,", bytes[b]);
+            defs << byte;
+        }
+        defs << "\n};\n";
+        for (size_t k = i; k < j; ++k)
+            placement.emplace(sorted[k], std::make_pair(std::string(name), sorted[k] - base));
+        i = j;
+    }
+
+    // Point every address literal at where its bytes actually live.
+    for (const auto &entry : placement) {
+        const uint64_t address = entry.first;
+        const std::string &name = entry.second.first;
+        const uint64_t offset = entry.second.second;
+        std::string to = name;
+        if (offset != 0) {
+            char shifted[80];
+            std::snprintf(shifted, sizeof shifted, "(%s + %llu)", name.c_str(),
+                          static_cast<unsigned long long>(offset));
+            to = shifted;
         }
         // Rewrite every use of the literal to the array (it decays to a pointer).
         char literal[24];
-        std::snprintf(literal, sizeof literal, "0x%llx", static_cast<unsigned long long>(a));
-        std::string from = literal, to = name;
+        std::snprintf(literal, sizeof literal, "0x%llx", static_cast<unsigned long long>(address));
+        std::string from = literal;
         for (size_t at = out.find(from); at != std::string::npos; at = out.find(from, at)) {
             // Only a whole token, so 0x100 inside 0x1008 is never touched.
             bool left = at > 0 && (std::isalnum((unsigned char)out[at - 1]) || out[at - 1] == '_');
