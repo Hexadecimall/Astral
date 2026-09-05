@@ -1504,3 +1504,122 @@ noreturn __assert_rtn
 noreturn __stack_chk_fail
 noreturn errx
 noreturn err
+
+# ---------------------------------------------------------------------------
+# The C++ standard library, as a compiled binary shows it.
+#
+# Every C++ program carries libc++ inside it: a thirteen-line program pulls in
+# dozens of template instantiations, and a body that calls them reads as calls
+# into nothing without these. The names here are the ones Astral gives them
+# after demangling, so a record matches what the listing actually says.
+#
+# These are what a string, a vector and a map look like once the templates have
+# been stamped out. Naming them is the difference between reading a function
+# and reading its allocator.
+
+# Memory, which every container reaches for.
+verb operatorNew              allocate
+verb operatorDelete           release
+yields operatorNew            memory
+noreturn stdThrowLengthError
+noreturn stdBasicStringThrowLengthError
+noreturn stdBasicStringThrowOutOfRange
+noreturn stdVectorThrowLengthError
+noreturn stdVectorThrowLengthError_2
+noreturn stdTerminate
+noreturn stdBasicStringThrowLengthError_2
+
+# std::string. The one every program has, and the one whose internals fill a
+# listing when they are not named.
+hdr stdBasicStringCStr                    string
+hdr stdBasicStringAppend                  string
+hdr stdBasicStringPushBack                string
+hdr stdBasicStringSubstr                  string
+hdr stdBasicStringErase                   string
+hdr stdBasicStringInsert                  string
+hdr stdBasicStringCompare                 string
+hdr stdToString                           string
+verb stdBasicStringBasicString            makeText
+verb stdBasicStringInitCopyCtorExternal   copyText
+verb stdBasicStringOperatorAssign         assignText
+verb stdBasicStringCStr                   textBytes
+verb stdBasicStringAppend                 appendText
+verb stdBasicStringPushBack               appendCharacter
+verb stdBasicStringSubstr                 textSlice
+verb stdBasicStringErase                  eraseText
+verb stdBasicStringInsert                 insertText
+verb stdBasicStringCompare                compareText
+verb stdBasicStringSize                   textLength
+verb stdBasicStringEmpty                  textIsEmpty
+verb stdToString                          formatNumber
+verb stdOperatorAdd                       joinText
+verb stdOperatorAdd_2                     joinText
+verb stdOperatorEq                        sameText
+verb stdOperatorEq_2                      sameText
+yields stdBasicStringCStr                 textBytes
+yields stdBasicStringSubstr               slice
+yields stdToString                        text
+yields stdOperatorAdd                     joined
+yields stdOperatorEq                      same
+yields stdBasicStringSize                 length
+
+# std::vector. A pointer, a length and a capacity, and the code that grows it.
+hdr stdVectorPushBack         vector
+hdr stdVectorBegin            vector
+hdr stdVectorEnd              vector
+verb stdVectorVector          makeList
+verb stdVectorVector_4        makeList
+verb stdVectorPushBack        appendItem
+verb stdVectorEmplaceBack     appendItem
+verb stdVectorInitWithSize    fillList
+verb stdVectorInsertWithSize  insertItems
+verb stdVectorBegin           firstItem
+verb stdVectorEnd             pastLastItem
+verb stdVectorData            itemBytes
+verb stdVectorSize            itemCount
+verb stdVectorCapacity        roomForItems
+verb stdWrapIterOperatorMul   itemAt
+verb stdWrapIterOperatorAdd   nextItem
+yields stdVectorBegin         first
+yields stdVectorEnd           past
+yields stdVectorData          items
+yields stdVectorSize          count
+yields stdVectorCapacity      room
+
+# std::map and the red-black tree under it.
+hdr stdMapFind                map
+hdr stdMapOperatorIndex       map
+verb stdMapMap                makeTable
+verb stdMapFind               lookUp
+verb stdMapFind_2             lookUp
+verb stdMapFind_3             lookUp
+verb stdMapOperatorIndex      entryFor
+verb stdTreeBalanceAfterInsert  rebalanceTree
+verb stdTreeInsertRangeUnique   insertUnique
+verb stdPairPair              makePair
+yields stdMapFind             found
+yields stdMapOperatorIndex    entry
+idiom stdMapMap+stdMapFind    tableLookup
+
+# The stream machinery, which is where a formatted message comes from.
+hdr stdBasicOstringstreamBasicOstringstream  sstream
+hdr stdPutCharacterSequence                  ostream
+verb stdBasicOstringstreamBasicOstringstream  openTextStream
+verb stdPutCharacterSequence                  writeText
+verb stdBasicOstreamOperatorShl               writeValue
+verb stdBasicStringbufStr                     streamText
+verb stdBasicOstreamBasicOstream              closeStream
+verb stdBasicIosBasicIos                      closeStream
+verb stdLocaleLocale_2                        releaseLocale
+yields stdBasicStringbufStr                   message
+idiom stdBasicOstringstreamBasicOstringstream+stdBasicStringbufStr  buildMessage
+idiom stdPutCharacterSequence+stdBasicStringbufStr                  buildMessage
+
+# Unwinding and the guards around a static, which are the compiler's own and
+# never the program's.
+verb cxaGuardAcquire          beginOnce
+verb cxaGuardRelease          endOnce
+verb cxaAtexit                atExit
+verb UnwindResume             resumeUnwind
+noreturn UnwindResume
+noreturn cxaThrow
