@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 
 #include "creal.hh"
+#include "cxx_idioms.hh"
 #include "langmap.hh"
 #include "knowledge.hh"
 #include "libc_protos.hh"
@@ -433,6 +434,11 @@ std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &l
     session->image_ = std::move(image);
     // Give C++ symbols readable names before anything else uses them.
     demangle_symbols(session->image_);
+    // What a mangled name says about its own signature is as good as a
+    // prototype read from source; make it known before prototypes are applied.
+    for (const Symbol &sym : session->image_.symbols)
+        if (sym.is_function && !sym.prototype.empty())
+            Knowledge::instance().note_prototype(sym.name, sym.prototype);
 
     if (!language_override.empty())
         session->archid_ = complete_architecture(language_override, session->image_.arch.abi, error);
@@ -463,6 +469,25 @@ std::unique_ptr<Session> Session::create(BinaryImage image, const std::string &l
         session->arch_->readLoaderSymbols("::");
     } catch (ghidra::LowlevelError &err) {
         // Symbol import is best-effort; a bad entry must not sink the session.
+    }
+    // A C++ object another image defines (std::cout) is reached through a
+    // pointer slot; naming the slot after the object is what makes a call read
+    // stdOperatorShl(stdCout, ...) rather than a bare address.
+    try {
+        ghidra::Scope *global = session->arch_->symboltab->getGlobalScope();
+        ghidra::TypeFactory *types = session->arch_->types;
+        ghidra::AddrSpace *space = session->arch_->getDefaultCodeSpace();
+        ghidra::Datatype *slot = types->getTypePointer(space->getAddrSize(), types->getTypeVoid(),
+                                                       space->getWordSize());
+        for (const Symbol &sym : session->image_.symbols) {
+            if (sym.is_function || !sym.is_import || sym.linkage_name.empty())
+                continue;
+            ghidra::Address addr(space, sym.address);
+            // An empty use point: the symbol is tied to its address everywhere,
+            // not scoped from a first use the way a register local is.
+            global->addSymbol(sym.name, slot, addr, ghidra::Address());
+        }
+    } catch (ghidra::LowlevelError &err) {
     }
     // Typing the library functions it imports is what lets string arguments
     // print as strings rather than as addresses.
@@ -512,7 +537,7 @@ bool Session::add_symbol(uint64_t address, const std::string &name, bool is_func
             scope->addFunction(addr, name);
         else
             scope->addSymbol(name, arch_->types->getBase(pointer_size(), ghidra::TYPE_UNKNOWN),
-                             addr, addr);
+                             addr, ghidra::Address());
         Symbol sym;
         sym.address = address;
         sym.name = name;
@@ -1823,9 +1848,21 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     }
     // The loader's name for each referenced data address, so an import slot for
     // a real libc global can be pointed at the true symbol.
-    for (const Symbol &sym : image_.symbols)
-        if (!sym.is_function && !sym.name.empty())
-            options.data_names.emplace(sym.address, sym.name);
+    const std::string prefix = image_.format == ASTRAL_FORMAT_MACHO ? "_" : "";
+    for (const Symbol &sym : image_.symbols) {
+        if (sym.is_function) {
+            if (!sym.linkage_name.empty())
+                options.function_linkage.emplace(sym.name, prefix + sym.linkage_name);
+            continue;
+        }
+        if (sym.name.empty())
+            continue;
+        options.data_names.emplace(sym.address, sym.name);
+        // The linker-level name of a C++ object, so a slot for it can point at
+        // the real thing. Mach-O spells C symbols with a leading underscore.
+        if (!sym.linkage_name.empty())
+            options.data_linkage.emplace(sym.address, prefix + sym.linkage_name);
+    }
     out = emit_c_unit(results, options);
     // Define and re-point the absolute data addresses the code reads, so the
     // rebuilt program touches real arrays instead of stale image addresses.
@@ -1833,6 +1870,8 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     for (const FunctionResult &r : results)
         code_ranges.emplace_back(r.address, r.address + (r.size == 0 ? 1 : r.size));
     emit_absolute_data(image_, code_ranges, out);
+    // C++ stream output written the way C writes it.
+    rewrite_stream_idioms(out, image_);
     tidy_names(out);
     return true;
 }
