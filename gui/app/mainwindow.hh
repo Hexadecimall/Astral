@@ -29,6 +29,7 @@ namespace astral::gui {
 class FunctionsPane;
 class CodeView;
 class ListingView;
+class DebuggerPane;
 class ListingPane;
 class TablePane;
 class SearchResults;
@@ -51,6 +52,7 @@ public:
     void runAssembleHook(const QString &edit, const QString &outPath);
     // Developer hooks used by the automated run: edit, patch, write, quit.
     void runEditHook(const QString &sourceFile, const QString &outPath);
+    void runDebugHook(const QString &target, const QString &arguments);
     void runAnalyzeHook();
     void runExportHook(const QString &outPath);
 
@@ -94,6 +96,7 @@ private:
     // the item that stands for it.
     void fillProgramNode(QTreeWidgetItem *root, ProgramDocument *document);
     void fillTables();
+    void refreshBreakpointMarks();
     void analyzeCurrent();
     void appendLog(const QString &line);
     void savePatched();
@@ -143,6 +146,8 @@ private:
     QList<QDockWidget *> panes_;
     FunctionsPane *functionsPane_ = nullptr;
     ListingView *listingView_ = nullptr;
+    DebuggerPane *debuggerPane_ = nullptr;
+    QDockWidget *debuggerDock_ = nullptr;
     ListingPane *listingPane_ = nullptr;
     QTreeWidget *projectTree_ = nullptr;
     ProjectController *project_ = nullptr;

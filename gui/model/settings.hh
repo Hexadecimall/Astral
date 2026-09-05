@@ -46,6 +46,9 @@ private:
     Settings();
     // Appends any documented default the file does not mention yet.
     void addMissingDefaults();
+    // Replaces the explanation above a key already in the file when the
+    // documented one has changed. The value itself is never touched.
+    bool refreshComment(const QString &key, const QStringList &block);
 
     std::map<QString, QString> values_;
     // The file as it was read, so saving keeps its comments and its order.

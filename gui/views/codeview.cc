@@ -3,6 +3,8 @@
 
 #include <QFontDatabase>
 #include <QContextMenuEvent>
+
+#include <algorithm>
 #include <QMenu>
 #include <QPainter>
 #include <QRegularExpression>
@@ -14,11 +16,16 @@ namespace {
 
 class Gutter : public QWidget {
 public:
-    explicit Gutter(CodeView *view) : QWidget(view), view_(view) {}
+    explicit Gutter(CodeView *view) : QWidget(view), view_(view) { setCursor(Qt::PointingHandCursor); }
     QSize sizeHint() const override { return QSize(view_->gutterWidth(), 0); }
 
 protected:
     void paintEvent(QPaintEvent *event) override { view_->paintGutter(event); }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        const QTextBlock block = view_->cursorForPosition(QPoint(0, event->position().toPoint().y())).block();
+        Q_EMIT view_->gutterClicked(block.blockNumber());
+    }
 
 private:
     CodeView *view_;
@@ -154,6 +161,13 @@ void CodeView::resizeEvent(QResizeEvent *event)
     gutter_->setGeometry(QRect(cr.left(), cr.top(), gutterWidth(), cr.height()));
 }
 
+void CodeView::setGutterMarks(const std::vector<quint64> &marks, quint64 current)
+{
+    marks_ = marks;
+    current_ = current;
+    gutter_->update();
+}
+
 void CodeView::paintGutter(QPaintEvent *event)
 {
     QPainter painter(gutter_);
@@ -173,6 +187,26 @@ void CodeView::paintGutter(QPaintEvent *event)
                                                           : QStringLiteral("textDisabled")));
             painter.drawText(0, top, gutter_->width() - 8, fontMetrics().height(),
                              Qt::AlignRight, QString::number(number + 1));
+            // A breakpoint reads as a dot, the instruction about to run as an
+            // arrow, both in the space the line number does not use.
+            if (const auto at = addressAtLine(number)) {
+                const int size = fontMetrics().height();
+                const QRectF box(1, top, size, size);
+                if (*at == current_ && current_ != 0) {
+                    painter.setBrush(theme.colour(QStringLiteral("warning")));
+                    painter.setPen(Qt::NoPen);
+                    const QPolygonF arrow({QPointF(box.left() + 2, box.top() + 3),
+                                           QPointF(box.left() + 2, box.bottom() - 3),
+                                           QPointF(box.right() - 2, box.center().y())});
+                    painter.drawPolygon(arrow);
+                } else if (std::find(marks_.begin(), marks_.end(), *at) != marks_.end()) {
+                    painter.setBrush(theme.colour(QStringLiteral("error")));
+                    painter.setPen(Qt::NoPen);
+                    painter.drawEllipse(box.adjusted(3, 3, -3, -3));
+                }
+                painter.setPen(theme.colour(number == current ? QStringLiteral("textMuted")
+                                                              : QStringLiteral("textDisabled")));
+            }
         }
         block = block.next();
         top = bottom;

@@ -81,6 +81,9 @@ TypeStore::TypeStore()
     // An address holding code of an unknown shape. The runtime header spells it
     // `typedef void code`, so a `code *` is a `void *`.
     define_name("code", void_);
+    // What the decompiler writes where an access could not be tied to any
+    // address space. Only ever cast through, so a byte of nothing serves.
+    define_name("BADSPACEBASE", void_);
 }
 
 TypePtr TypeStore::keep(Type type)

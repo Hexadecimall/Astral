@@ -6,6 +6,8 @@
 // definite set of bytes.
 #include "asmbuffer.hh"
 
+#include <cctype>
+#include <cstdlib>
 #include <sstream>
 
 namespace astral_internal {
@@ -65,7 +67,378 @@ std::string substitute(const std::string &text, const std::map<std::string, uint
     return out;
 }
 
+// The mnemonic and the rest of one instruction, split at the first space.
+void split_line(const std::string &text, std::string &mnemonic, std::string &rest)
+{
+    const size_t space = text.find(' ');
+    if (space == std::string::npos) {
+        mnemonic = text;
+        rest.clear();
+        return;
+    }
+    mnemonic = text.substr(0, space);
+    rest = text.substr(space + 1);
+}
+
+// The operands of an instruction, trimmed, in order.
+std::vector<std::string> operands_of(const std::string &rest)
+{
+    std::vector<std::string> out;
+    size_t at = 0;
+    int depth = 0;
+    std::string one;
+    while (at <= rest.size()) {
+        const char c = at < rest.size() ? rest[at] : ',';
+        if (c == '[')
+            ++depth;
+        if (c == ']')
+            --depth;
+        if (c == ',' && depth == 0) {
+            size_t first = one.find_first_not_of(" \t");
+            size_t last = one.find_last_not_of(" \t");
+            out.push_back(first == std::string::npos ? std::string()
+                                                     : one.substr(first, last - first + 1));
+            one.clear();
+        } else {
+            one += c;
+        }
+        ++at;
+    }
+    return out;
+}
+
+// Whether an instruction names a register, under either of its two names.
+bool mentions(const std::string &text, const std::string &wide)
+{
+    const std::string small = "w" + wide.substr(1);
+    for (const std::string &name : {wide, small}) {
+        size_t at = 0;
+        while ((at = text.find(name, at)) != std::string::npos) {
+            const bool before = at == 0 || !std::isalnum(static_cast<unsigned char>(text[at - 1]));
+            const size_t end = at + name.size();
+            const bool after =
+                end >= text.size() || !std::isalnum(static_cast<unsigned char>(text[end]));
+            if (before && after)
+                return true;
+            at = end;
+        }
+    }
+    return false;
+}
+
+// Whether a register is one a value only ever lives in between two points a
+// branch can reach, which is what makes "never named again" mean "dead".
+bool is_scratch(const std::string &name)
+{
+    static const char *const pool[] = {"x9", "x10", "x11", "x12", "x13", "x14", "x15"};
+    for (const char *one : pool)
+        if (name == one)
+            return true;
+    return false;
+}
+
+// Whether an instruction writes to a register as its first operand rather than
+// only reading it.
+bool writes_first_operand(const std::string &mnemonic)
+{
+    if (mnemonic.compare(0, 2, "st") == 0 || mnemonic.compare(0, 2, "cb") == 0 ||
+        mnemonic.compare(0, 2, "b.") == 0 || mnemonic.compare(0, 2, "tb") == 0)
+        return false;
+    return mnemonic != "cmp" && mnemonic != "cmn" && mnemonic != "b" && mnemonic != "bl" &&
+           mnemonic != "blr" && mnemonic != "br" && mnemonic != "ret";
+}
+
+// The condition that holds exactly when this one does not.
+std::string opposite(const std::string &condition)
+{
+    static const std::map<std::string, std::string> table = {
+        {"eq", "ne"}, {"ne", "eq"}, {"cs", "cc"}, {"cc", "cs"}, {"hs", "lo"}, {"lo", "hs"},
+        {"mi", "pl"}, {"pl", "mi"}, {"vs", "vc"}, {"vc", "vs"}, {"hi", "ls"}, {"ls", "hi"},
+        {"ge", "lt"}, {"lt", "ge"}, {"gt", "le"}, {"le", "gt"},
+    };
+    const auto found = table.find(condition);
+    return found == table.end() ? std::string() : found->second;
+}
+
+// How many bytes one load or store touches.
+int access_width(const std::string &mnemonic, const std::string &value)
+{
+    if (mnemonic.size() > 3 && mnemonic.back() == 'b')
+        return 1;
+    if (mnemonic.size() > 3 && mnemonic.back() == 'h')
+        return 2;
+    if (mnemonic == "ldrsw" || mnemonic == "ldursw")
+        return 4;
+    if (mnemonic == "ldp" || mnemonic == "stp")
+        return value.empty() || value[0] == 'w' ? 8 : 16;
+    return value.empty() || value[0] == 'w' ? 4 : 8;
+}
+
+// The offset in `[sp, #n]`, or nothing when the operand is not stack-relative.
+bool stack_offset(const std::string &operand, int64_t &out)
+{
+    if (operand.size() < 4 || operand.front() != '[' || operand.back() != ']')
+        return false;
+    const std::string body = operand.substr(1, operand.size() - 2);
+    const size_t comma = body.find(',');
+    const std::string base = comma == std::string::npos ? body : body.substr(0, comma);
+    size_t first = base.find_first_not_of(" \t");
+    size_t last = base.find_last_not_of(" \t");
+    if (first == std::string::npos || base.substr(first, last - first + 1) != "sp")
+        return false;
+    out = 0;
+    if (comma == std::string::npos)
+        return true;
+    std::string number = body.substr(comma + 1);
+    first = number.find_first_not_of(" \t#");
+    if (first == std::string::npos)
+        return false;
+    number = number.substr(first);
+    out = static_cast<int64_t>(std::strtoll(number.c_str(), nullptr, 0));
+    return true;
+}
+
 } // namespace
+
+// Whether nothing reads a scratch register from here on.
+//
+// A value only ever lives in one of these between two points a branch can
+// reach, so reaching a label is reaching the end of its life. Before that, the
+// first thing that touches it settles the question: a read keeps it alive, and
+// a write ends it.
+static bool dead_from(const std::vector<AsmBufferLine> &lines, size_t from,
+                      const std::string &wide)
+{
+    for (size_t i = from; i < lines.size(); ++i) {
+        if (lines[i].kind == AsmBufferLine::Kind::Label)
+            return true;
+        if (lines[i].kind != AsmBufferLine::Kind::Instruction)
+            continue;
+        std::string mnemonic, rest;
+        split_line(lines[i].text, mnemonic, rest);
+        const std::vector<std::string> parts = operands_of(rest);
+        if (parts.empty())
+            continue;
+        const bool writes = writes_first_operand(mnemonic) && parts[0].size() > 1 &&
+                            ("x" + parts[0].substr(1)) == wide;
+        for (size_t k = writes ? 1 : 0; k < parts.size(); ++k)
+            if (mentions(parts[k], wide))
+                return false;
+        if (writes)
+            return true;
+    }
+    return true;
+}
+
+void AsmBuffer::tighten()
+{
+    // Working a comparison out into a nought or a one and then asking whether
+    // that is nought is asking the comparison itself, which the flags already
+    // answer.
+    for (size_t i = 0; i + 2 < lines_.size(); ++i) {
+        if (lines_[i].kind != Line::Kind::Instruction ||
+            lines_[i + 1].kind != Line::Kind::Instruction ||
+            lines_[i + 2].kind != Line::Kind::Instruction)
+            continue;
+        std::string compare, compare_rest, make, make_rest, branch, branch_rest;
+        split_line(lines_[i].text, compare, compare_rest);
+        split_line(lines_[i + 1].text, make, make_rest);
+        split_line(lines_[i + 2].text, branch, branch_rest);
+        if ((compare != "cmp" && compare != "cmn") || make != "cset")
+            continue;
+        if (branch != "cbz" && branch != "cbnz")
+            continue;
+        const std::vector<std::string> made = operands_of(make_rest);
+        const std::vector<std::string> taken = operands_of(branch_rest);
+        if (made.size() != 2 || taken.size() != 2)
+            continue;
+        if (made[0].size() < 2 || taken[0].size() < 2 ||
+            made[0].substr(1) != taken[0].substr(1))
+            continue;
+        const std::string answer = "x" + made[0].substr(1);
+        if (!is_scratch(answer))
+            continue;
+        if (!dead_from(lines_, i + 3, answer))
+            continue;
+        // Branching when the answer is nought is branching when the condition
+        // did not hold; when it is not nought, when it did.
+        const std::string condition =
+            branch == "cbz" ? opposite(made[1]) : made[1];
+        if (condition.empty())
+            continue;
+        lines_[i + 1].kind = Line::Kind::Comment;
+        lines_[i + 1].text.clear();
+        lines_[i + 2].text = "b." + condition + " " + taken[1];
+    }
+    // A comment with nothing in it is not worth carrying.
+    for (size_t i = 0; i < lines_.size();) {
+        if (lines_[i].kind == Line::Kind::Comment && lines_[i].text.empty())
+            lines_.erase(lines_.begin() + static_cast<long>(i));
+        else
+            ++i;
+    }
+
+    std::vector<Line> kept;
+    kept.reserve(lines_.size());
+    for (size_t i = 0; i < lines_.size(); ++i) {
+        const Line &line = lines_[i];
+        if (line.kind == Line::Kind::Instruction) {
+            std::string mnemonic, rest;
+            split_line(line.text, mnemonic, rest);
+            const std::vector<std::string> parts = operands_of(rest);
+            // A move from a register to itself only means something for the w
+            // form, where writing the register is what clears the half above it.
+            if (mnemonic == "mov" && parts.size() == 2 && parts[0] == parts[1] &&
+                !parts[0].empty() && parts[0][0] == 'x') {
+                continue;
+            }
+            // A value worked out into a scratch register and then moved once
+            // never needed the scratch register: the instruction that made it
+            // can write where it was going.
+            if (mnemonic == "mov" && parts.size() == 2 && parts[0] != parts[1] &&
+                !kept.empty() && kept.back().kind == Line::Kind::Instruction) {
+                const std::string source = "x" + parts[1].substr(1);
+                std::string maker, maker_rest;
+                split_line(kept.back().text, maker, maker_rest);
+                const std::vector<std::string> made = operands_of(maker_rest);
+                const bool writes_it =
+                    !made.empty() && made[0].size() > 1 &&
+                    ("x" + made[0].substr(1)) == source && maker != "cmp" && maker != "cmn" &&
+                    maker.compare(0, 2, "st") != 0 && maker != "b" && maker != "bl" &&
+                    maker != "blr" && maker != "ret" && maker.compare(0, 2, "cb") != 0 &&
+                    maker.compare(0, 2, "b.") != 0;
+                const bool dead_after = is_scratch(source) && dead_from(lines_, i + 1, source);
+                // A move of the whole register keeps whatever the instruction
+                // before it wrote, in whichever form it wrote it, because
+                // writing the low half is what clears the high one. A move of
+                // only the low half has to keep the low half's form.
+                const bool wide_move = parts[0][0] == 'x' && parts[1][0] == 'x';
+                const bool narrow_move = parts[0][0] == 'w' && parts[1][0] == 'w' &&
+                                         !made.empty() && !made[0].empty() && made[0][0] == 'w';
+                if (writes_it && dead_after && (wide_move || narrow_move)) {
+                    std::string replaced =
+                        maker + " " + made[0].substr(0, 1) + parts[0].substr(1);
+                    for (size_t k = 1; k < made.size(); ++k)
+                        replaced += ", " + made[k];
+                    kept.back().text = replaced;
+                    continue;
+                }
+            }
+
+            // A branch to the next thing written is the next thing anyway.
+            if (mnemonic == "b" && parts.size() == 1 && parts[0].size() > 2 &&
+                parts[0].front() == '%' && parts[0].back() == '%') {
+                const std::string wanted = parts[0].substr(1, parts[0].size() - 2);
+                bool falls_through = false;
+                for (size_t j = i + 1; j < lines_.size(); ++j) {
+                    if (lines_[j].kind == Line::Kind::Comment)
+                        continue;
+                    falls_through =
+                        lines_[j].kind == Line::Kind::Label && lines_[j].text == wanted;
+                    break;
+                }
+                if (falls_through)
+                    continue;
+            }
+        }
+        kept.push_back(line);
+    }
+    lines_.swap(kept);
+}
+
+void AsmBuffer::drop_dead_frame_stores(int64_t lowest)
+{
+    // Nothing outside this function can reach the frame unless an address
+    // inside it was put in a register. The frame pointer is the exception:
+    // it is set up for whoever walks the stack and never dereferenced here.
+    for (const Line &line : lines_) {
+        if (line.kind != Line::Kind::Instruction)
+            continue;
+        std::string mnemonic, rest;
+        split_line(line.text, mnemonic, rest);
+        const std::vector<std::string> parts = operands_of(rest);
+        const bool arithmetic = mnemonic == "add" || mnemonic == "sub" || mnemonic == "mov";
+        if (!arithmetic)
+            continue;
+        bool mentions_stack = false;
+        for (size_t i = 1; i < parts.size(); ++i)
+            if (parts[i] == "sp")
+                mentions_stack = true;
+        if (!mentions_stack || parts.empty())
+            continue;
+        if (parts[0] == "sp" || parts[0] == "x29")
+            continue;
+        return;
+    }
+
+    std::vector<std::pair<int64_t, int>> read;
+    for (const Line &line : lines_) {
+        if (line.kind != Line::Kind::Instruction)
+            continue;
+        std::string mnemonic, rest;
+        split_line(line.text, mnemonic, rest);
+        if (mnemonic.compare(0, 2, "ld") != 0)
+            continue;
+        const std::vector<std::string> parts = operands_of(rest);
+        int64_t offset = 0;
+        if (!parts.empty() && stack_offset(parts.back(), offset))
+            read.emplace_back(offset, access_width(mnemonic, parts[0]));
+    }
+
+    std::vector<Line> kept;
+    kept.reserve(lines_.size());
+    for (const Line &line : lines_) {
+        bool dead = false;
+        if (line.kind == Line::Kind::Instruction) {
+            std::string mnemonic, rest;
+            split_line(line.text, mnemonic, rest);
+            if (mnemonic.compare(0, 2, "st") == 0) {
+                const std::vector<std::string> parts = operands_of(rest);
+                int64_t offset = 0;
+                if (!parts.empty() && stack_offset(parts.back(), offset) && offset >= lowest) {
+                    const int width = access_width(mnemonic, parts[0]);
+                    dead = true;
+                    // A store is dead only if no load reaches any byte of it.
+                    for (const std::pair<int64_t, int> &one : read)
+                        if (one.first < offset + width && offset < one.first + one.second)
+                            dead = false;
+                }
+            }
+        }
+        if (!dead)
+            kept.push_back(line);
+    }
+    lines_.swap(kept);
+}
+
+bool AsmBuffer::uses_frame_between(int64_t low, int64_t high) const
+{
+    for (const Line &line : lines_) {
+        if (line.kind != Line::Kind::Instruction)
+            continue;
+        std::string mnemonic, rest;
+        split_line(line.text, mnemonic, rest);
+        const std::vector<std::string> parts = operands_of(rest);
+        if (mnemonic == "add" || mnemonic == "sub" || mnemonic == "mov") {
+            bool from_stack = false;
+            for (size_t i = 1; i < parts.size(); ++i)
+                if (parts[i] == "sp")
+                    from_stack = true;
+            // The frame pointer is set from the stack pointer for whoever
+            // walks the stack, and nothing here reads the frame through it.
+            if (from_stack && !parts.empty() && parts[0] != "sp" && parts[0] != "x29")
+                return true;
+        }
+        if (mnemonic.compare(0, 2, "ld") != 0 && mnemonic.compare(0, 2, "st") != 0)
+            continue;
+        int64_t offset = 0;
+        if (parts.empty() || !stack_offset(parts.back(), offset))
+            continue;
+        if (offset >= low && offset < high)
+            return true;
+    }
+    return false;
+}
 
 AsmBuffer::AsmBuffer(assembler::Target target, uint64_t address)
     : target_(target), address_(address)

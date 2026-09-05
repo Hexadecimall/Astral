@@ -1,6 +1,7 @@
 #include "parser.hh"
 
 #include <functional>
+#include <utility>
 #include <map>
 
 namespace astral_internal {
@@ -55,6 +56,7 @@ bool is_ignorable_specifier(const std::string &name)
 struct BaseSpelling {
     int longs = 0;
     int shorts = 0;
+    bool wide = false;
     bool is_signed = false;
     bool is_unsigned = false;
     enum class Core { None, Void, Char, Int, Float, Double, Bool } core = Core::None;
@@ -270,7 +272,8 @@ bool Parser::is_type_name_start(size_t ahead) const
         text == "signed" || text == "unsigned" || text == "float" || text == "double" ||
         text == "_Bool" || text == "bool" || text == "struct" || text == "union" ||
         text == "enum" || text == "const" || text == "volatile" || text == "restrict" ||
-        text == "_Atomic")
+        text == "_Atomic" || text == "__int128" || text == "__int128_t" ||
+        text == "__uint128_t")
         return true;
     if (is_ignorable_specifier(text))
         return true;
@@ -327,6 +330,8 @@ TypePtr Parser::build_base(const BaseSpelling &spelling, const Where &where)
         width = 2;
     if (spelling.longs > 0)
         width = 8;
+    if (spelling.wide)
+        width = 16;
     if (spelling.shorts > 0 && spelling.longs > 0)
         fail(where, "error: a type cannot be both short and long");
     return types_.integer(width, !spelling.is_unsigned);
@@ -487,6 +492,12 @@ Parser::Specifiers Parser::parse_specifiers()
                                        types_.named("bool") == nullptr)) {
             spelling.core = BaseSpelling::Core::Bool;
             saw_base_keyword = true;
+        } else if (text == "__int128" || text == "__int128_t" || text == "__uint128_t") {
+            spelling.core = BaseSpelling::Core::Int;
+            spelling.wide = true;
+            if (text == "__uint128_t")
+                spelling.is_unsigned = true;
+            saw_base_keyword = true;
         } else if (text == "short") {
             ++spelling.shorts;
             saw_base_keyword = true;
@@ -617,13 +628,29 @@ Parser::Build Parser::parse_direct_declarator(std::string &name,
             bool variadic = false;
             parse_parameters(parameter_types, named, variadic);
             if (parameters != nullptr && parameters->empty())
-                *parameters = named;
+                *parameters = std::move(named);
             postfixes.push_back([types, parameter_types, variadic](TypePtr type) {
                 return types->function(type, parameter_types, variadic);
             });
             continue;
         }
         break;
+    }
+
+    // The emitter sometimes writes an abstract function-pointer parameter as
+    // `code() *` rather than `code (*)()`. That is not C, but refusing it
+    // would mean refusing whole files, so a trailing star on an unnamed
+    // declarator is read as the pointer it was meant to be.
+    if (name.empty() && peek().is_punctuation("*")) {
+        Where where = peek().where;
+        int stars = 0;
+        while (eat_punctuation("*"))
+            ++stars;
+        warn(where, "a pointer written after what it points at is read as if the star came "
+                    "first");
+        for (int i = 0; i < stars; ++i)
+            postfixes.insert(postfixes.begin(),
+                             [types](TypePtr type) { return types->pointer_to(type); });
     }
 
     skip_trailing_decoration();

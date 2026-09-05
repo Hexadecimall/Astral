@@ -6,6 +6,7 @@
 #include "views/hexview.hh"
 #include "model/patchbuilder.hh"
 #include "model/settings.hh"
+#include "model/sourcepatcher.hh"
 
 #include <QCoreApplication>
 #include <QFileInfo>
@@ -29,7 +30,8 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
     layout->setSpacing(0);
 
     pseudo_->setPseudo(true);
-    connect(decompiler_, &DecompilerView::compileRequested, this, [this] { compileCurrent(); });
+    for (DecompilerView *view : {decompiler_, pseudo_})
+        connect(view, &DecompilerView::compileRequested, this, [this, view] { compileCurrent(view); });
     // Both source views offer the same actions on the word under the cursor.
     for (DecompilerView *view : {decompiler_, pseudo_})
         connect(view->codeView(), &CodeView::contextMenuAboutToShow, this,
@@ -181,17 +183,10 @@ void ProgramTab::replaceCodeText(const QString &text)
     decompiler_->setText(text);
 }
 
-void ProgramTab::compileCurrent()
+void ProgramTab::compileCurrent(DecompilerView *view)
 {
-    // Astral assembles and writes bytes itself. Turning source back into
-    // machine code is the one step it has no engine for, so it runs a C
-    // compiler, and the settings file says whether that is wanted.
-    if (!Settings::instance().boolValue(QStringLiteral("patch.useCCompiler"), true)) {
-        Q_EMIT logMessage(tr("patch refused: patching from source needs a C compiler, and "
-                             "patch.useCCompiler is off in %1").arg(Settings::path()));
-        decompiler_->showRefused(tr("patch.useCCompiler is off"));
-        return;
-    }
+    if (view == nullptr)
+        view = views_->currentIndex() == PseudoC ? pseudo_ : decompiler_;
     const auto entry = document_->functionAt(current_);
     const auto cachedFunction = document_->cached(current_);
     QString name = cachedFunction ? cachedFunction->name : entry ? entry->name : QString();
@@ -200,7 +195,7 @@ void ProgramTab::compileCurrent()
         return;
     }
     // The signature line names the function as emitted, which is what the
-    // object will define; the symbol table may know it by an older name.
+    // compiler will define; the symbol table may know it by an older name.
     static const QRegularExpression signatureName(QStringLiteral(R"(\b([A-Za-z_][A-Za-z0-9_]*)\s*\()"));
     if (cachedFunction) {
         const auto m = signatureName.match(cachedFunction->signature);
@@ -208,24 +203,72 @@ void ProgramTab::compileCurrent()
             name = m.captured(1);
     }
     const quint64 span = cachedFunction ? cachedFunction->size : entry ? entry->size : 0;
-    decompiler_->showPatching();
-    auto *builder = new PatchBuilder(document_.get(), this);
-    builder->build(decompiler_->text(), name, current_, span, [this, builder, name](const PatchOutcome &outcome) {
-        builder->deleteLater();
-        if (outcome.ok) {
-            Q_EMIT logMessage(tr("patch %1").arg(outcome.report));
-            decompiler_->showPatchQueued();
-            Q_EMIT patchApplied();
+
+    // Astral compiles for itself. Where it cannot yet, the settings file says
+    // whether running a C compiler instead is wanted; it is not, by default.
+    if (!SourcePatcher::supports(document_->languageId())) {
+        const QString architecture = SourcePatcher::architectureName(document_->languageId());
+        if (!Settings::instance().boolValue(QStringLiteral("patch.useCCompiler"), false)) {
+            Q_EMIT logMessage(tr("patch refused: Astral's compiler writes arm64, not %1, so %2 "
+                                 "cannot be patched from source. Editing the disassembly and "
+                                 "editing the bytes both still work: those go through Astral's "
+                                 "own assembler. Setting patch.useCCompiler in %3 lets it fall "
+                                 "back to a C compiler on this machine.")
+                                  .arg(architecture, name, Settings::path()));
+            view->showRefused(tr("Astral cannot compile %1 yet").arg(architecture));
             return;
         }
-        if (!outcome.diagnostics.isEmpty())
-            Q_EMIT logMessage(tr("patch %1:\n%2").arg(name, outcome.diagnostics));
-        else
-            Q_EMIT logMessage(tr("patch refused: %1").arg(outcome.report));
-        decompiler_->showCompileResult(false, outcome.errors > 0 ? outcome.errors : 1);
-        if (outcome.diagnostics.isEmpty())
-            decompiler_->showRefused(outcome.report);
-    });
+        view->showPatching();
+        auto *builder = new PatchBuilder(document_.get(), this);
+        builder->build(view->text(), name, current_, span,
+                       [this, builder, view, name](const PatchOutcome &outcome) {
+                           builder->deleteLater();
+                           if (outcome.ok) {
+                               Q_EMIT logMessage(tr("patch %1").arg(outcome.report));
+                               view->showPatchQueued();
+                               Q_EMIT patchApplied();
+                               return;
+                           }
+                           if (!outcome.diagnostics.isEmpty())
+                               Q_EMIT logMessage(tr("patch %1:\n%2").arg(name, outcome.diagnostics));
+                           else
+                               Q_EMIT logMessage(tr("patch refused: %1").arg(outcome.report));
+                           view->showCompileResult(false, outcome.errors > 0 ? outcome.errors : 1);
+                           if (outcome.diagnostics.isEmpty())
+                               view->showRefused(outcome.report);
+                       });
+        return;
+    }
+
+    // What Astral emitted for this function is what the bytes in the program
+    // stand for, so it is the only trustworthy account of the code as it is.
+    // Each view edits its own text, and the patch is the difference between
+    // that text and what the view was given.
+    QString before;
+    if (cachedFunction)
+        before = view == pseudo_ ? cachedFunction->pseudoCode : cachedFunction->code;
+
+    view->showPatching();
+    SourcePatcher patcher(document_.get(), this);
+    const SourcePatchOutcome outcome = patcher.patch(before, view->text(), name, current_, span);
+    if (outcome.ok && !outcome.changed) {
+        Q_EMIT logMessage(tr("patch: %1").arg(outcome.report));
+        view->showNothingToChange(outcome.report);
+        return;
+    }
+    if (outcome.ok) {
+        Q_EMIT logMessage(tr("patch %1").arg(outcome.report));
+        view->showPatchQueued();
+        Q_EMIT patchApplied();
+        return;
+    }
+    if (!outcome.diagnostics.isEmpty())
+        Q_EMIT logMessage(tr("patch refused: %1\n%2").arg(outcome.report, outcome.diagnostics));
+    else
+        Q_EMIT logMessage(tr("patch refused: %1").arg(outcome.report));
+    view->showCompileResult(false, outcome.errors > 0 ? outcome.errors : 1);
+    if (outcome.diagnostics.isEmpty())
+        view->showRefused(outcome.report);
 }
 
 ProgramTab::View ProgramTab::view() const

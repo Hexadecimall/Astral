@@ -54,6 +54,8 @@ public:
   virtual void pushTypeStart(const Datatype *ct,bool noident);
   virtual string genericTypeName(const Datatype *ct);
   virtual void pushSymbol(const Symbol *sym,const Varnode *vn,const PcodeOp *op);
+  virtual void pushMismatchSymbol(const Symbol *sym,int4 off,int4 sz,
+				  const Varnode *vn,const PcodeOp *op);
   virtual void pushUnnamedLocation(const Address &addr,const Varnode *vn,const PcodeOp *op);
   virtual void pushConstant(uintb val,const Datatype *ct,tagtype tag,
 			    const Varnode *vn,const PcodeOp *op,uint4 displayFormat);

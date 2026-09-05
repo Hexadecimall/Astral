@@ -10,6 +10,7 @@
 #include "app/welcomepage.hh"
 #include "views/codeview.hh"
 #include "views/listingpane.hh"
+#include "views/debuggerpane.hh"
 #include "views/listingview.hh"
 
 #include <QDateTime>
@@ -289,6 +290,7 @@ void MainWindow::openPath(const QString &path)
             updateReferences(address);
         });
         connect(tab, &ProgramTab::listingChanged, this, [this, tab](const QString &listing) {
+            QTimer::singleShot(0, this, &MainWindow::refreshBreakpointMarks);
             if (tab != currentTab())
                 return;
             listingPane_->setListing(listing);
@@ -325,6 +327,20 @@ void MainWindow::runExportHook(const QString &outPath)
         appendLog(tr("exported %1 bytes of C to %2").arg(code.size()).arg(outPath));
     }
     QTimer::singleShot(200, qApp, &QCoreApplication::quit);
+}
+
+void MainWindow::runDebugHook(const QString &target, const QString &arguments)
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr) {
+        QTimer::singleShot(250, this, [this, target, arguments] { runDebugHook(target, arguments); });
+        return;
+    }
+    debuggerDock_->show();
+    debuggerDock_->raise();
+    const auto address = tab->document()->resolveName(target);
+    debuggerPane_->runForTesting(address.value_or(0),
+                                 arguments.split(QLatin1Char(' '), Qt::SkipEmptyParts));
 }
 
 void MainWindow::runAnalyzeHook()
@@ -467,11 +483,24 @@ void MainWindow::bindCurrentTab()
     setWindowTitle(QStringLiteral("%1 - Astral").arg(QFileInfo(document->path()).fileName()));
     if (tab->currentAddress() != 0)
         functionsPane_->selectAddress(tab->currentAddress());
+    debuggerPane_->setProgram(document->path());
     savePatchedAction_->setEnabled(document->patchCount() > 0);
     analyzeAction_->setEnabled(!document->analyzing());
     statusAnalysis_->setText(document->analyzing() ? tr("analysis running") : tr("idle"));
     fillProjectTree();
     fillTables();
+}
+
+void MainWindow::refreshBreakpointMarks()
+{
+    if (listingView_ == nullptr || debuggerPane_ == nullptr)
+        return;
+    std::vector<quint64> marks;
+    for (int line = 0; line < listingView_->document()->blockCount(); ++line)
+        if (const auto address = listingView_->addressAtLine(line))
+            if (debuggerPane_->hasBreakpoint(*address))
+                marks.push_back(*address);
+    listingView_->setGutterMarks(marks, debuggerPane_->currentAddress());
 }
 
 void MainWindow::fillTables()
@@ -1575,8 +1604,26 @@ void MainWindow::buildDocks()
             if (ProgramTab *tab = currentTab())
                 tab->showAddress(address);
         });
+    debuggerPane_ = new DebuggerPane;
+    connect(debuggerPane_, &DebuggerPane::logMessage, this, &MainWindow::appendLog);
+    connect(debuggerPane_, &DebuggerPane::breakpointsChanged, this, &MainWindow::refreshBreakpointMarks);
+    connect(debuggerPane_, &DebuggerPane::locationChanged, this, [this](quint64 address) {
+        // Follow the program: show where it stopped, and mark the instruction.
+        if (ProgramTab *tab = currentTab())
+            tab->showAddress(address);
+        refreshBreakpointMarks();
+    });
+    debuggerDock_ = addPane(tr("Debugger"), QStringLiteral("debuggerPane"), debuggerPane_,
+                            Qt::BottomDockWidgetArea);
+    // A click in the listing's gutter is how a breakpoint is set.
+    connect(listingView_, &CodeView::gutterClicked, this, [this](int line) {
+        if (const auto address = listingView_->addressAtLine(line))
+            debuggerPane_->toggleBreakpoint(*address);
+    });
+
     QList<QDockWidget *> bottom = {
         xrefs,
+        debuggerDock_,
         addPane(tr("Symbols"), QStringLiteral("symbolsPane"), symbolsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Strings"), QStringLiteral("stringsPane"), stringsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Segments"), QStringLiteral("segmentsPane"), segmentsPane_, Qt::BottomDockWidgetArea),

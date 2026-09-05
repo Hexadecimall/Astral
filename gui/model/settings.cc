@@ -82,9 +82,11 @@ recent.limit = 8
 # a C compiler, which accepts more syntax and can rewrite a whole block.
 patch.assembler = engine
 
-# Patching from edited source needs a C compiler, which Astral does not
-# contain. With this off, the source views say so instead of patching.
-patch.useCCompiler = true
+# Astral compiles edited source itself, for the architectures its own compiler
+# can write. With this on, a program it cannot yet compile for falls back to a
+# C compiler on this machine; with it off, the source views say plainly that
+# the architecture is not supported and Astral runs nothing.
+patch.useCCompiler = false
 )");
 }
 
@@ -129,11 +131,39 @@ void Settings::addMissingDefaults()
             lines_ << QString() << block << line;
             parseInto(line, values_);
             changed = true;
+        } else if (refreshComment(key, block)) {
+            // A setting whose meaning changed carries an explanation that no
+            // longer explains it. The value the file holds is the reader's and
+            // is left alone; the comment above it is Astral's to keep true.
+            changed = true;
         }
         block.clear();
     }
     if (changed)
         save();
+}
+
+bool Settings::refreshComment(const QString &key, const QStringList &block)
+{
+    int at = -1;
+    for (int i = 0; i < lines_.size(); ++i)
+        if (keyOf(lines_.at(i)) == key) {
+            at = i;
+            break;
+        }
+    if (at < 0)
+        return false;
+    int first = at;
+    while (first > 0 && lines_.at(first - 1).trimmed().startsWith(QLatin1Char('#')))
+        --first;
+    const QStringList present = lines_.mid(first, at - first);
+    if (present == block)
+        return false;
+    for (int i = at - 1; i >= first; --i)
+        lines_.removeAt(i);
+    for (int i = 0; i < block.size(); ++i)
+        lines_.insert(first + i, block.at(i));
+    return true;
 }
 
 bool Settings::boolValue(const QString &key, bool fallback) const

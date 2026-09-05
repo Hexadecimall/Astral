@@ -193,6 +193,25 @@ void Knowledge::parse(const std::string &text, bool from_user)
             stop_words_.insert(lower(rest));
         } else if (kind == "junk") {
             placeholders_.push_back(rest);
+        } else if (kind == "const") {
+            // const <context> <value> <name>. The context is a callee and an
+            // argument position ("ioctl:1"), or * for a value that means the
+            // same wherever it appears.
+            std::istringstream fields(rest);
+            std::string context, value_text, name;
+            fields >> context >> value_text;
+            std::getline(fields, name);
+            name = trim(name);
+            if (context.empty() || value_text.empty() || name.empty())
+                continue;
+            const bool negative = value_text[0] == '-';
+            const char *digits = value_text.c_str() + (negative ? 1 : 0);
+            uint64_t value = std::strtoull(digits, nullptr, 0);
+            if (negative)
+                value = static_cast<uint64_t>(-static_cast<int64_t>(value));
+            constants_[context == "*" ? std::string() : context][value] = name;
+            if (from_user)
+                ++learned_;
         } else if (kind == "sig") {
             std::istringstream fields(rest);
             std::string hash_text, length_text, name;
@@ -217,6 +236,23 @@ void Knowledge::parse(const std::string &text, bool from_user)
                 ++learned_;
         }
     }
+}
+
+std::string Knowledge::constant_name(const std::string &context, uint64_t value) const
+{
+    if (!context.empty()) {
+        auto scope = constants_.find(context);
+        if (scope != constants_.end()) {
+            auto entry = scope->second.find(value);
+            if (entry != scope->second.end())
+                return entry->second;
+        }
+    }
+    auto anywhere = constants_.find(std::string());
+    if (anywhere == constants_.end())
+        return std::string();
+    auto entry = anywhere->second.find(value);
+    return entry == anywhere->second.end() ? std::string() : entry->second;
 }
 
 std::string Knowledge::verb_for(const std::string &callee) const
@@ -309,10 +345,18 @@ std::string Knowledge::signature_name(uint64_t hash, uint32_t length) const
     return it == signatures_.end() ? std::string() : it->second;
 }
 
+size_t Knowledge::constant_count() const
+{
+    size_t total = 0;
+    for (const auto &scope : constants_)
+        total += scope.second.size();
+    return total;
+}
+
 size_t Knowledge::size() const
 {
     return verbs_.size() + idioms_.size() + literals_.size() + roles_.size() + protos_.size() +
-           headers_.size() + notes_.size() + signatures_.size();
+           headers_.size() + notes_.size() + signatures_.size() + constant_count();
 }
 
 bool Knowledge::append_user_record(const std::string &line, std::string &error)

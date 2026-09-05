@@ -4,7 +4,7 @@
 # needed when the header gains new entry points.
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
-header="$here/../../include/astral/ghidra.h"
+header="$here/../../include/astral/astral.h"
 
 if ! command -v bindgen >/dev/null 2>&1; then
     echo "bindgen not installed: cargo install bindgen-cli" >&2

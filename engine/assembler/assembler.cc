@@ -49,7 +49,7 @@ std::vector<std::string> known_mnemonics(Target target)
 {
     switch (target) {
     case Target::Arm64:
-        return {"nop",  "ret",  "mov",  "movz", "movk", "add",  "sub",  "cmp",   "cmn",
+        return {"nop",  "ret",  "mov",  "movz", "movk", "adr",  "adrp", "add",  "sub",  "cmp",   "cmn",
                 "and",  "orr",  "eor",  "mvn",  "b",    "bl",   "br",   "blr",   "b.<cond>",
                 "cbz",  "cbnz", "svc",  "brk",  "ldr",  "str",  "ldrb", "strb",  "ldrh",
                 "strh", "ldrsb","ldrsh","ldrsw","ldur", "stur", "mul",  "madd",  "msub",

@@ -41,8 +41,13 @@ struct FunctionResult {
     std::string name;
     uint64_t address = 0;
     uint64_t size = 0;
-    // The decompiler's listing, as Ghidra prints it.
+    // The decompiler's listing, as Ghidra prints it. The compilable form is
+    // built from this, so it stays exactly as the c-language printer left it.
     std::string c_code;
+    // The same function printed to be read: named frame slots, short type
+    // names, well-known constants by name, declarations where the values are
+    // first given. Not C, and never handed to a compiler.
+    std::string c_code_pseudo;
     std::string signature;
     // The same function rewritten into C that compiles.
     std::string c_code_real;
@@ -212,6 +217,7 @@ private:
     };
     const std::map<std::string, GlobalSymbol> &globals() const;
     std::string apply_naming(void *funcdata, FunctionResult &out);
+    void print_function(void *funcdata, std::string &listing, std::string &readable);
     void analyse_function(void *funcdata, FunctionResult &out);
     void apply_learned_names();
     void apply_known_prototype(const std::string &name);

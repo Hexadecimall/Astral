@@ -37,6 +37,9 @@ public:
     // The patched binary reached the disk.
     void showPatchWritten();
     void showRefused(const QString &reason);
+    // The edit compiled to the same code the program already holds. Nothing
+    // went wrong, so this is not a refusal.
+    void showNothingToChange(const QString &detail);
     void setStatus(const QString &text, const QString &kind, const QString &tip = QString());
 
 Q_SIGNALS:

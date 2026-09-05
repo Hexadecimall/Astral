@@ -79,6 +79,11 @@ int main(int argc, char **argv)
         QTimer::singleShot(1500, &window, [&window, asmEdit, asmOut] { window.runAssembleHook(asmEdit, asmOut); });
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_DUMP_LISTING"))
         QTimer::singleShot(1500, &window, &astral::gui::MainWindow::dumpListing);
+    const QString debugAt = qEnvironmentVariable("ASTRAL_GUI_DEBUG");
+    if (!debugAt.isEmpty())
+        QTimer::singleShot(1500, &window, [&window, debugAt] {
+            window.runDebugHook(debugAt, qEnvironmentVariable("ASTRAL_GUI_DEBUG_ARGS"));
+        });
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_ANALYZE"))
         QTimer::singleShot(1500, &window, [&window] { window.runAnalyzeHook(); });
     const QString probe = qEnvironmentVariable("ASTRAL_GUI_SEARCH");

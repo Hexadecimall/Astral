@@ -31,8 +31,12 @@ public:
 
     int gutterWidth() const;
     void paintGutter(QPaintEvent *event);
+    // Draws a dot beside each of these addresses, and an arrow at `current`.
+    void setGutterMarks(const std::vector<quint64> &marks, quint64 current);
 
 Q_SIGNALS:
+    // The gutter was clicked on this line, which is where a breakpoint is set.
+    void gutterClicked(int blockNumber);
     // Raised before the context menu is shown, so whoever owns the view can
     // add what it can do with `word` at the top of the menu.
     void contextMenuAboutToShow(QMenu *menu, const QString &word);
@@ -46,6 +50,9 @@ private:
     void updateGutter(const QRect &rect, int dy);
     void highlightCurrentLine();
 
+    // Addresses to mark in the gutter, and which one is executing.
+    std::vector<quint64> marks_;
+    quint64 current_ = 0;
     QWidget *gutter_;
 };
 

@@ -60,6 +60,39 @@ bool has(const std::string &text, const std::string &needle)
     return text.find(needle) != std::string::npos;
 }
 
+// The whole line the first occurrence of `needle` sits on.
+std::string line_with(const std::string &text, const std::string &needle)
+{
+    const size_t at = text.find(needle);
+    if (at == std::string::npos)
+        return std::string();
+    const size_t start = text.rfind('\n', at);
+    const size_t stop = text.find('\n', at);
+    return text.substr(start == std::string::npos ? 0 : start + 1,
+                       (stop == std::string::npos ? text.size() : stop) -
+                           (start == std::string::npos ? 0 : start + 1));
+}
+
+// A line reading "<type> <name> = ..." - a declaration standing on the
+// statement that gives the value, rather than in a block of its own.
+bool declares_and_assigns(const std::string &line)
+{
+    size_t at = line.find_first_not_of(" \t");
+    if (at == std::string::npos)
+        return false;
+    int words = 0;
+    while (at < line.size() && line[at] != '=') {
+        const size_t end = line.find_first_of(" \t", at);
+        if (end == std::string::npos)
+            return false;
+        ++words;
+        at = line.find_first_not_of(" \t", end);
+        if (at == std::string::npos)
+            return false;
+    }
+    return words == 2 && at < line.size() && line[at] == '=' && line[at + 1] != '=';
+}
+
 // ------------------------------------------------------------------ tests
 
 void types_are_named_by_width_in_bits()
@@ -97,24 +130,27 @@ void a_frame_slot_reads_as_a_local()
     // Whatever the decompiler recovered of the frame, nothing in the listing is
     // allowed to read as arithmetic on the register the caller left behind.
     expect(!has(text, "unaff"), "no unaffected register is left in the text", text);
-    expect(has(text, "local") || has(text, "stack") || has(text, "&size") || has(text, "size"),
-           "the slot the request writes into has a name", text);
+    expect(!has(text, "Stack_") && !has(text, "Stack0"),
+           "no slot is left spelled the way the decompiler numbers them", text);
+    expect(has(text, "local"), "the slot the request writes into reads as a local", text);
 }
 
 void a_declaration_stands_where_the_value_is_given()
 {
     std::printf("\na declaration stands where the value is given\n");
     astral::Program program = open();
-    const std::string text = listing_of(program, "first_use_inside_a_branch");
-    expect(!text.empty(), "the subject has a function named first_use_inside_a_branch");
-    // A declaration that moved is a type immediately followed by an assignment.
-    const bool moved = has(text, "= ") &&
-                       (has(text, "i32 ") || has(text, "u32 ") || has(text, "i64 "));
-    expect(moved, "a type stands on a line that gives a value", text);
-    // Nothing declared may be left unwritten: the wall of names is what this
-    // removes, so a name declared and then never assigned means it did not run.
-    size_t brace = text.find('{');
-    expect(brace != std::string::npos, "the body has an opening brace");
+    const std::string text = listing_of(program, "measure_terminal");
+    expect(!text.empty(), "the subject has a function named measure_terminal");
+    const std::string call = line_with(text, "= ioctl(");
+    expect(!call.empty(), "the listing calls ioctl", text);
+    expect(declares_and_assigns(call),
+           "the value the call returns is declared where it is given", call);
+    // And the name it declares is not also declared in a block of its own.
+    const size_t name_end = call.find(" =");
+    const size_t name_start = call.rfind(' ', name_end - 1);
+    const std::string name =
+        call.substr(name_start + 1, name_end - name_start - 1);
+    expect(!has(text, name + ";"), "the same name is not declared twice", text);
 }
 
 void the_compilable_output_is_untouched()

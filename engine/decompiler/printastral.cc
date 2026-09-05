@@ -128,16 +128,20 @@ string globalPlaceName(const string &name)
 
 {
   string::size_type at = name.find("Ram");
-  if (at == string::npos || !isHexDigits(name,at+3))
+  if (at == string::npos)
     return string();
   for(string::size_type i=0;i<at;++i) {
     if (islower((unsigned char)name[i]) == 0) return string();
   }
-  string digits = shortHex(name.substr(at+3));
+  string::size_type stop = at + 3;
+  while (stop < name.size() && isxdigit((unsigned char)name[stop]) != 0)
+    ++stop;
+  if (stop - (at + 3) < 8) return string();
+  string digits = shortHex(name.substr(at+3,stop-at-3));
   if (digits.size() > 4)
     digits = digits.substr(digits.size()-4);
   digits[0] = (char)toupper((unsigned char)digits[0]);
-  return "g" + digits;
+  return "g" + digits + name.substr(stop);
 }
 
 // The listing name for a slot the decompiler did place in the frame and then
@@ -159,8 +163,31 @@ string stackSlotName(const string &name)
     ++rest;
   if (rest >= name.size() || name[rest] != '_') return string();
   ++rest;
-  if (!isHexDigits(name,rest)) return string();
-  return (caller ? "stack" : "local") + shortHex(name.substr(rest));
+  string::size_type stop = rest;
+  while (stop < name.size() && isxdigit((unsigned char)name[stop]) != 0)
+    ++stop;
+  if (stop == rest) return string();
+  // Whatever the scope added to keep two of these apart stays as it is.
+  return (caller ? "stack" : "local") + shortHex(name.substr(rest,stop-rest)) +
+	 name.substr(stop);
+}
+
+// The listing name for a symbol the decompiler could only name after where it
+// sits, or the empty string when the name already says something. A leading
+// underscore marks a reference the decompiler thinks does not quite fit its
+// symbol, and that marker is kept because it is a warning about the code.
+string readableSymbolName(const string &name)
+
+{
+  if (!name.empty() && name[0] == '_') {
+    string inner = readableSymbolName(name.substr(1));
+    return inner.empty() ? string() : "_" + inner;
+  }
+  string result = entryValueName(name);
+  if (!result.empty()) return result;
+  result = stackSlotName(name);
+  if (!result.empty()) return result;
+  return globalPlaceName(name);
 }
 
 // True when a cast between these two says nothing a reader needs: same width,
@@ -422,6 +449,20 @@ void PrintAstral::pushSymbol(const Symbol *sym,const Varnode *vn,const PcodeOp *
   }
 
   PrintC::pushSymbol(sym,vn,op);
+}
+
+void PrintAstral::pushMismatchSymbol(const Symbol *sym,int4 off,int4 sz,
+				     const Varnode *vn,const PcodeOp *op)
+
+{
+  if (off == 0) {
+    string nm = readableSymbolName(sym->getName());
+    if (!nm.empty()) {
+      pushAtom(Atom("_" + nm,vartoken,EmitMarkup::var_color,op,vn));
+      return;
+    }
+  }
+  PrintC::pushMismatchSymbol(sym,off,sz,vn,op);
 }
 
 void PrintAstral::pushUnnamedLocation(const Address &addr,const Varnode *vn,const PcodeOp *op)

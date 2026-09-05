@@ -82,6 +82,7 @@ set(ASTRAL_LIB_SRC
     src/knowledge/contribute.cc
     src/knowledge/source_learn.cc
     src/emit/creal.cc
+    src/emit/pseudo.cc
     src/api/cpp_api.cc
     src/api/error.cc
     src/format/image.cc
@@ -280,6 +281,26 @@ if(TARGET astral_cli)
     set_tests_properties(emulator_debug_cli PROPERTIES
         ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
 endif()
+
+# The readable listing is checked on a program built for it: the subject has a
+# frame slot no symbol names, a request number that means one thing in an ioctl
+# call and nothing anywhere else, and values first given inside a branch. Built
+# at -O0 so all of that survives to be decompiled.
+add_executable(astral_listing_subject src/emit/tests/listing_subject.c)
+set_target_properties(astral_listing_subject PROPERTIES OUTPUT_NAME listing_subject
+    C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/emit-tests)
+target_compile_options(astral_listing_subject PRIVATE -O0)
+
+add_executable(astral_listing_test src/emit/tests/listing_test.cc)
+set_target_properties(astral_listing_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(astral_listing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(astral_listing_test PRIVATE astral_static)
+add_dependencies(astral_listing_test astral_listing_subject)
+add_test(NAME emit_listing COMMAND astral_listing_test
+         $<TARGET_FILE:astral_listing_subject>)
+set_tests_properties(emit_listing PROPERTIES
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
 
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)

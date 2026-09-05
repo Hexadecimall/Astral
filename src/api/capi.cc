@@ -848,7 +848,12 @@ uint64_t astral_function_size(const astral_function *f)
 
 const char *astral_function_c_code(const astral_function *f)
 {
-    return f == nullptr ? nullptr : cstr(f->result.c_code);
+    // The readable listing, not the printer's raw form: this is what a person
+    // asked to see. The raw form stays inside the library, where the compilable
+    // path is built from it.
+    if (f == nullptr)
+        return nullptr;
+    return cstr(f->result.c_code_pseudo.empty() ? f->result.c_code : f->result.c_code_pseudo);
 }
 
 const char *astral_function_signature(const astral_function *f)

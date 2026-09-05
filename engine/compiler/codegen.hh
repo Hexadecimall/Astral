@@ -7,9 +7,10 @@
 // Machine, not another generator.
 //
 // Values are evaluated onto a stack whose slots are frame memory, addressed by
-// depth. That is slower than keeping them in registers, but a patch has to be
-// right before it has to be small, and a stack of frame slots is right by
-// construction: nothing a call clobbers is ever live in a register.
+// depth. A frame slot is where a value definitely is; a register is where it
+// may be while nothing can interrupt. Between two points control can reach from
+// more than one direction, every live value is put back in its slot, so the
+// slower model still describes what is true at every join.
 #ifndef ASTRAL_COMPILER_CODEGEN_HH
 #define ASTRAL_COMPILER_CODEGEN_HH
 
@@ -85,6 +86,12 @@ public:
         eval_base_ = eval_base;
         leave_ = leave;
     }
+    // A function that calls nothing keeps no return address and needs no frame
+    // pointer, which is most of a small patch's budget.
+    void set_leaf(bool leaf) { leaf_ = leaf; }
+    // Where the function will sit, which decides whether a call can be a direct
+    // branch or has to go through a register.
+    void set_origin(uint64_t address) { origin_ = address; }
     const std::string &error() const { return error_; }
     void forget_error() { error_.clear(); }
 
@@ -110,8 +117,17 @@ public:
     virtual void binary(int depth, BinaryOp what, const Operation &op) = 0;
     virtual void convert(int depth, const Operation &from, const Operation &to) = 0;
 
+    // --- what a register may hold ---
+    // Puts the lowest `depth` values back in their frame slots, so a point
+    // control reaches from more than one direction finds them where the slower
+    // model says they are.
+    virtual void settle(int depth) { (void)depth; }
+    // Control arrives here from somewhere else as well, so nothing held over
+    // from the instructions just written is still known.
+    virtual void forget_registers() {}
+
     // --- where to go next ---
-    virtual void jump(const std::string &label) = 0;
+    virtual void jump(int depth, const std::string &label) = 0;
     virtual void branch_if_zero(int depth, const std::string &label) = 0;
     virtual void branch_if_nonzero(int depth, const std::string &label) = 0;
     virtual void branch_if_equal(int depth, uint64_t value, const std::string &label) = 0;
@@ -134,6 +150,8 @@ protected:
     int64_t eval_base_ = 0;
     std::string leave_;
     std::string error_;
+    uint64_t origin_ = 0;
+    bool leaf_ = false;
 };
 
 // The architectures that have a Machine written for them.
@@ -144,8 +162,8 @@ std::unique_ptr<Machine> machine_for(assembler::Target target);
 // `unit` is there for the names the body reaches for that it does not define.
 // Returns false and fills `error` when something in the function cannot be
 // written; `placed` collects literals that had to be given room.
-bool generate_function(Machine &machine, AsmBuffer &out, const Unit &unit,
-                       const Function &function, const Environment &environment,
+bool generate_function(Machine &machine, AsmBuffer &out, assembler::Target target, uint64_t address,
+                       const Unit &unit, const Function &function, const Environment &environment,
                        const Options &options, std::vector<Result::Datum> &placed,
                        std::vector<Diagnostic> &diagnostics, std::string &error);
 

@@ -71,6 +71,13 @@ public:
         protos_[name] = declaration;
     }
     std::string header_for(const std::string &name) const;
+
+    // The name a well-known constant goes by. `context` is the callee and the
+    // argument position the value sits in, written "ioctl:1", or empty for a
+    // value asked about with nothing else known. A context-specific record wins
+    // over one recorded for every context, so 0x40087468 is TIOCGWINSZ in an
+    // ioctl request slot and stays a number everywhere else.
+    std::string constant_name(const std::string &context, uint64_t value) const;
     const std::map<std::string, std::string> &prototypes() const { return protos_; }
 
     // A comment to attach where `text` appears in a function body.
@@ -105,6 +112,7 @@ public:
 private:
     Knowledge() = default;
     void parse(const std::string &text, bool from_user);
+    size_t constant_count() const;
     bool append_user_record(const std::string &line, std::string &error);
 
     std::map<std::string, std::string> verbs_;
@@ -122,6 +130,9 @@ private:
     std::map<std::string, std::string> headers_;
     std::vector<std::pair<std::string, std::string>> notes_;
     std::map<std::pair<uint64_t, uint32_t>, std::string> signatures_;
+    // Keyed by context, then by value. The empty context holds the values whose
+    // meaning does not depend on where they appear.
+    std::map<std::string, std::map<uint64_t, std::string>> constants_;
     std::set<uint32_t> lengths_;
     std::string user_path_;
     size_t learned_ = 0;

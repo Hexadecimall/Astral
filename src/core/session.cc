@@ -8,6 +8,7 @@
 
 #include "assembler.hh"
 #include "creal.hh"
+#include "pseudo.hh"
 #include "listing.hh"
 #include "machine.hh"
 #include "cxx_idioms.hh"
@@ -21,6 +22,7 @@
 #include "block.hh"
 #include "funcdata.hh"
 #include "libdecomp.hh"
+#include "printastral.hh"
 #include "printc.hh"
 #include "sleigh_arch.hh"
 #include "slgh_compile.hh"
@@ -1438,20 +1440,44 @@ void Session::collect_externals(FunctionResult &result, const void *funcdata) co
 }
 
 
+// Prints one function twice: once with the c-language printer, which is what
+// the compilable path is built from, and once with the readable one. Both come
+// from the same decompiled form, so the two never disagree about the code.
+void Session::print_function(void *funcdata, std::string &listing, std::string &readable)
+{
+    ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
+    std::ostringstream code;
+    arch_->print->setOutputStream(&code);
+    arch_->print->docFunction(fd);
+    listing = code.str();
+
+    ghidra::registerAstralPrintLanguage();
+    const std::string chosen = arch_->print->getName();
+    std::ostringstream pretty;
+    try {
+        arch_->setPrintLanguage("astral-c");
+        arch_->print->setOutputStream(&pretty);
+        arch_->print->docFunction(fd);
+        readable = readable_listing(pretty.str());
+    } catch (ghidra::LowlevelError &) {
+        // Nothing readable came out, so the plain listing stands. The listing
+        // the rest of the library uses was already taken.
+        readable = listing;
+    }
+    arch_->setPrintLanguage(chosen);
+}
+
 // Reads everything Astral reports about a function out of the decompiled form.
 void Session::analyse_function(void *funcdata, FunctionResult &out)
 {
     ghidra::Funcdata *fd = static_cast<ghidra::Funcdata *>(funcdata);
     ghidra::Scope *global = arch_->symboltab->getGlobalScope();
     out = FunctionResult();
-    std::ostringstream code;
-    arch_->print->setOutputStream(&code);
-    arch_->print->docFunction(fd);
+    print_function(funcdata, out.c_code, out.c_code_pseudo);
 
     out.name = fd->getName();
     out.address = fd->getAddress().getOffset();
     out.size = static_cast<uint64_t>(fd->getSize());
-    out.c_code = code.str();
 
     const ghidra::FuncProto &proto = fd->getFuncProto();
     out.calling_convention = proto.getModelName();
@@ -1589,10 +1615,7 @@ std::string Session::apply_naming(void *funcdata, FunctionResult &out)
     if (!renamed_function && !out.applied_renames.empty()) {
         // Renaming locals changes nothing the analysis depends on, so printing
         // again is enough to make the new names appear throughout.
-        std::ostringstream code;
-        arch_->print->setOutputStream(&code);
-        arch_->print->docFunction(fd);
-        out.c_code = code.str();
+        print_function(funcdata, out.c_code, out.c_code_pseudo);
     }
     return proposed_name;
 }

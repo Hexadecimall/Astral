@@ -181,6 +181,11 @@ void DecompilerView::showRefused(const QString &reason)
     setStatus(tr("refused"), QStringLiteral("error"), reason);
 }
 
+void DecompilerView::showNothingToChange(const QString &detail)
+{
+    setStatus(tr("nothing to change"), QStringLiteral("muted"), detail);
+}
+
 namespace {
 
 // The line that opens `name`'s definition in `source`. The two views print

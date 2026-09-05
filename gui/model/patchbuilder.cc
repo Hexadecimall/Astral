@@ -1,4 +1,5 @@
 #include "model/patchbuilder.hh"
+#include "model/literalspace.hh"
 #include "model/programdocument.hh"
 
 #include <QCoreApplication>
@@ -609,103 +610,28 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                             return s.address;
                     return std::nullopt;
                 };
-                auto resolveLiteral = [this](const QByteArray &literal) -> std::optional<quint64> {
-                    // The same text, terminated, already in a data segment.
-                    const QByteArray needle = literal + '\0';
-                    // Mach-O keeps literals inside the executable __TEXT
-                    // segment, so every segment is searched.
-                    for (const SegmentEntry &seg : document_->segments()) {
-                        if (seg.size == 0)
-                            continue;
-                        const QByteArray bytes = document_->read(seg.address, seg.size);
-                        const qsizetype at = bytes.indexOf(needle);
-                        if (at >= 0)
-                            return seg.address + static_cast<quint64>(at);
-                    }
-                    return std::nullopt;
+                LiteralSpace space(document_, address, span);
+                auto resolveLiteral = [&space](const QByteArray &literal) -> std::optional<quint64> {
+                    return space.find(literal);
                 };
                 QStringList unresolved = relocate(*function, address, resolve, resolveLiteral);
 
-                // Literals the binary does not hold need a home. First choice
-                // is the tail of this function's own span, which the shorter
-                // new code leaves free; then alignment padding in code
-                // segments, which nothing reads. Both are reached the same
-                // way any other address is, so no relocation cares.
-                struct Placement {
-                    QByteArray literal;
-                    quint64 address;
-                };
-                std::vector<Placement> placed;
-                QByteArray tail; // bytes appended after the code, inside the span
-                std::vector<std::pair<quint64, QByteArray>> caves;
+                // Literals the binary does not hold need a home, which the
+                // shared placement finds: the tail of this function's own
+                // span first, then padding in a code segment.
                 if (!unresolved.isEmpty()) {
-                    std::vector<QByteArray> missing;
-                    for (const ObjectFunction::Relocation &reloc : function->relocations)
-                        if (reloc.hasLiteral && !resolveLiteral(reloc.literal)
-                            && std::find(missing.begin(), missing.end(), reloc.literal) == missing.end())
-                            missing.push_back(reloc.literal);
-                    quint64 codeEnd = address + static_cast<quint64>(function->bytes.size());
-                    const quint64 spanEnd = address + span;
-                    std::vector<QByteArray> homeless;
-                    for (const QByteArray &literal : missing) {
-                        const QByteArray stored = literal + '\0';
-                        const quint64 at = codeEnd + static_cast<quint64>(tail.size());
-                        if (at + static_cast<quint64>(stored.size()) <= spanEnd) {
-                            tail += stored;
-                            placed.push_back({literal, at});
-                        } else {
-                            homeless.push_back(literal);
-                        }
-                    }
-                    // Caves: runs of zero bytes at least as long as needed,
-                    // taken from executable segments only, where a zero run
-                    // is padding between sections and never data. The search
-                    // runs from the end of the segment backwards so strings
-                    // land in the padding after the code, never in the page
-                    // holding the file header, which the loader parses.
-                    const quint64 imageBase = document_->imageBase();
-                    for (const QByteArray &literal : homeless) {
-                        const QByteArray stored = literal + '\0';
-                        bool found = false;
-                        for (const SegmentEntry &seg : document_->segments()) {
-                            if (!seg.executable || seg.size == 0)
-                                continue;
-                            const QByteArray bytes = document_->read(seg.address, seg.size);
-                            const QByteArray zeros(stored.size() + 8, '\0');
-                            const quint64 floor = seg.address == imageBase ? seg.address + 0x1000 : seg.address;
-                            qsizetype at = bytes.lastIndexOf(zeros);
-                            while (at >= 0) {
-                                const quint64 candidate = seg.address + static_cast<quint64>(at) + 4;
-                                bool taken = candidate < floor;
-                                for (const auto &cave : caves)
-                                    if (candidate < cave.first + static_cast<quint64>(cave.second.size()) + 4
-                                        && candidate + static_cast<quint64>(stored.size()) + 4 > cave.first)
-                                        taken = true;
-                                if (!taken && !(candidate >= address && candidate < spanEnd)) {
-                                    caves.push_back({candidate, stored});
-                                    placed.push_back({literal, candidate});
-                                    found = true;
-                                    break;
-                                }
-                                if (at == 0)
-                                    break;
-                                at = bytes.lastIndexOf(zeros, at - 1);
-                            }
-                            if (found)
-                                break;
-                        }
-                        if (!found) {
+                    for (const ObjectFunction::Relocation &reloc : function->relocations) {
+                        if (!reloc.hasLiteral || space.find(reloc.literal))
+                            continue;
+                        if (!space.place(reloc.literal)) {
                             outcome.report = tr("%1 needs the string %2 somewhere in the binary and no room was found for it")
-                                                 .arg(functionName, QString::fromLatin1(literal.left(32)));
+                                                 .arg(functionName, QString::fromLatin1(reloc.literal.left(32)));
                             onDone(outcome);
                             return;
                         }
                     }
-                    auto resolveAny = [&](const QByteArray &literal) -> std::optional<quint64> {
-                        for (const Placement &pl : placed)
-                            if (pl.literal == literal)
-                                return pl.address;
-                        return resolveLiteral(literal);
+                    auto resolveAny = [&space](const QByteArray &literal) -> std::optional<quint64> {
+                        return space.place(literal);
                     };
                     unresolved = relocate(*function, address, resolve, resolveAny);
                 }
@@ -715,33 +641,31 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                     onDone(outcome);
                     return;
                 }
-                if (static_cast<quint64>(function->bytes.size()) + static_cast<quint64>(tail.size()) > span) {
+                if (static_cast<quint64>(function->bytes.size()) > space.codeRoom()) {
                     outcome.report = tr("%1 compiles to %2 bytes but only %3 are available in place")
-                                         .arg(functionName).arg(function->bytes.size()).arg(span);
+                                         .arg(functionName).arg(function->bytes.size()).arg(space.codeRoom());
                     onDone(outcome);
                     return;
                 }
-                // Pad the rest of the span with no-ops so nothing stale runs;
-                // the literals sit after the code, past the final return.
-                QByteArray bytes = function->bytes + tail;
+                // Pad the rest of the room with no-ops so nothing stale runs;
+                // any literals sit above it, past the final return.
+                QByteArray bytes = function->bytes;
                 if (function->arch == ObjectFunction::Arm64) {
                     static const char nop[4] = {'\x1f', '\x20', '\x03', '\xd5'};
-                    while (static_cast<quint64>(bytes.size()) + 4 <= span)
+                    while (static_cast<quint64>(bytes.size()) + 4 <= space.codeRoom())
                         bytes.append(nop, 4);
                 } else {
-                    while (static_cast<quint64>(bytes.size()) < span)
+                    while (static_cast<quint64>(bytes.size()) < space.codeRoom())
                         bytes.append('\x90');
                 }
-                for (const auto &cave : caves) {
-                    QString caveError;
-                    if (!document_->patchBytes(cave.first, cave.second,
-                                               tr("string for %1").arg(functionName), caveError)) {
-                        outcome.report = caveError;
+                QString patchError;
+                for (const LiteralSpace::Placement &placement : space.placements())
+                    if (!document_->patchBytes(placement.address, placement.text + '\0',
+                                               tr("string for %1").arg(functionName), patchError)) {
+                        outcome.report = patchError;
                         onDone(outcome);
                         return;
                     }
-                }
-                QString patchError;
                 if (!document_->patchBytes(address, bytes, tr("%1 rewritten from edited C").arg(functionName), patchError)) {
                     outcome.report = patchError;
                     onDone(outcome);
@@ -751,13 +675,15 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                 outcome.bytes = bytes;
                 outcome.relocationsResolved = static_cast<int>(function->relocations.size());
                 QStringList where;
-                for (const Placement &pl : placed)
-                    where << QStringLiteral("\"%1\" at 0x%2").arg(QString::fromLatin1(pl.literal.left(20))).arg(pl.address, 0, 16);
+                for (const LiteralSpace::Placement &placement : space.placements())
+                    where << QStringLiteral("\"%1\" at 0x%2")
+                                 .arg(QString::fromLatin1(placement.text.left(20)))
+                                 .arg(placement.address, 0, 16);
                 outcome.report = tr("%1: %2 bytes of new code queued at 0x%3, %4 relocation(s) resolved, "
                                     "%5 bytes padded%6")
                                      .arg(functionName).arg(function->bytes.size()).arg(address, 0, 16)
                                      .arg(function->relocations.size())
-                                     .arg(bytes.size() - function->bytes.size() - tail.size())
+                                     .arg(bytes.size() - function->bytes.size())
                                      .arg(where.isEmpty() ? QString() : QStringLiteral("; strings: ") + where.join(QStringLiteral(", ")));
                 onDone(outcome);
             });

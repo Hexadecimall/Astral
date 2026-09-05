@@ -301,6 +301,35 @@ Result assemble_arm64(Target target, const Line &line, uint64_t address)
         return word_of(opcode | (static_cast<uint32_t>(through.number) << 5));
     }
 
+    if (mnemonic == "adr" || mnemonic == "adrp") {
+        // An address the code reaches by measuring from itself rather than by
+        // holding a number. That is what keeps it right when the image is
+        // loaded somewhere other than where it was written for, which is the
+        // ordinary case for anything position-independent.
+        Register into;
+        uint64_t target_address = 0;
+        if (operands.size() != 2 || !parse_register(operands[0], into) || !into.wide
+            || !parse_address(operands[1], target_address))
+            return fail(mnemonic + " takes a 64-bit register and an address");
+        int64_t distance = 0;
+        if (mnemonic == "adrp") {
+            // adrp answers with the page the address is in, so both ends are
+            // rounded down to a page before the distance is taken.
+            distance = static_cast<int64_t>(target_address & ~uint64_t(0xfff))
+                       - static_cast<int64_t>(address & ~uint64_t(0xfff));
+            distance >>= 12;
+        } else {
+            distance = static_cast<int64_t>(target_address) - static_cast<int64_t>(address);
+        }
+        if (distance < -(int64_t(1) << 20) || distance >= (int64_t(1) << 20))
+            return fail("that is too far to reach with " + mnemonic);
+        const uint32_t immediate = static_cast<uint32_t>(distance);
+        const uint32_t low = immediate & 0x3u;
+        const uint32_t high = (immediate >> 2) & 0x7ffffu;
+        const uint32_t opcode = mnemonic == "adrp" ? 0x90000000u : 0x10000000u;
+        return word_of(opcode | (low << 29) | (high << 5) | static_cast<uint32_t>(into.number));
+    }
+
     if (mnemonic == "b" || mnemonic == "bl") {
         uint64_t target_address = 0;
         if (operands.size() != 1 || !parse_address(operands[0], target_address))
@@ -350,6 +379,51 @@ Result assemble_arm64(Target target, const Line &line, uint64_t address)
                         static_cast<uint32_t>(tested.number));
     }
 
+
+    if (mnemonic == "stp" || mnemonic == "ldp") {
+        if (operands.size() != 3 && operands.size() != 4)
+            return wrong_count(3);
+        Register first, second;
+        Memory memory;
+        if (!parse_register(operands[0], first) || !parse_register(operands[1], second))
+            return fail(mnemonic + " takes two registers and a memory operand");
+        if (first.wide != second.wide)
+            return fail("both registers of " + mnemonic + " have to be the same width");
+        // Three ways of saying where: at an offset, at an offset having first
+        // moved the base there, and at the base and then moving it on.
+        std::string place = trim(operands[2]);
+        uint32_t indexing = 0x01000000u; // the plain signed-offset form
+        if (!place.empty() && place.back() == '!') {
+            place.erase(place.size() - 1);
+            indexing = 0x01800000u;
+        } else if (operands.size() == 4) {
+            int64_t after = 0;
+            if (!parse_immediate(operands[3], after))
+                return fail(mnemonic + " takes an immediate after the base it moves on");
+            indexing = 0x00800000u;
+            if (!parse_memory(place, memory) || memory.offset != 0)
+                return fail("the base of the moving-on form is written on its own");
+            memory.offset = after;
+            place.clear();
+        }
+        if (!place.empty() && !parse_memory(place, memory))
+            return fail("the memory operand has to be [base] or [base, #offset]");
+        // The offset is a count of pairs' worth of elements, so it has to land
+        // on the access width and stay inside a signed seven-bit field.
+        const int64_t scale = first.wide ? 8 : 4;
+        if ((memory.offset % scale) != 0)
+            return fail(mnemonic + " needs an offset that is a multiple of the register width");
+        const int64_t units = memory.offset / scale;
+        if (units < -64 || units > 63)
+            return fail("that offset is out of reach; it has to be -64 to 63 times the "
+                        "register width");
+        const uint32_t opc = first.wide ? 0xa8000000u : 0x28000000u;
+        const uint32_t load = mnemonic == "ldp" ? 0x00400000u : 0u;
+        return word_of(opc | indexing | load | ((static_cast<uint32_t>(units) & 0x7fu) << 15) |
+                        (static_cast<uint32_t>(second.number) << 10) |
+                        (static_cast<uint32_t>(memory.base.number) << 5) |
+                        static_cast<uint32_t>(first.number));
+    }
 
     if (mnemonic == "mvn") {
         if (operands.size() != 2)

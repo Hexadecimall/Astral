@@ -17,6 +17,15 @@
 namespace astral_internal {
 namespace compiler {
 
+// One thing in the run: an instruction, a place a branch can name, or a note
+// carried alongside for whoever reads the assembly.
+struct AsmBufferLine {
+    enum class Kind { Instruction, Label, Comment } kind = Kind::Instruction;
+    std::string text;
+    uint64_t address = 0;
+    uint64_t size = 0;
+};
+
 class AsmBuffer {
 public:
     AsmBuffer(assembler::Target target, uint64_t address);
@@ -31,6 +40,21 @@ public:
     // A comment carried alongside the code, for the assembly the caller reads.
     void comment(const std::string &text);
 
+    // Takes out instructions the run does not need: a move from a register to
+    // itself, and a branch to the very next thing. Both fall out of generating
+    // each idea on its own, and neither can be seen until the whole run exists.
+    void tighten();
+    // Takes out stores into the frame that nothing ever reads back. Only sound
+    // when no address inside the frame was ever handed to anything, which the
+    // pass checks first: `lowest` is the first offset it is allowed to touch,
+    // below which lie the arguments being passed to something else.
+    void drop_dead_frame_stores(int64_t lowest);
+
+    // Whether anything written reads or writes the frame between two offsets,
+    // or puts an address inside it in a register. A function that touches none
+    // of it does not need any of it.
+    bool uses_frame_between(int64_t low, int64_t high) const;
+
     bool empty() const { return lines_.empty(); }
     // The assembly as text, labels and all.
     std::string text() const;
@@ -42,12 +66,7 @@ public:
     bool assemble(std::vector<uint8_t> &bytes, std::string &error);
 
 private:
-    struct Line {
-        enum class Kind { Instruction, Label, Comment } kind = Kind::Instruction;
-        std::string text;
-        uint64_t address = 0;
-        uint64_t size = 0;
-    };
+    using Line = AsmBufferLine;
 
     assembler::Target target_;
     uint64_t address_ = 0;

@@ -1137,3 +1137,162 @@ yields wcwidth       width
 yields fts_open      tree
 yields fts_read      entry
 yields fts_children  children
+
+# ---------------------------------------------------------------- constants
+#
+# A number in a listing says nothing; the name the header gives it says what the
+# call was asked to do. Each record is
+#
+#   const <context> <value> <name>
+#
+# where <context> is a callee and a zero-based argument position, so ioctl:1 is
+# the request slot of a call to ioctl and nowhere else. A context of * marks a
+# value that means the same wherever it appears, which is true of very few
+# numbers and is why the list of them is short. <value> is read with a leading
+# 0x for hex, and may be negative.
+#
+# Only the pseudo-C listing substitutes these. Emitted C keeps the number,
+# because a name is only correct if the right header is included.
+
+# Values that carry their meaning with them.
+const * 0x7f              INT8_MAX
+const * -0x80             INT8_MIN
+const * 0x7fff            INT16_MAX
+const * -0x8000           INT16_MIN
+const * 0x7fffffff        INT32_MAX
+const * -0x80000000       INT32_MIN
+const * 0x7fffffffffffffff INT64_MAX
+const * -0x8000000000000000 INT64_MIN
+
+# Terminal geometry and mode, as the BSD and Linux headers number them. The two
+# differ, so both are recorded and only the request slot of ioctl is affected.
+const ioctl:1 0x40087468  TIOCGWINSZ
+const ioctl:1 0x80087467  TIOCSWINSZ
+const ioctl:1 0x5413      TIOCGWINSZ
+const ioctl:1 0x5414      TIOCSWINSZ
+const ioctl:1 0x402c7413  TIOCGETA
+const ioctl:1 0x802c7414  TIOCSETA
+const ioctl:1 0x5401      TCGETS
+const ioctl:1 0x5402      TCSETS
+const ioctl:1 0x4004667e  FIONBIO
+const ioctl:1 0x4004667f  FIOASYNC
+const ioctl:1 0x5421      FIONBIO
+const ioctl:1 0x541b      FIONREAD
+const ioctl:1 0x4004667d  FIONCLEX
+const ioctl:1 0x40047477  TIOCGPGRP
+const ioctl:1 0x80047476  TIOCSPGRP
+
+# The flags word of open and openat. Only the access mode is named: the
+# remaining flag bits are numbered differently on BSD and on Linux, and the same
+# value means O_CREAT on one and O_TRUNC on the other, so naming them would be
+# guessing. A value that is two flags combined stays a number for the same
+# reason.
+const open:1 0x0          O_RDONLY
+const open:1 0x1          O_WRONLY
+const open:1 0x2          O_RDWR
+const openat:2 0x0        O_RDONLY
+const openat:2 0x1        O_WRONLY
+const openat:2 0x2        O_RDWR
+
+# What fcntl was asked to do.
+const fcntl:1 0x0         F_DUPFD
+const fcntl:1 0x1         F_GETFD
+const fcntl:1 0x2         F_SETFD
+const fcntl:1 0x3         F_GETFL
+const fcntl:1 0x4         F_SETFL
+const fcntl:1 0x7         F_GETLK
+const fcntl:1 0x8         F_SETLK
+const fcntl:1 0x9         F_SETLKW
+const fcntl:1 0x43        F_DUPFD_CLOEXEC
+
+# Page protection and mapping. mmap takes protection third and flags fourth.
+const mmap:2 0x0          PROT_NONE
+const mmap:2 0x1          PROT_READ
+const mmap:2 0x2          PROT_WRITE
+const mmap:2 0x3          PROT_READ_WRITE
+const mmap:2 0x4          PROT_EXEC
+const mmap:2 0x5          PROT_READ_EXEC
+const mmap:2 0x7          PROT_READ_WRITE_EXEC
+const mmap:3 0x1          MAP_SHARED
+const mmap:3 0x2          MAP_PRIVATE
+const mmap:3 0x1002       MAP_PRIVATE_ANON
+const mmap:3 0x22         MAP_PRIVATE_ANONYMOUS
+const mprotect:2 0x0      PROT_NONE
+const mprotect:2 0x1      PROT_READ
+const mprotect:2 0x3      PROT_READ_WRITE
+const mprotect:2 0x5      PROT_READ_EXEC
+const mprotect:2 0x7      PROT_READ_WRITE_EXEC
+
+# Where a seek counts from.
+const lseek:2 0x0         SEEK_SET
+const lseek:2 0x1         SEEK_CUR
+const lseek:2 0x2         SEEK_END
+const fseek:2 0x0         SEEK_SET
+const fseek:2 0x1         SEEK_CUR
+const fseek:2 0x2         SEEK_END
+const fseeko:2 0x0        SEEK_SET
+const fseeko:2 0x1        SEEK_CUR
+const fseeko:2 0x2        SEEK_END
+
+# Signals, in the numbering every Unix agrees on.
+const signal:0 0x1        SIGHUP
+const signal:0 0x2        SIGINT
+const signal:0 0x3        SIGQUIT
+const signal:0 0x4        SIGILL
+const signal:0 0x5        SIGTRAP
+const signal:0 0x6        SIGABRT
+const signal:0 0x8        SIGFPE
+const signal:0 0x9        SIGKILL
+const signal:0 0xa        SIGBUS
+const signal:0 0xb        SIGSEGV
+const signal:0 0xd        SIGPIPE
+const signal:0 0xe        SIGALRM
+const signal:0 0xf        SIGTERM
+const signal:0 0x11       SIGCHLD
+const signal:0 0x13       SIGCONT
+const signal:0 0x1c       SIGWINCH
+const sigaction:0 0x1     SIGHUP
+const sigaction:0 0x2     SIGINT
+const sigaction:0 0x3     SIGQUIT
+const sigaction:0 0x6     SIGABRT
+const sigaction:0 0x9     SIGKILL
+const sigaction:0 0xb     SIGSEGV
+const sigaction:0 0xd     SIGPIPE
+const sigaction:0 0xf     SIGTERM
+const sigaction:0 0x1c    SIGWINCH
+const kill:1 0x1          SIGHUP
+const kill:1 0x2          SIGINT
+const kill:1 0x9          SIGKILL
+const kill:1 0xf          SIGTERM
+const raise:0 0x6         SIGABRT
+const raise:0 0xf         SIGTERM
+
+# The reasons a call fails, where a body compares errno against one.
+const strerror:0 0x1      EPERM
+const strerror:0 0x2      ENOENT
+const strerror:0 0x4      EINTR
+const strerror:0 0x5      EIO
+const strerror:0 0x9      EBADF
+const strerror:0 0xc      ENOMEM
+const strerror:0 0xd      EACCES
+const strerror:0 0x11     EEXIST
+const strerror:0 0x14     ENOTDIR
+const strerror:0 0x15     EISDIR
+const strerror:0 0x16     EINVAL
+const strerror:0 0x20     EPIPE
+const strerror:0 0x23     EAGAIN
+
+# What access is asking about.
+const access:1 0x0        F_OK
+const access:1 0x1        X_OK
+const access:1 0x2        W_OK
+const access:1 0x4        R_OK
+
+# Sockets, where the number tells you the protocol family and kind.
+const socket:0 0x1        AF_UNIX
+const socket:0 0x2        AF_INET
+const socket:0 0x1e       AF_INET6
+const socket:0 0xa        AF_INET6
+const socket:1 0x1        SOCK_STREAM
+const socket:1 0x2        SOCK_DGRAM
+const socket:1 0x3        SOCK_RAW
