@@ -13,7 +13,9 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
-astral=${ASTRAL:-astral}
+# The build under test, not whatever happens to be installed: measuring the
+# installed binary makes a change look verified when it was never run.
+astral=${ASTRAL:-$(cd "$(dirname "$0")/.." && pwd)/build/astral}
 which=bin
 only=""
 

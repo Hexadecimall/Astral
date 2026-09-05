@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.12.0 LANGUAGES CXX)
+project(Astral VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -124,6 +124,16 @@ target_include_directories(astral_shared INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
 target_link_libraries(astral_shared PUBLIC ZLIB::ZLIB)
+
+# A version bump renames the library, so without this the build tree collects
+# one copy per version ever built.
+add_custom_command(TARGET astral_shared POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            -DDIR=$<TARGET_FILE_DIR:astral_shared>
+            -DPATTERN=$<TARGET_FILE_PREFIX:astral_shared>Astral.*${CMAKE_SHARED_LIBRARY_SUFFIX}
+            -DKEEP=$<TARGET_FILE_NAME:astral_shared>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/PruneOldLibraries.cmake
+    VERBATIM)
 
 # ---------------------------------------------------------------- the command
 #

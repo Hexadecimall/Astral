@@ -28,19 +28,19 @@
 # p-code, so they hold regardless of how the code was written.
 
 role arrow      node
-role deref      ptr
-role indexed    buf
-role zero_inc   i
+role deref      pointer
+role indexed    buffer
+role zero_inc   index
 role zero_accum sum
 role countdown  remaining
 role returned   result
-role bound      n
-role string     s
-role byte_ptr   data
-role self_mul   x
+role bound      count
+role string     text
+role byte_ptr   bytes
+role self_mul   value
 role flag       flag
 role size       size
-role capacity   cap
+role capacity   capacity
 role count      count
 role total      total
 

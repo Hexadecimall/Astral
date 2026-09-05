@@ -1619,8 +1619,59 @@ namespace {
 // ones, so the source reads the way a person writes it: pxRam0000000100004130
 // becomes g_100004130, func_0x000100000e5c becomes sub_e5c, and a goto label
 // code_r0x000100000758 becomes L_758. Whole-token, so every use stays in step.
+// Marks the bytes of `text` that sit inside a string or character literal.
+// What is written there is the program's own data, not an identifier.
+std::vector<bool> literal_mask(const std::string &text)
+{
+    std::vector<bool> mask(text.size(), false);
+    char quote = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (quote != 0) {
+            mask[i] = true;
+            if (c == '\\' && i + 1 < text.size()) {
+                mask[i + 1] = true;
+                ++i;
+                continue;
+            }
+            if (c == quote)
+                quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+            mask[i] = true;
+        }
+    }
+    return mask;
+}
+
+// Replaces every occurrence of a whole identifier, leaving literals alone.
+void rename_token(std::string &text, const std::string &from, const std::string &to,
+                  std::vector<bool> &mask)
+{
+    for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at)) {
+        const size_t end = at + from.size();
+        const bool joined_left =
+            at > 0 && (std::isalnum(static_cast<unsigned char>(text[at - 1])) || text[at - 1] == '_');
+        const bool joined_right =
+            end < text.size() &&
+            (std::isalnum(static_cast<unsigned char>(text[end])) || text[end] == '_');
+        if (joined_left || joined_right || (at < mask.size() && mask[at])) {
+            at = end;
+            continue;
+        }
+        text.replace(at, from.size(), to);
+        mask.erase(mask.begin() + static_cast<long>(at),
+                   mask.begin() + static_cast<long>(end));
+        mask.insert(mask.begin() + static_cast<long>(at), to.size(), false);
+        at += to.size();
+    }
+}
+
 void tidy_names(std::string &out)
 {
+    // First put the engine's spellings into one shape.
     struct Rule { std::regex re; std::string rep; };
     static const std::vector<Rule> rules = {
         {std::regex(R"(\b[A-Za-z]{1,4}Ram0*([0-9A-Fa-f]+)\b)"), "g$1"},
@@ -1630,6 +1681,89 @@ void tidy_names(std::string &out)
     };
     for (const Rule &r : rules)
         out = std::regex_replace(out, r.re, r.rep);
+
+    // Then take the addresses out of the names. An address in an identifier is
+    // a fact about where something sat in one file, not about what it is, and
+    // reading half hex and half C is nobody's idea of source.
+    struct Family { const char *prefix; const char *word; };
+    static const Family families[] = {
+        {"g", "global"}, {"dat", "table"}, {"sub", "sub"}, {"loc", "label"},
+    };
+    const Knowledge &knowledge = Knowledge::instance();
+    std::vector<bool> mask = literal_mask(out);
+    std::set<std::string> taken;
+    {
+        static const std::regex word(R"(\b[A-Za-z_][A-Za-z0-9_]*\b)");
+        for (auto it = std::sregex_iterator(out.begin(), out.end(), word);
+             it != std::sregex_iterator(); ++it)
+            taken.insert(it->str());
+    }
+
+    for (const Family &family : families) {
+        // In the order they first appear, so the numbering follows the reading.
+        const std::string pattern =
+            std::string("\\b") + family.prefix + R"([0-9a-f]{3,}\b)";
+        std::regex finder(pattern);
+        std::vector<std::string> names;
+        std::set<std::string> seen;
+        for (auto it = std::sregex_iterator(out.begin(), out.end(), finder);
+             it != std::sregex_iterator(); ++it)
+            if (seen.insert(it->str()).second)
+                names.push_back(it->str());
+
+        int next = 1;
+        for (const std::string &name : names) {
+            std::string chosen;
+            // A global that only ever holds the result of one call is named
+            // after what that call produces.
+            if (std::string(family.prefix) == "g") {
+                std::regex assigned("\\b" + name + R"( = ([A-Za-z_][A-Za-z0-9_]*)\()");
+                std::set<std::string> producers;
+                for (auto it = std::sregex_iterator(out.begin(), out.end(), assigned);
+                     it != std::sregex_iterator(); ++it)
+                    producers.insert((*it)[1].str());
+                if (producers.size() == 1) {
+                    const std::string &call = *producers.begin();
+                    std::string noun = knowledge.noun_for_call(call);
+                    if (noun.empty()) {
+                        // The call's own name, in camelCase like every other
+                        // name Astral makes: compat_mode gives compatMode.
+                        bool boundary = false;
+                        for (char c : call) {
+                            if (c == '_') { boundary = true; continue; }
+                            if (noun.empty())
+                                noun.push_back(static_cast<char>(
+                                    std::tolower(static_cast<unsigned char>(c))));
+                            else if (boundary)
+                                noun.push_back(static_cast<char>(
+                                    std::toupper(static_cast<unsigned char>(c))));
+                            else
+                                noun.push_back(c);
+                            boundary = false;
+                        }
+                    }
+                    if (!noun.empty() && taken.count(noun) == 0) {
+                        chosen = noun;
+                    } else if (!noun.empty()) {
+                        for (int n = 2; n < 1000; ++n) {
+                            const std::string candidate = noun + std::to_string(n);
+                            if (taken.count(candidate) == 0) {
+                                chosen = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            while (chosen.empty()) {
+                const std::string candidate = std::string(family.word) + std::to_string(next++);
+                if (taken.count(candidate) == 0)
+                    chosen = candidate;
+            }
+            taken.insert(chosen);
+            rename_token(out, name, chosen, mask);
+        }
+    }
 }
 
 // Whether the bytes at the start form a printable, NUL-terminated C string.
@@ -1643,10 +1777,11 @@ bool looks_like_string(const std::vector<uint8_t> &b, size_t &length_out)
         if (c != '\n' && c != '\t' && c != '\r' && (c < 0x20 || c > 0x7e))
             return false;
     }
-    if (i >= b.size() || b[i] != 0)
-        return false; // no terminator within the window
-    // A referenced address holding just a terminator is the empty string, which
-    // is what setlocale(LC_ALL, "") and its like pass.
+    if (i == 0 || i >= b.size() || b[i] != 0)
+        return false; // empty, or no terminator within the window
+    // A lone terminator is deliberately not called the empty string. It is far
+    // more often the front of a table the program fills in later, and calling
+    // that a string constant makes every write through it undefined.
     length_out = i;
     return true;
 }
@@ -1655,8 +1790,6 @@ bool looks_like_string(const std::vector<uint8_t> &b, size_t &length_out)
 // "Crackme EZ\n" -> s_crackme_ez.
 std::string string_slug(const std::vector<uint8_t> &b, size_t len)
 {
-    if (len == 0)
-        return "sEmpty";
     std::string slug = "s";
     bool boundary = true; // first alnum after the 's' is capitalised
     for (size_t i = 0; i < len && slug.size() < 32; ++i) {
@@ -1713,23 +1846,7 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
         std::vector<uint8_t> bytes(peek, 0);
         image.read(a, bytes.data(), bytes.size());
         size_t length = 0;
-        if (!looks_like_string(bytes, length))
-            return false;
-        if (length > 0)
-            return true;
-        // A lone terminator is the empty string when what follows it is one
-        // too: that is a run of string constants, not an instruction that
-        // happens to start with a zero byte.
-        const uint64_t next = a + 1;
-        if (next >= segment_limit(a))
-            return false;
-        const uint64_t after = std::min<uint64_t>(segment_limit(next) - next, 4096);
-        if (after == 0)
-            return false;
-        std::vector<uint8_t> tail(after, 0);
-        image.read(next, tail.data(), tail.size());
-        size_t tail_length = 0;
-        return looks_like_string(tail, tail_length) && tail_length > 0;
+        return looks_like_string(bytes, length);
     };
     // Collect the distinct address literals that land in mapped data.
     std::set<uint64_t> addrs;
