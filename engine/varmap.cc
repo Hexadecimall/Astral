@@ -1372,6 +1372,21 @@ void ScopeLocal::markUnaliased(const vector<uintb> &alias)
     // NOTE: this is primarily to reset aliasing between
     // stack parameters and stack locals
     if (aliason && (curoff - curalias > 0xffff)) aliason = false;
+    // A scalar whose own address is never taken is not reachable through a
+    // pointer to a neighbouring object: a callee writing past the object it
+    // was handed is undefined behaviour, not something to model. Treating the
+    // slot as unaliased is what lets `return 2;` survive a destructor call
+    // between the store and the return instead of becoming a temporary.
+    if (aliason && entry.getSize() <= 8) {
+      Datatype *ct = symbol->getType();
+      bool scalar = ct == (Datatype *)0 ||
+	(ct->getMetatype() != TYPE_ARRAY && ct->getMetatype() != TYPE_STRUCT && ct->getMetatype() != TYPE_UNION);
+      uintb start = entry.getAddr().getOffset();
+      bool pointedAt = false;
+      for(int4 k=0;k<alias.size();++k)
+	if (alias[k] >= start && alias[k] <= curoff) { pointedAt = true; break; }
+      if (scalar && !pointedAt) aliason = false;
+    }
     if (!aliason) symbol->getScope()->setAttribute(symbol,Varnode::nolocalalias);
     if (symbol->isTypeLocked() && alias_block_level != 0) {
       if (alias_block_level == 3)

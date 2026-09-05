@@ -2261,6 +2261,50 @@ bool ActionReturnSplit::isSplittable(BlockBasic *b)
   return true;
 }
 
+/// Whether the value returned along one incoming edge of a RETURN block is
+/// a constant. The block's RETURN reads a MULTIEQUAL that merges one value per
+/// in-edge; a constant on this edge means the source most likely wrote
+/// `return 2;` in that branch, and the merge is the compiler's doing.
+/// Follow a chain of COPYs back to the value that started it. An unoptimised
+/// build writes `return 2;` as a store of the constant into a return slot on
+/// the stack, so the constant sits one or two COPYs behind the merge.
+static Varnode *throughCopies(Varnode *vn)
+
+{
+  for(int4 guard=0;guard<8 && vn->isWritten();++guard) {
+    PcodeOp *def = vn->getDef();
+    // An INDIRECT stands for a call that might have touched the slot; the
+    // value going in is still what the source wrote there.
+    if (def->code() != CPUI_COPY && def->code() != CPUI_INDIRECT) break;
+    vn = def->getIn(0);
+  }
+  return vn;
+}
+
+/// Whether the value returned along one incoming edge of a RETURN block is
+/// a constant. The block's RETURN reads a MULTIEQUAL that merges one value per
+/// in-edge; a constant on this edge means the source most likely wrote
+/// `return 2;` in that branch, and the merge is the compiler's doing.
+static bool returnsConstantOnEdge(BlockBasic *parent,int4 edge)
+
+{
+  list<PcodeOp *>::const_iterator iter;
+  for(iter=parent->beginOp();iter!=parent->endOp();++iter) {
+    PcodeOp *op = *iter;
+    if (op->code() != CPUI_RETURN) continue;
+    if (op->numInput() < 2) return false;
+    Varnode *vn = throughCopies(op->getIn(1));
+    if (vn->isConstant()) return true;		// Same constant from every edge
+    if (!vn->isWritten()) return false;
+    PcodeOp *def = vn->getDef();
+    if (def->code() != CPUI_MULTIEQUAL) return false;
+    if (def->getParent() != parent) return false;
+    if (edge >= def->numInput()) return false;
+    return throughCopies(def->getIn(edge))->isConstant();
+  }
+  return false;
+}
+
 int4 ActionReturnSplit::apply(Funcdata &data)
 
 {
@@ -2280,35 +2324,50 @@ int4 ActionReturnSplit::apply(Funcdata &data)
     parent = op->getParent();
     if (parent->sizeIn() <= 1) continue;
     if (!isSplittable(parent)) continue;
+    // The block cannot be split at all when one predecessor reaches it twice.
+    bool redundant = false;
+    for(int4 i=0;i<parent->sizeIn() && !redundant;++i)
+      for(int4 j=i+1;j<parent->sizeIn();++j)
+	if (parent->getIn(i) == parent->getIn(j)) { redundant = true; break; }
+    if (redundant) continue;
     vector<FlowBlock *> gotoblocks;
     gatherReturnGotos(parent,gotoblocks);
-    if (gotoblocks.empty()) continue;
 
+    // One flag per in-edge: split it when it is a goto to the return, or when
+    // the value returned along it is a constant. Splitting on constants is
+    // what turns `result = 2; ... return result;` back into `return 2;` in
+    // the branch that decided it. A very wide merge stays as it is, so a big
+    // switch does not get a duplicated return per case.
+    vector<bool> split(parent->sizeIn(),false);
     int4 splitcount = 0;
-    // splitedge will contain edges to be split, IN THE ORDER
-    // they will be split.  So we start from the biggest index
-    // So that edge removal won't change the index of remaining edges
-    for(int4 i=parent->sizeIn()-1;i>=0;--i) {
+    const bool considerConstants = parent->sizeIn() <= 16;
+    for(int4 i=0;i<parent->sizeIn();++i) {
       bl = parent->getIn(i)->getCopyMap();
       while(bl != (FlowBlock *)0) {
-	if (bl->isMark()) {
-	  splitedge.push_back(i);
-	  retnode.push_back(parent);
-	  bl = (FlowBlock *)0;
-	  splitcount += 1;
-	}
-	else
-	  bl = bl->getParent();
+	if (bl->isMark()) { split[i] = true; break; }
+	bl = bl->getParent();
       }
+      if (!split[i] && considerConstants && returnsConstantOnEdge(parent,i))
+	split[i] = true;
+      if (split[i]) splitcount += 1;
     }
 
     for(int4 i=0;i<gotoblocks.size();++i) // Clear our marks
       gotoblocks[i]->clearMark();
 
-    // Can't split ALL in edges
+    if (splitcount == 0) continue;
+    // Can't split ALL in edges: the lowest keeps the original block.
     if (parent->sizeIn() == splitcount) {
-      splitedge.pop_back();
-      retnode.pop_back();
+      for(int4 i=0;i<parent->sizeIn();++i)
+	if (split[i]) { split[i] = false; break; }
+    }
+    // splitedge will contain edges to be split, IN THE ORDER
+    // they will be split.  So we start from the biggest index
+    // So that edge removal won't change the index of remaining edges
+    for(int4 i=parent->sizeIn()-1;i>=0;--i) {
+      if (!split[i]) continue;
+      splitedge.push_back(i);
+      retnode.push_back(parent);
     }
   }
 
