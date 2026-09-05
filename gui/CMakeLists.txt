@@ -374,4 +374,41 @@ target_link_libraries(astral_gui_asmflow PRIVATE Qt6::Core astral_static)
 install(TARGETS astral_gui_bin RUNTIME DESTINATION bin)
 if(APPLE)
     install(TARGETS astral_gui BUNDLE DESTINATION share/astral/applications)
+
+    # An installed bundle is one somebody opens, so it has to carry what it
+    # needs. The build tree's copy links Qt where Homebrew put it and keeps
+    # every library version it has ever been built against; neither survives
+    # leaving this machine, and a stale one is easy to load by accident.
+    set(_installed share/astral/applications/Astral.app)
+    install(CODE "
+        set(_app \"\${CMAKE_INSTALL_PREFIX}/${_installed}\")
+        set(_frameworks \"\${_app}/Contents/Frameworks\")
+
+        # Everything an earlier version left behind.
+        file(GLOB _stale \"\${_frameworks}/libAstral*.dylib\")
+        foreach(_file \${_stale})
+            get_filename_component(_name \"\${_file}\" NAME)
+            if(NOT _name STREQUAL \"$<TARGET_FILE_NAME:astral_shared>\")
+                file(REMOVE \"\${_file}\")
+                message(STATUS \"removed the library left by an earlier version: \${_name}\")
+            endif()
+        endforeach()
+
+        # The specifications and the headers, copied rather than linked: a
+        # symbolic link into a build tree is not something to install.
+        file(REMOVE_RECURSE \"\${_frameworks}/specs\" \"\${_frameworks}/include\")
+        file(COPY \"${CMAKE_BINARY_DIR}/specs\" DESTINATION \"\${_frameworks}\")
+        file(COPY \"${CMAKE_SOURCE_DIR}/include\" DESTINATION \"\${_frameworks}\")
+
+        # Qt itself, so the application opens on a machine that has none.
+        if(EXISTS \"${MACDEPLOYQT_EXECUTABLE}\")
+            execute_process(COMMAND \"${MACDEPLOYQT_EXECUTABLE}\" \"\${_app}\"
+                            -always-overwrite -no-strip
+                            OUTPUT_QUIET ERROR_QUIET)
+        else()
+            message(STATUS \"macdeployqt was not found: the application will need Qt installed\")
+        endif()
+        execute_process(COMMAND codesign --force --deep --sign - \"\${_app}\"
+                        OUTPUT_QUIET ERROR_QUIET)
+    ")
 endif()
