@@ -19,6 +19,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <regex>
 #include <set>
 #include <sstream>
 
@@ -242,7 +243,8 @@ std::vector<std::string> split_top_level(const std::string &text, char separator
 
 bool is_source_file(const std::string &name)
 {
-    static const char *const suffixes[] = {".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh"};
+    static const char *const suffixes[] = {".c",   ".h",   ".cc",  ".cpp", ".cxx", ".hpp",
+                                          ".hh",  ".rs",  ".go",  ".s",   ".S",   ".asm"};
     for (const char *suffix : suffixes) {
         const size_t length = std::strlen(suffix);
         if (name.size() > length && name.compare(name.size() - length, length, suffix) == 0)
@@ -405,13 +407,199 @@ std::vector<SourcePrototype> prototypes_in_source(const std::string &text)
     return found;
 }
 
+namespace {
+
+// Which language a file is written in, by the only thing a path reliably says.
+enum class Language { C, Rust, Go, Assembly };
+
+Language language_of(const std::string &path)
+{
+    auto ends = [&](const char *suffix) {
+        const size_t length = std::strlen(suffix);
+        return path.size() > length && path.compare(path.size() - length, length, suffix) == 0;
+    };
+    if (ends(".rs"))
+        return Language::Rust;
+    if (ends(".go"))
+        return Language::Go;
+    if (ends(".s") || ends(".S") || ends(".asm"))
+        return Language::Assembly;
+    return Language::C;
+}
+
+// A type in the decompiler's core names, or empty when the language says
+// something C has no word for. Empty means the prototype is dropped rather
+// than guessed at, which is the same rule the C reader follows.
+std::string core_type_of(std::string text, const std::map<std::string, std::string> &names)
+{
+    text = trim(text);
+    if (text.empty())
+        return "void";
+    // A reference, a slice, a pointer and a string all arrive as an address.
+    if (text[0] == '&' || text[0] == '*' || text.compare(0, 2, "[]") == 0)
+        return "void *";
+    auto it = names.find(text);
+    return it == names.end() ? std::string() : it->second;
+}
+
+const std::map<std::string, std::string> &rust_types()
+{
+    static const std::map<std::string, std::string> names = {
+        {"i8", "int1"},       {"u8", "uint1"},      {"i16", "int2"},   {"u16", "uint2"},
+        {"i32", "int4"},      {"u32", "uint4"},     {"i64", "int8"},   {"u64", "uint8"},
+        {"isize", "int8"},    {"usize", "uint8"},   {"f32", "float4"}, {"f64", "float8"},
+        {"bool", "bool"},     {"char", "uint4"},    {"()", "void"},    {"String", "void *"},
+        {"str", "void *"},    {"c_int", "int4"},    {"c_char", "int1"},
+    };
+    return names;
+}
+
+const std::map<std::string, std::string> &go_types()
+{
+    static const std::map<std::string, std::string> names = {
+        {"int8", "int1"},   {"uint8", "uint1"}, {"byte", "uint1"},   {"int16", "int2"},
+        {"uint16", "uint2"},{"int32", "int4"},  {"rune", "int4"},    {"uint32", "uint4"},
+        {"int64", "int8"},  {"uint64", "uint8"},{"int", "int8"},     {"uint", "uint8"},
+        {"uintptr", "uint8"},{"float32", "float4"},{"float64", "float8"},
+        {"bool", "bool"},   {"string", "void *"},{"error", "void *"},
+    };
+    return names;
+}
+
+// `fn name(a: u32, b: &str) -> i32`, with pub, unsafe, extern and a lifetime
+// list in front of it, and a where-clause or a body after it.
+std::vector<SourcePrototype> prototypes_in_rust(const std::string &text)
+{
+    static const std::regex signature(
+        R"(\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?:->\s*([^\{;where]+))?)");
+    std::vector<SourcePrototype> found;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), signature);
+         it != std::sregex_iterator(); ++it) {
+        SourcePrototype prototype;
+        prototype.name = (*it)[1].str();
+        prototype.return_type = core_type_of((*it)[3].str(), rust_types());
+        if (prototype.return_type.empty())
+            continue;
+        bool usable = true;
+        for (const std::string &part : split_top_level((*it)[2].str(), ',')) {
+            const std::string argument = trim(part);
+            if (argument.empty())
+                continue;
+            // `self`, `&self` and `&mut self` are the receiver: an address.
+            if (argument == "self" || argument.find("self") != std::string::npos) {
+                prototype.parameter_types.push_back("void *");
+                prototype.parameter_names.push_back("self");
+                continue;
+            }
+            const size_t colon = argument.find(':');
+            if (colon == std::string::npos) {
+                usable = false;
+                break;
+            }
+            const std::string type = core_type_of(argument.substr(colon + 1), rust_types());
+            if (type.empty()) {
+                usable = false;
+                break;
+            }
+            prototype.parameter_types.push_back(type);
+            prototype.parameter_names.push_back(trim(argument.substr(0, colon)));
+        }
+        if (usable)
+            found.push_back(std::move(prototype));
+    }
+    return found;
+}
+
+// `func name(a int, b string) int` and `func (r *T) name(...) (int, error)`.
+// Only the first result is kept: a second return value goes somewhere C has no
+// way of describing.
+std::vector<SourcePrototype> prototypes_in_go(const std::string &text)
+{
+    static const std::regex signature(
+        R"(\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*([^\{\n]*))");
+    std::vector<SourcePrototype> found;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), signature);
+         it != std::sregex_iterator(); ++it) {
+        SourcePrototype prototype;
+        prototype.name = (*it)[1].str();
+        std::string returns = trim((*it)[3].str());
+        if (!returns.empty() && returns[0] == '(') {
+            const std::vector<std::string> parts =
+                split_top_level(returns.substr(1, returns.find(')') == std::string::npos
+                                                      ? returns.size() - 1
+                                                      : returns.find(')') - 1),
+                                ',');
+            returns = parts.empty() ? std::string() : trim(parts.front());
+        }
+        prototype.return_type = core_type_of(returns, go_types());
+        if (prototype.return_type.empty())
+            continue;
+        bool usable = true;
+        for (const std::string &part : split_top_level((*it)[2].str(), ',')) {
+            const std::string argument = trim(part);
+            if (argument.empty())
+                continue;
+            const size_t space = argument.rfind(' ');
+            if (space == std::string::npos) {
+                usable = false;
+                break;
+            }
+            const std::string type = core_type_of(argument.substr(space + 1), go_types());
+            if (type.empty()) {
+                usable = false;
+                break;
+            }
+            prototype.parameter_types.push_back(type);
+            prototype.parameter_names.push_back(trim(argument.substr(0, space)));
+        }
+        if (usable)
+            found.push_back(std::move(prototype));
+    }
+    return found;
+}
+
+// Assembly says what a function is called and nothing about its shape. The
+// name is still worth having: it is what a stripped binary has lost, and a
+// prototype that claims no arguments claims nothing that could be wrong.
+std::vector<SourcePrototype> prototypes_in_assembly(const std::string &text)
+{
+    static const std::regex exported(
+        R"(^\s*\.(?:globl|global)\s+_?([A-Za-z_][A-Za-z0-9_]*))");
+    std::vector<SourcePrototype> found;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), exported);
+         it != std::sregex_iterator(); ++it) {
+        SourcePrototype prototype;
+        prototype.name = (*it)[1].str();
+        prototype.return_type = "uint8";
+        found.push_back(std::move(prototype));
+    }
+    return found;
+}
+
+std::vector<SourcePrototype> prototypes_for(const std::string &path, const std::string &text)
+{
+    switch (language_of(path)) {
+    case Language::Rust:
+        return prototypes_in_rust(text);
+    case Language::Go:
+        return prototypes_in_go(text);
+    case Language::Assembly:
+        return prototypes_in_assembly(text);
+    case Language::C:
+        break;
+    }
+    return prototypes_in_source(text);
+}
+
+} // namespace
+
 int learn_from_source(const std::vector<std::string> &paths, std::string &error)
 {
     std::vector<std::string> files;
     for (const std::string &path : paths)
         collect_files(path, files);
     if (files.empty()) {
-        error = "no C or C++ source found";
+        error = "no C, C++, Rust, Go or assembly source found";
         return 0;
     }
 
@@ -424,7 +612,7 @@ int learn_from_source(const std::vector<std::string> &paths, std::string &error)
             continue;
         std::ostringstream text;
         text << stream.rdbuf();
-        for (const SourcePrototype &prototype : prototypes_in_source(text.str())) {
+        for (const SourcePrototype &prototype : prototypes_for(file, text.str())) {
             if (!seen.insert(prototype.name).second)
                 continue;
             // A prototype already on file, from a header or an earlier run, is
