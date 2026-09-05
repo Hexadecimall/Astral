@@ -30,11 +30,13 @@ set(ASTRAL_SLACOMP slgh_compile slghparse slghscan)
 
 # The engine is kept in folders that say what each part is for; the sets above
 # say which folder each name lives in.
-set(ASTRAL_ENGINE_DIRS core decompiler sleigh runtime assembler upstream)
+set(ASTRAL_ENGINE_DIRS core decompiler sleigh runtime assembler emulator compiler upstream)
 
 # Every folder is on the include path, so a header is included by its own name
 # whichever part of the engine reaches for it.
-set(ASTRAL_ENGINE_INCLUDE_DIRS "")
+# The engine root is on the path too, so a header that belongs to one part can
+# be included by the part it belongs to: "assembler/assembler.hh".
+set(ASTRAL_ENGINE_INCLUDE_DIRS ${ASTRAL_DECOMP_DIR})
 foreach(_dir ${ASTRAL_ENGINE_DIRS})
     list(APPEND ASTRAL_ENGINE_INCLUDE_DIRS ${ASTRAL_DECOMP_DIR}/${_dir})
 endforeach()

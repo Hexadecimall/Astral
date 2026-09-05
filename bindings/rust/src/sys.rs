@@ -259,6 +259,13 @@ extern "C" {
         address: u64,
         count: c_int,
     ) -> *mut c_char;
+    pub fn astral_program_run(
+        program: *mut astral_program,
+        entry: u64,
+        arguments: *const *const c_char,
+        input: *const c_char,
+        step_limit: u64,
+    ) -> *mut c_char;
     pub fn astral_disassemble(
         program: *mut astral_program,
         address: u64,

@@ -57,6 +57,7 @@ fn dispatch(arguments: &[String]) -> i32 {
         // Con-Tri-Bute, for anyone who types it often.
         "contribute" | "ctb" => contribute::run(rest),
         "info" => with_binary(Command::Info, rest),
+        "run" => with_binary(Command::Run, rest),
         "decompile" => with_binary(Command::Decompile, rest),
         "disassemble" | "dis" => with_binary(Command::Disassemble, rest),
         "languages" => with_binary(Command::Languages, rest),
@@ -114,12 +115,14 @@ fn with_binary(command: Command, arguments: &[String]) -> i32 {
     match command {
         Command::Info => program::info(&options),
         Command::Disassemble => program::disassemble(&options),
+        Command::Run => program::run(&options),
         _ => program::decompile(&options),
     }
 }
 
 fn name_of(command: Command) -> &'static str {
     match command {
+        Command::Run => "run",
         Command::Info => "info",
         Command::Decompile => "decompile",
         Command::Disassemble => "disassemble",

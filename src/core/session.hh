@@ -9,6 +9,8 @@
 #include <sstream>
 #include <functional>
 #include <condition_variable>
+#include "machine.hh"
+
 #include <set>
 #include <thread>
 #include <string>
@@ -109,6 +111,11 @@ public:
     void set_auto_naming(bool on) { auto_naming_ = on; }
     bool auto_naming() const { return auto_naming_; }
     bool set_option(const std::string &name, const std::string &value, std::string &error);
+
+    // Runs the program, stepping its instructions as p-code over memory Astral
+    // owns. Nothing is handed to the operating system: a call into the C
+    // library is answered here rather than by the real one.
+    emulator::RunResult run(const emulator::RunOptions &options);
 
     bool disassemble(uint64_t address, int count, std::string &out, std::string &error);
     // The same instructions, written to be read: calls and branches by name,

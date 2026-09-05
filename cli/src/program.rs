@@ -315,3 +315,31 @@ pub fn languages(options: &Options) -> i32 {
     }
     0
 }
+
+pub fn run(options: &Options) -> i32 {
+    let Some(opened) = open(options) else {
+        return 1;
+    };
+    let mut program = opened.program;
+
+    // Where to begin: a named function, an address, or the program's own entry.
+    let wanted = wanted_addresses(&program, options);
+    let entry = wanted.first().copied().unwrap_or(0);
+
+    // argv[0] is the program itself when nothing else was said.
+    let mut arguments = options.run_arguments.clone();
+    if arguments.is_empty() {
+        arguments.push(options.path.clone().unwrap_or_default());
+    }
+
+    match program.run(entry, &arguments, &options.run_input, options.step_limit) {
+        Ok(report) => {
+            print(&report);
+            0
+        }
+        Err(failure) => {
+            library_error(&failure);
+            1
+        }
+    }
+}

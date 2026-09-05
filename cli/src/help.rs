@@ -157,3 +157,26 @@ pub fn version(stream: Stream) -> i32 {
     ));
     stream.code()
 }
+
+pub fn run(stream: Stream) -> i32 {
+    Sink::new(stream).write(concat!(
+        "usage: astral run [options] <binary>\n",
+        "\n",
+        "Runs the program rather than only reading it. The instructions are\n",
+        "stepped as p-code, so an arm64 program runs on an x86 machine and a\n",
+        "Windows one runs on a Mac. Nothing is handed to the operating system:\n",
+        "the memory is Astral's, and a call into the C library is answered by\n",
+        "Astral. A binary you would not want to run still says what it does.\n",
+        "\n",
+        "  -f, --function <name>  start there rather than at the entry point\n",
+        "  -a, --address <hex>    start at an address\n",
+        "      --arg <text>       an argument to hand it (repeatable, argv[0] first)\n",
+        "      --input <text>     what the program reads\n",
+        "      --steps <n>        how many instructions to allow (default 2000000)\n",
+        "  -l, --language <id>    force a language\n",
+        "  -s, --specs <dir>      SLEIGH specification root\n",
+        "\n",
+        "  astral run ./crackme --arg ./crackme --arg letmein\n",
+    ));
+    stream.code()
+}

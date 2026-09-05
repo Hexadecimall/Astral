@@ -330,6 +330,21 @@ ASTRAL_API char *astral_disassemble(astral_program *program, uint64_t address, i
 ASTRAL_API char *astral_disassemble_readable(astral_program *program, uint64_t address,
                                              int count);
 
+/* --- Running ----------------------------------------------------------------
+ *
+ * Astral can execute a program rather than only read it. The instructions are
+ * stepped as p-code, so an arm64 program runs on an x86 host and a Windows one
+ * runs on a Mac. Nothing is handed to the operating system: the memory is
+ * Astral's, and a call into the C library is answered by Astral. A binary you
+ * would not want to run, or cannot run, still says what it does. */
+
+/* Runs from `entry`, or the program's own entry point when it is zero.
+ * `arguments` is a NULL-terminated array, argv[0] included; `input` is what the
+ * program reads, or NULL. The result is a readable report. Caller frees. */
+ASTRAL_API char *astral_program_run(astral_program *program, uint64_t entry,
+                                    const char *const *arguments, const char *input,
+                                    uint64_t step_limit);
+
 /* P-code listing for `count` instructions starting at `address`. Caller frees. */
 ASTRAL_API char *astral_pcode(astral_program *program, uint64_t address, int count);
 

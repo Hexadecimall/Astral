@@ -9,6 +9,7 @@
 #include "assembler.hh"
 #include "creal.hh"
 #include "listing.hh"
+#include "machine.hh"
 #include "cxx_idioms.hh"
 #include "langmap.hh"
 #include "knowledge.hh"
@@ -613,6 +614,11 @@ bool Session::set_option(const std::string &name, const std::string &value, std:
         error = err.explain;
         return false;
     }
+}
+
+emulator::RunResult Session::run(const emulator::RunOptions &options)
+{
+    return emulator::run(arch_, image_, options);
 }
 
 bool Session::disassemble(uint64_t address, int count, std::string &out, std::string &error)

@@ -519,6 +519,36 @@ impl Program {
         Self::take_string(text, Status::NoSuchAddress)
     }
 
+    /// Runs the program, stepping its instructions as p-code over memory Astral
+    /// owns. Nothing is handed to the operating system: a call into the C
+    /// library is answered by Astral, so a binary that cannot run here still
+    /// says what it does.
+    pub fn run(
+        &mut self,
+        entry: u64,
+        arguments: &[String],
+        input: &str,
+        step_limit: u64,
+    ) -> Result<String> {
+        let held: Vec<CString> = arguments
+            .iter()
+            .map(|one| to_cstring(one))
+            .collect::<Result<Vec<_>>>()?;
+        let mut pointers: Vec<*const c_char> = held.iter().map(|one| one.as_ptr()).collect();
+        pointers.push(std::ptr::null());
+        let text = to_cstring(input)?;
+        let out = unsafe {
+            sys::astral_program_run(
+                self.handle,
+                entry,
+                pointers.as_ptr(),
+                text.as_ptr(),
+                step_limit,
+            )
+        };
+        Self::take_string(out, Status::Internal)
+    }
+
     /// Byte length of the instruction at `address`, or 0 if it will not decode.
     pub fn instruction_length(&self, address: u64) -> usize {
         let len = unsafe { sys::astral_program_instruction_length(self.handle, address) };

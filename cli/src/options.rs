@@ -12,6 +12,7 @@ pub enum Command {
     Info,
     Decompile,
     Disassemble,
+    Run,
     Languages,
 }
 
@@ -22,6 +23,7 @@ impl Command {
             Command::Info => help::info(stream),
             Command::Decompile => help::decompile(stream),
             Command::Disassemble => help::disassemble(stream),
+            Command::Run => help::run(stream),
             Command::Languages => help::languages(stream),
         }
     }
@@ -55,6 +57,12 @@ pub struct Options {
     /// Threads for whole-program decompilation. None means one per core.
     pub threads: Option<i32>,
     /// Print the plain listing instead of the readable one.
+    /// What to hand the program as its arguments, argv[0] included.
+    pub run_arguments: Vec<String>,
+    /// What the program reads from its input.
+    pub run_input: String,
+    /// How many instructions to allow before stopping a run.
+    pub step_limit: u64,
     pub raw_listing: bool,
     pub disassemble: usize,
     pub pcode: usize,
@@ -79,6 +87,9 @@ impl Default for Options {
             raw_names: false,
             c_options: astral::COptions::default(),
             threads: None,
+            run_arguments: Vec::new(),
+            run_input: String::new(),
+            step_limit: 0,
             raw_listing: false,
             disassemble: 0,
             pcode: 0,
@@ -174,6 +185,18 @@ pub fn parse(command: Command, arguments: &[String]) -> Result<Options, i32> {
             "--why" => options.why = true,
             "--raw-names" => options.raw_names = true,
             "--raw-listing" => options.raw_listing = true,
+            "--arg" => options.run_arguments.push(value("--arg", &mut index)?),
+            "--input" => options.run_input = value("--input", &mut index)?,
+            "--steps" => {
+                let text = value("--steps", &mut index)?;
+                match text.parse::<u64>() {
+                    Ok(n) => options.step_limit = n,
+                    Err(_) => {
+                        error(&format!("--steps wants a count, not {text}"));
+                        return Err(2);
+                    }
+                }
+            }
             "--runtime-include" => options.c_options.self_contained = false,
             "--no-comments" => options.c_options.comments = false,
             "-l" | "--language" => options.language = Some(value("--language", &mut index)?),

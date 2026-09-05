@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.19.0 LANGUAGES CXX)
+project(Astral VERSION 0.20.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -105,6 +105,7 @@ set(ASTRAL_LIB_SRC
     engine/assembler/arm64.cc
     engine/assembler/arm32.cc
     engine/assembler/x86.cc
+    engine/emulator/machine.cc
     engine/compiler/asmbuffer.cc
     engine/compiler/codegen.cc
     engine/compiler/codegen_arm64.cc

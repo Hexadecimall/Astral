@@ -998,3 +998,44 @@ char *astral_dotnet_source(const char *path)
     clear_error();
     return copy_string(astral_internal::decompile_dotnet(assembly));
 }
+
+char *astral_program_run(astral_program *program, uint64_t entry, const char *const *arguments,
+                         const char *input, uint64_t step_limit)
+{
+    if (program == nullptr) {
+        fail(ASTRAL_ERR_INVALID_ARGUMENT, "null program");
+        return nullptr;
+    }
+    astral_internal::emulator::RunOptions options;
+    options.entry = entry;
+    if (arguments != nullptr)
+        for (const char *const *one = arguments; *one != nullptr; ++one)
+            options.arguments.push_back(*one);
+    if (input != nullptr)
+        options.input = input;
+    if (step_limit != 0)
+        options.step_limit = step_limit;
+
+    const astral_internal::emulator::RunResult outcome = program->session->run(options);
+    if (!outcome.ok) {
+        fail(ASTRAL_ERR_INTERNAL, outcome.error);
+        return nullptr;
+    }
+    std::ostringstream report;
+    if (!outcome.output.empty())
+        report << outcome.output;
+    if (!outcome.output.empty() && outcome.output.back() != '\n')
+        report << '\n';
+    report << "-- " << outcome.stopped_because;
+    if (outcome.returned)
+        report << " with " << static_cast<long long>(static_cast<int32_t>(outcome.result));
+    report << ", after " << outcome.steps << " instructions";
+    if (!outcome.calls.empty()) {
+        report << "\n-- called:";
+        for (const std::string &call : outcome.calls)
+            report << ' ' << call;
+    }
+    report << '\n';
+    clear_error();
+    return copy_string(report.str());
+}
