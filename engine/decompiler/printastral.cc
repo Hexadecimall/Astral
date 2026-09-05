@@ -357,7 +357,12 @@ bool PrintAstral::pushStringAt(uintb val,const Varnode *vn,const PcodeOp *op)
   ostringstream str;
   if (!printCharacterConstant(str,addr,ct))
     return false;
-  pushAtom(Atom(str.str(),vartoken,EmitMarkup::const_color,op,vn));
+  // One byte that happens to be zero is not a message. Text is only worth
+  // showing in place of the number when there is text there.
+  const string text = str.str();
+  if (text.size() < 4)
+    return false;
+  pushAtom(Atom(text,vartoken,EmitMarkup::const_color,op,vn));
   return true;
 }
 
@@ -504,8 +509,21 @@ void PrintAstral::pushConstant(uintb val,const Datatype *ct,tagtype tag,
       pushAtom(Atom(known,vartoken,EmitMarkup::const_color,op,vn));
       return;
     }
-    if (ct->getSize() >= 4 && pushStringAt(val,vn,op))
-      return;
+    if (ct->getSize() >= 4) {
+      // A number that is exactly where a function starts is that function.
+      // The name says what the call is being handed; the address said nothing.
+      AddrSpace *code = glb->getDefaultCodeSpace();
+      if (code != (AddrSpace *)0 && val != 0 && val <= code->getHighest()) {
+	uintb byteVal = AddrSpace::addressToByte(val,code->getWordSize());
+	Funcdata *fd = glb->symboltab->getGlobalScope()->queryFunction(Address(code,byteVal));
+	if (fd != (Funcdata *)0) {
+	  pushAtom(Atom(fd->getDisplayName(),functoken,EmitMarkup::funcname_color,op,fd));
+	  return;
+	}
+      }
+      if (pushStringAt(val,vn,op))
+	return;
+    }
   }
   PrintC::pushConstant(val,ct,tag,vn,op,displayFormat);
 }

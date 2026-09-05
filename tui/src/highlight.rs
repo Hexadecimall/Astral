@@ -93,7 +93,8 @@ fn is_c_keyword(word: &str) -> bool {
 }
 
 /// Types the decompiler emits, on top of the language's own: `int4`, `uint8`,
-/// `xunknown2`, `undefined4`, and anything spelled like a typedef (`size_t`).
+/// `xunknown2`, `undefined4`, the readable listing's `i32` / `u64` / `unk16` /
+/// `f64`, and anything spelled like a typedef (`size_t`).
 fn is_c_type(word: &str) -> bool {
     if C_TYPES.contains(&word) {
         return true;
@@ -108,8 +109,17 @@ fn is_c_type(word: &str) -> bool {
             }
         }
     }
-    false
+    // The readable listing names a width in bits. These are listed rather than
+    // matched by prefix: `i` and `u` in front of digits is also how a person
+    // names a counter, and colouring one of those as a type would be a lie.
+    READABLE_TYPES.contains(&word)
 }
+
+/// The widths the readable listing spells out.
+const READABLE_TYPES: &[&str] = &[
+    "i8", "i16", "i32", "i64", "i128", "u8", "u16", "u32", "u64", "u128", "unk8", "unk16", "unk24",
+    "unk32", "unk40", "unk48", "unk56", "unk64", "f32", "f64", "f80", "f128", "wchar16", "wchar32",
+];
 
 fn c_line(text: &str, mut in_block: bool) -> (Vec<Token>, bool) {
     let bytes = text.as_bytes();
