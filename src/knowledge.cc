@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -177,6 +178,13 @@ void Knowledge::parse(const std::string &text, bool from_user)
                 literals_.push_back(std::move(literal));
             if (from_user)
                 ++learned_;
+        } else if (kind == "yields") {
+            std::string key, value;
+            if (!split_first(rest, key, value))
+                continue;
+            nouns_[key] = value;
+            if (from_user)
+                ++learned_;
         } else if (kind == "noreturn") {
             noreturn_.insert(trim(rest));
             if (from_user)
@@ -234,8 +242,44 @@ bool Knowledge::is_placeholder(const std::string &name) const
         if (name.compare(0, prefix.size(), prefix) == 0)
             return true;
     // Names the decompiler builds from an address are placeholders too.
-    return name.compare(0, 5, "func_") == 0 || name.compare(0, 4, "sub_") == 0 ||
-           name.compare(0, 4, "FUN_") == 0;
+    if (name.compare(0, 5, "func_") == 0 || name.compare(0, 4, "sub_") == 0 ||
+        name.compare(0, 4, "FUN_") == 0 || name.compare(0, 3, "sub") == 0)
+        return true;
+
+    // The decompiler spells an unnamed value as its type in letters followed by
+    // where it lives and a number: uVar1, pcVar8, axStack680. Listing every
+    // combination of type letters misses one every time a new type turns up, so
+    // the shape is recognised instead.
+    auto shaped = [&name](const char *middle) {
+        const size_t at = name.find(middle);
+        if (at == 0 || at == std::string::npos)
+            return false;
+        for (size_t i = 0; i < at; ++i)
+            if (!std::islower(static_cast<unsigned char>(name[i])))
+                return false;
+        if (at > 4)
+            return false; // more letters than a type prefix ever needs
+        const size_t rest = at + std::strlen(middle);
+        if (rest >= name.size())
+            return false;
+        for (size_t i = rest; i < name.size(); ++i)
+            if (!std::isxdigit(static_cast<unsigned char>(name[i])))
+                return false;
+        return true;
+    };
+    if (shaped("Var") || shaped("Stack") || shaped("Ram"))
+        return true;
+
+    // The rest of what the engine makes up, in the camelCase it now writes.
+    auto starts = [&name](const char *prefix) {
+        return name.compare(0, std::strlen(prefix), prefix) == 0;
+    };
+    if (starts("param") || starts("unaff") || starts("extraout") || starts("inStack"))
+        return true;
+    // An unbound input register reads as in<Register>, such as inX2.
+    if (starts("in") && name.size() > 2 && std::isupper(static_cast<unsigned char>(name[2])))
+        return true;
+    return false;
 }
 
 std::string Knowledge::prototype_for(const std::string &name) const

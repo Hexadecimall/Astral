@@ -1643,8 +1643,10 @@ bool looks_like_string(const std::vector<uint8_t> &b, size_t &length_out)
         if (c != '\n' && c != '\t' && c != '\r' && (c < 0x20 || c > 0x7e))
             return false;
     }
-    if (i == 0 || i >= b.size() || b[i] != 0)
-        return false; // empty, or no terminator within the window
+    if (i >= b.size() || b[i] != 0)
+        return false; // no terminator within the window
+    // A referenced address holding just a terminator is the empty string, which
+    // is what setlocale(LC_ALL, "") and its like pass.
     length_out = i;
     return true;
 }
@@ -1653,6 +1655,8 @@ bool looks_like_string(const std::vector<uint8_t> &b, size_t &length_out)
 // "Crackme EZ\n" -> s_crackme_ez.
 std::string string_slug(const std::vector<uint8_t> &b, size_t len)
 {
+    if (len == 0)
+        return "sEmpty";
     std::string slug = "s";
     bool boundary = true; // first alnum after the 's' is capitalised
     for (size_t i = 0; i < len && slug.size() < 32; ++i) {
@@ -1696,13 +1700,51 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
                 return true;
         return false;
     };
+    auto segment_limit = [&](uint64_t a) {
+        for (const Segment &seg : image.segments)
+            if (a >= seg.address && a < seg.address + seg.size)
+                return seg.address + seg.size;
+        return a + 1;
+    };
+    auto reads_as_string = [&](uint64_t a) {
+        const uint64_t peek = std::min<uint64_t>(segment_limit(a) - a, 4096);
+        if (peek == 0)
+            return false;
+        std::vector<uint8_t> bytes(peek, 0);
+        image.read(a, bytes.data(), bytes.size());
+        size_t length = 0;
+        if (!looks_like_string(bytes, length))
+            return false;
+        if (length > 0)
+            return true;
+        // A lone terminator is the empty string when what follows it is one
+        // too: that is a run of string constants, not an instruction that
+        // happens to start with a zero byte.
+        const uint64_t next = a + 1;
+        if (next >= segment_limit(a))
+            return false;
+        const uint64_t after = std::min<uint64_t>(segment_limit(next) - next, 4096);
+        if (after == 0)
+            return false;
+        std::vector<uint8_t> tail(after, 0);
+        image.read(next, tail.data(), tail.size());
+        size_t tail_length = 0;
+        return looks_like_string(tail, tail_length) && tail_length > 0;
+    };
     // Collect the distinct address literals that land in mapped data.
     std::set<uint64_t> addrs;
     static const std::regex hex(R"(\b0x[0-9A-Fa-f]{5,16}\b)");
     for (auto it = std::sregex_iterator(out.begin(), out.end(), hex);
          it != std::sregex_iterator(); ++it) {
         uint64_t a = std::strtoull(it->str().c_str() + 2, nullptr, 16);
-        if (!image.contains(a) || in_code(a))
+        if (!image.contains(a))
+            continue;
+        // A function's recovered extent can run far past where its instructions
+        // actually stop, and on a Mach-O the strings sit in the same segment as
+        // the code. So an address whose bytes read as a string is taken for
+        // data even when a function claims to cover it: the alternative is
+        // leaving every string in that range as a bare number.
+        if (in_code(a) && !reads_as_string(a))
             continue;
         addrs.insert(a);
     }
@@ -1725,48 +1767,57 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
     };
 
     std::map<std::string, int> slug_counts;
+    std::map<std::string, std::string> string_names; // text -> the global holding it
     std::ostringstream defs;
     // Where each referenced address ends up: the array that covers it, and how
     // far into that array it sits.
     std::map<uint64_t, std::pair<std::string, uint64_t>> placement;
 
-    for (size_t i = 0; i < sorted.size();) {
-        const uint64_t base = sorted[i];
-        const uint64_t limit = segment_end(base);
-
-        // A referenced constant that is really a C string is emitted as a named
-        // string literal, so the source reads sArg1 = "arg1" rather than a wall
-        // of bytes.
-        {
-            uint64_t peek = std::min(limit - base, kWindow);
-            std::vector<uint8_t> bytes(peek == 0 ? 1 : peek, 0);
-            image.read(base, bytes.data(), bytes.size());
-            size_t slen = 0;
-            std::string slug;
-            if (looks_like_string(bytes, slen))
-                slug = string_slug(bytes, slen);
-            if (!slug.empty()) {
-                int &n = slug_counts[slug];
-                std::string sname = n == 0 ? slug : slug + std::to_string(n + 1);
-                ++n;
-                defs << "static const char " << sname << "[] = " << c_string_literal(bytes, slen)
-                     << ";\n";
-                placement.emplace(base, std::make_pair(sname, 0));
-                ++i;
-                continue;
-            }
+    // Every address that is really a C string becomes a named literal, so the
+    // source reads setlocale(0, "") rather than an offset into a wall of bytes.
+    // This is decided for each address on its own: a string sitting a few bytes
+    // after another address is still a string.
+    std::vector<uint64_t> remaining;
+    for (uint64_t address : sorted) {
+        const uint64_t limit = segment_end(address);
+        const uint64_t peek = std::min(limit - address, kWindow);
+        std::vector<uint8_t> bytes(peek == 0 ? 1 : peek, 0);
+        image.read(address, bytes.data(), bytes.size());
+        size_t slen = 0;
+        std::string slug;
+        if (looks_like_string(bytes, slen))
+            slug = string_slug(bytes, slen);
+        if (slug.empty()) {
+            remaining.push_back(address);
+            continue;
         }
+        // The same text referred to from two places is one constant, not two.
+        const std::string text = c_string_literal(bytes, slen);
+        auto shared = string_names.find(text);
+        std::string sname;
+        if (shared != string_names.end()) {
+            sname = shared->second;
+        } else {
+            int &n = slug_counts[slug];
+            sname = n == 0 ? slug : slug + std::to_string(n + 1);
+            ++n;
+            string_names.emplace(text, sname);
+            defs << "static const char " << sname << "[] = " << text << ";\n";
+        }
+        placement.emplace(address, std::make_pair(sname, 0));
+    }
 
-        // Otherwise take every following address that the window from this one
-        // already reaches, and cover them all with a single array. Emitting a
-        // fresh window per address instead means the same bytes appear once for
-        // every base the code happens to use, which on a real program is most
-        // of the output.
+    // What is left is data. An address that another address's window already
+    // reaches shares that array rather than getting a window of its own, or the
+    // same bytes come out once for every base the code happens to use.
+    for (size_t i = 0; i < remaining.size();) {
+        const uint64_t base = remaining[i];
+        const uint64_t limit = segment_end(base);
         uint64_t end = std::min(base + kWindow, limit);
         size_t j = i;
-        while (j < sorted.size() && sorted[j] < end) {
-            const uint64_t reach = std::min(sorted[j] + kWindow, segment_end(sorted[j]));
-            if (reach > end && segment_end(sorted[j]) == limit)
+        while (j < remaining.size() && remaining[j] < end) {
+            const uint64_t reach = std::min(remaining[j] + kWindow, segment_end(remaining[j]));
+            if (reach > end && segment_end(remaining[j]) == limit)
                 end = reach;
             ++j;
         }
@@ -1788,7 +1839,7 @@ void emit_absolute_data(BinaryImage &image, const std::vector<std::pair<uint64_t
         }
         defs << "\n};\n";
         for (size_t k = i; k < j; ++k)
-            placement.emplace(sorted[k], std::make_pair(std::string(name), sorted[k] - base));
+            placement.emplace(remaining[k], std::make_pair(std::string(name), remaining[k] - base));
         i = j;
     }
 

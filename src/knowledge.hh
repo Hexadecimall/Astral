@@ -54,6 +54,15 @@ public:
 
     // Library knowledge.
     std::string prototype_for(const std::string &name) const;
+    // What to call the value a call to this function produces: the result of
+    // getenv is a setting, of fopen a stream. A one-word C library name cannot
+    // be split into a verb and a noun, so the noun is recorded rather than
+    // derived.
+    std::string noun_for_call(const std::string &function) const
+    {
+        auto it = nouns_.find(function);
+        return it == nouns_.end() ? std::string() : it->second;
+    }
     // Adds a prototype for this process only, never written to a database:
     // what a mangled C++ name says about its own signature.
     void note_prototype(const std::string &name, const std::string &declaration)
@@ -109,6 +118,7 @@ private:
     std::set<std::string> noreturn_;
     std::vector<std::string> placeholders_;
     std::map<std::string, std::string> protos_;
+    std::map<std::string, std::string> nouns_;
     std::map<std::string, std::string> headers_;
     std::vector<std::pair<std::string, std::string>> notes_;
     std::map<std::pair<uint64_t, uint32_t>, std::string> signatures_;

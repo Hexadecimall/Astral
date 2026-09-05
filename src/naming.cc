@@ -370,7 +370,7 @@ std::vector<std::string> split_words(const std::string &name)
 // makes: openFile -> file, getUserName -> userName, allocBuffer -> buffer. The
 // value is named after the thing, never abbreviated to a placeholder. Empty
 // when the call name carries no such noun.
-std::string noun_from_call(const std::string &call);
+std::string noun_from_call(const std::string &call, const Knowledge &knowledge);
 
 // The function name a value's right-hand side comes from, when the value is
 // exactly that call (possibly behind casts): the leading identifier of
@@ -486,8 +486,13 @@ std::string camel_join(const std::vector<std::string> &words)
     return name;
 }
 
-std::string noun_from_call(const std::string &call)
+std::string noun_from_call(const std::string &call, const Knowledge &knowledge)
 {
+    // What the knowledge base says this call produces wins: a library name is
+    // one lower-case word and cannot be read as a verb and a noun.
+    const std::string known = knowledge.noun_for_call(call);
+    if (!known.empty())
+        return known;
     std::vector<std::string> words = split_words(call);
     if (words.size() < 2)
         return std::string(); // a single word is not descriptive enough
@@ -669,14 +674,14 @@ NamingResult analyse(const std::string &c_code, const std::string &current_name,
         }
         const std::string rhs = c_code.substr(r, end - r);
         const std::string producer = leading_call(rhs);
-        const char *role = result_role(producer);
-        if (role != nullptr) {
+        // What the knowledge base says a call produces comes first: it is the
+        // part anyone can correct or add to. The built-in table is the fallback
+        // for calls it has nothing to say about.
+        const std::string noun = noun_from_call(producer, knowledge);
+        if (!noun.empty()) {
+            proposed[lhs] = claim(noun);
+        } else if (const char *role = result_role(producer)) {
             proposed[lhs] = claim(role);
-        } else {
-            // A descriptive call names its own result: openFile -> file.
-            const std::string noun = noun_from_call(producer);
-            if (!noun.empty())
-                proposed[lhs] = claim(noun);
         }
     }
 
