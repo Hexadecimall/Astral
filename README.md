@@ -272,7 +272,7 @@ machine at all, and no path is compiled in.
 astral update                      # fetch the newest release and install it
 astral update install              # into /usr/local rather than over this copy
 astral update --check              # what is installed against what is newest
-astral update --release v0.2.0     # a particular release
+astral update --release v2.0.0     # a particular release
 astral update --local              # build a source tree you are standing in
 astral update --ghidra 12.1.3      # vendor that Ghidra release first
 astral update --languages ALL      # every processor's specs

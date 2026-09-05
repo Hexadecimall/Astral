@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.20.0 LANGUAGES CXX)
+project(Astral VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -106,6 +106,7 @@ set(ASTRAL_LIB_SRC
     engine/assembler/arm32.cc
     engine/assembler/x86.cc
     engine/emulator/machine.cc
+    engine/emulator/debug.cc
     engine/compiler/asmbuffer.cc
     engine/compiler/codegen.cc
     engine/compiler/codegen_arm64.cc
@@ -246,6 +247,27 @@ add_dependencies(astral_compiler_codegen_test astral_compiler_crackme)
 add_test(NAME compiler_codegen COMMAND astral_compiler_codegen_test
          $<TARGET_FILE:astral_compiler_crackme>)
 set_tests_properties(compiler_codegen PROPERTIES
+    ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
+
+# The debugger is checked by watching a real program run rather than by
+# inspecting its own bookkeeping: every stop is compared with the disassembly of
+# the same binary. Built at -O0 so the call the tests step over is really made
+# and the function they break on is really entered.
+add_executable(astral_emulator_crackme testing/crackmes/01_plain.c)
+set_target_properties(astral_emulator_crackme PROPERTIES OUTPUT_NAME crackme_debug
+    C_STANDARD 11 RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/emulator-tests)
+target_compile_options(astral_emulator_crackme PRIVATE -O0)
+
+add_executable(astral_emulator_debug_test engine/emulator/tests/debug_test.cc)
+set_target_properties(astral_emulator_debug_test PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(astral_emulator_debug_test PRIVATE
+    ${ASTRAL_ENGINE_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(astral_emulator_debug_test PRIVATE astral_static)
+add_dependencies(astral_emulator_debug_test astral_emulator_crackme)
+add_test(NAME emulator_debug COMMAND astral_emulator_debug_test
+         $<TARGET_FILE:astral_emulator_crackme>)
+set_tests_properties(emulator_debug PROPERTIES
     ENVIRONMENT "ASTRAL_SPECS=${CMAKE_BINARY_DIR}/specs")
 
 # ---------------------------------------------------------------- the application
