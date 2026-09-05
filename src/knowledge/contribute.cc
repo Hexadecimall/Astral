@@ -471,7 +471,25 @@ bool send_contribution(const std::string &repo, const ContributionPolicy &policy
     file << file_header(contribution) << contribution.body;
     file.close();
 
-    out.url = "https://github.com/" + repo + "/upload/main/" + url_encode(policy.path);
+    // The page that uploads a file cannot be handed one: it is a drop zone, and
+    // a browser opened at it shows an empty box next to a file the person now
+    // has to go and find. The page that creates a file can be handed its
+    // contents, so that is the one to open - the records arrive already in it,
+    // and all that is left is to press the button.
+    const std::string body = file_header(contribution) + contribution.body;
+    const std::string filename = policy.path + "/" + contribution_filename(contribution);
+    const std::string prefilled = "https://github.com/" + repo + "/new/main?filename=" +
+                                  url_encode(filename) + "&value=" + url_encode(body);
+
+    // A URL has a length a browser will accept and beyond it the request is
+    // refused, so a database too big to carry falls back to the drop zone with
+    // the file revealed beside it rather than left somewhere to be hunted for.
+    if (prefilled.size() < 6000) {
+        out.url = prefilled;
+    } else {
+        out.url = "https://github.com/" + repo + "/upload/main/" + url_encode(policy.path);
+        capture("open -R " + shell_quote(out.file) + " >/dev/null 2>&1");
+    }
     out.delivery = Delivery::Browser;
     capture(open_command() + " " + shell_quote(out.url) + " >/dev/null 2>&1");
     return true;
