@@ -2,6 +2,8 @@
 #include "theme/theme.hh"
 
 #include <QFontDatabase>
+#include <QContextMenuEvent>
+#include <QMenu>
 #include <QPainter>
 #include <QRegularExpression>
 #include <QTextBlock>
@@ -98,6 +100,51 @@ void CodeView::updateGutter(const QRect &rect, int dy)
         gutter_->update(0, rect.y(), gutter_->width(), rect.height());
     if (rect.contains(viewport()->rect()))
         updateGutterWidth();
+}
+
+QString CodeView::wordUnderCursor() const
+{
+    QTextCursor cursor = textCursor();
+    if (cursor.hasSelection())
+        return cursor.selectedText().trimmed();
+    cursor.select(QTextCursor::WordUnderCursor);
+    return cursor.selectedText().trimmed();
+}
+
+QString CodeView::wordAt(const QPoint &pos) const
+{
+    QTextCursor cursor = cursorForPosition(pos);
+    cursor.select(QTextCursor::WordUnderCursor);
+    return cursor.selectedText().trimmed();
+}
+
+void CodeView::contextMenuEvent(QContextMenuEvent *event)
+{
+    // Right-clicking moves the cursor first, so the menu and the keyboard
+    // shortcuts always talk about the same word.
+    if (!textCursor().hasSelection())
+        setTextCursor(cursorForPosition(event->pos()));
+    const QString word = wordAt(event->pos());
+
+    QMenu menu(this);
+    Q_EMIT contextMenuAboutToShow(&menu, word);
+    if (!menu.isEmpty())
+        menu.addSeparator();
+    if (!isReadOnly()) {
+        menu.addAction(tr("Undo"), QKeySequence::Undo, this, &QPlainTextEdit::undo)
+            ->setEnabled(document()->isUndoAvailable());
+        menu.addAction(tr("Redo"), QKeySequence::Redo, this, &QPlainTextEdit::redo)
+            ->setEnabled(document()->isRedoAvailable());
+        menu.addSeparator();
+        menu.addAction(tr("Cut"), QKeySequence::Cut, this, &QPlainTextEdit::cut)
+            ->setEnabled(textCursor().hasSelection());
+    }
+    menu.addAction(tr("Copy"), QKeySequence::Copy, this, &QPlainTextEdit::copy)
+        ->setEnabled(textCursor().hasSelection());
+    if (!isReadOnly())
+        menu.addAction(tr("Paste"), QKeySequence::Paste, this, &QPlainTextEdit::paste);
+    menu.addAction(tr("Select All"), QKeySequence::SelectAll, this, &QPlainTextEdit::selectAll);
+    menu.exec(event->globalPos());
 }
 
 void CodeView::resizeEvent(QResizeEvent *event)

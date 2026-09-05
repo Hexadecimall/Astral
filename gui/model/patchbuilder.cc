@@ -65,12 +65,9 @@ struct MachSymbol {
     bool external = false;
 };
 
-std::optional<ObjectFunction> readMachO(const QByteArray &data, const QString &wanted, QString &error)
+void walkMachO(const QByteArray &data, std::vector<MachSection> &sections, std::vector<MachSymbol> &symbols)
 {
-    const quint32 cputype = readLE<quint32>(data, 4);
     const quint32 ncmds = readLE<quint32>(data, 16);
-    std::vector<MachSection> sections;
-    std::vector<MachSymbol> symbols;
     qsizetype cursor = 32;
     for (quint32 i = 0; i < ncmds; ++i) {
         const quint32 cmd = readLE<quint32>(data, cursor);
@@ -107,6 +104,14 @@ std::optional<ObjectFunction> readMachO(const QByteArray &data, const QString &w
         }
         cursor += cmdsize;
     }
+}
+
+std::optional<ObjectFunction> readMachO(const QByteArray &data, const QString &wanted, QString &error)
+{
+    const quint32 cputype = readLE<quint32>(data, 4);
+    std::vector<MachSection> sections;
+    std::vector<MachSymbol> symbols;
+    walkMachO(data, sections, symbols);
 
     // Mach-O prefixes C names with an underscore.
     const QString mangled = QLatin1Char('_') + wanted;
@@ -190,17 +195,23 @@ std::optional<ObjectFunction> readMachO(const QByteArray &data, const QString &w
 
 // ------------------------------------------------------------------ ELF
 
-std::optional<ObjectFunction> readElf(const QByteArray &data, const QString &wanted, QString &error)
+struct Shdr {
+    quint32 name = 0, type = 0, link = 0, info = 0;
+    quint64 flags = 0, addr = 0, offset = 0, size = 0, entsize = 0;
+};
+
+struct Sym {
+    QString name;
+    quint8 info = 0;
+    quint16 shndx = 0;
+    quint64 value = 0, size = 0;
+};
+
+void walkElf(const QByteArray &data, std::vector<Shdr> &sections, std::vector<Sym> &symbols)
 {
-    const quint16 machine = readLE<quint16>(data, 0x12);
     const quint64 shoff = readLE<quint64>(data, 0x28);
     const quint16 shentsize = readLE<quint16>(data, 0x3a);
     const quint16 shnum = readLE<quint16>(data, 0x3c);
-    struct Shdr {
-        quint32 name = 0, type = 0, link = 0, info = 0;
-        quint64 flags = 0, addr = 0, offset = 0, size = 0, entsize = 0;
-    };
-    std::vector<Shdr> sections;
     for (quint16 i = 0; i < shnum; ++i) {
         const qsizetype at = shoff + i * shentsize;
         Shdr h;
@@ -215,18 +226,9 @@ std::optional<ObjectFunction> readElf(const QByteArray &data, const QString &wan
         h.entsize = readLE<quint64>(data, at + 56);
         sections.push_back(h);
     }
-    struct Sym {
-        QString name;
-        quint8 info = 0;
-        quint16 shndx = 0;
-        quint64 value = 0, size = 0;
-    };
-    std::vector<Sym> symbols;
-    int symtabIndex = -1;
     for (size_t i = 0; i < sections.size(); ++i) {
         if (sections[i].type != 2) // SHT_SYMTAB
             continue;
-        symtabIndex = static_cast<int>(i);
         const Shdr &st = sections[i];
         const Shdr &strtab = sections[st.link];
         for (quint64 n = 0; n < st.size / 24; ++n) {
@@ -240,6 +242,14 @@ std::optional<ObjectFunction> readElf(const QByteArray &data, const QString &wan
             symbols.push_back(s);
         }
     }
+}
+
+std::optional<ObjectFunction> readElf(const QByteArray &data, const QString &wanted, QString &error)
+{
+    const quint16 machine = readLE<quint16>(data, 0x12);
+    std::vector<Shdr> sections;
+    std::vector<Sym> symbols;
+    walkElf(data, sections, symbols);
     auto it = std::find_if(symbols.begin(), symbols.end(),
                            [&](const Sym &s) { return s.name == wanted && s.shndx != 0 && (s.info & 0xf) == 2; });
     if (it == symbols.end()) {
@@ -297,7 +307,6 @@ std::optional<ObjectFunction> readElf(const QByteArray &data, const QString &wan
             out.relocations.push_back(reloc);
         }
     }
-    Q_UNUSED(symtabIndex);
     return out;
 }
 
@@ -352,6 +361,68 @@ bool fixArm64(QByteArray &bytes, quint64 offset, int kind, quint64 target, quint
 }
 
 } // namespace
+
+std::optional<ObjectText> readObjectText(const QByteArray &object, QString &error)
+{
+    ObjectText out;
+    if (readLE<quint32>(object, 0) == kMachMagic64) {
+        const quint32 cputype = readLE<quint32>(object, 4);
+        if (cputype != kCpuArm64 && cputype != kCpuX86_64) {
+            error = QStringLiteral("unsupported object architecture");
+            return std::nullopt;
+        }
+        std::vector<MachSection> sections;
+        std::vector<MachSymbol> symbols;
+        walkMachO(object, sections, symbols);
+        auto it = std::find_if(sections.begin(), sections.end(),
+                               [](const MachSection &s) { return s.name == QStringLiteral("__text"); });
+        if (it == sections.end()) {
+            error = QStringLiteral("the assembled object holds no __text section");
+            return std::nullopt;
+        }
+        out.format = ObjectFunction::MachO;
+        out.arch = cputype == kCpuArm64 ? ObjectFunction::Arm64 : ObjectFunction::X86_64;
+        out.bytes = object.mid(it->offset, it->size);
+        const auto index = static_cast<quint8>(std::distance(sections.begin(), it) + 1);
+        for (const MachSymbol &symbol : symbols)
+            if (symbol.sect == index && symbol.value >= it->addr)
+                out.symbols.insert(symbol.name, symbol.value - it->addr);
+        return out;
+    }
+    if (object.startsWith(QByteArray("\x7f" "ELF", 4))) {
+        const quint16 machine = readLE<quint16>(object, 0x12);
+        if (machine != 183 && machine != 62) {
+            error = QStringLiteral("unsupported object architecture");
+            return std::nullopt;
+        }
+        std::vector<Shdr> sections;
+        std::vector<Sym> symbols;
+        walkElf(object, sections, symbols);
+        int textIndex = -1;
+        for (size_t i = 0; i < sections.size(); ++i) {
+            // SHT_PROGBITS carrying SHF_EXECINSTR, which .text is and the
+            // section-name table is not.
+            if (sections[i].type == 1 && (sections[i].flags & 0x4) && sections[i].size > 0) {
+                textIndex = static_cast<int>(i);
+                break;
+            }
+        }
+        if (textIndex < 0) {
+            error = QStringLiteral("the assembled object holds no .text section");
+            return std::nullopt;
+        }
+        out.format = ObjectFunction::Elf;
+        out.arch = machine == 183 ? ObjectFunction::Arm64 : ObjectFunction::X86_64;
+        const Shdr &text = sections[textIndex];
+        out.bytes = object.mid(text.offset, text.size);
+        for (const Sym &symbol : symbols)
+            if (symbol.shndx == textIndex)
+                out.symbols.insert(symbol.name, symbol.value);
+        return out;
+    }
+    error = QStringLiteral("the assembler produced an object in a format the patcher does not read");
+    return std::nullopt;
+}
 
 std::optional<ObjectFunction> readObjectFunction(const QByteArray &object, const QString &functionName,
                                                  QString &error)
@@ -553,21 +624,106 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                     }
                     return std::nullopt;
                 };
-                const QStringList unresolved = relocate(*function, address, resolve, resolveLiteral);
+                QStringList unresolved = relocate(*function, address, resolve, resolveLiteral);
+
+                // Literals the binary does not hold need a home. First choice
+                // is the tail of this function's own span, which the shorter
+                // new code leaves free; then alignment padding in code
+                // segments, which nothing reads. Both are reached the same
+                // way any other address is, so no relocation cares.
+                struct Placement {
+                    QByteArray literal;
+                    quint64 address;
+                };
+                std::vector<Placement> placed;
+                QByteArray tail; // bytes appended after the code, inside the span
+                std::vector<std::pair<quint64, QByteArray>> caves;
                 if (!unresolved.isEmpty()) {
-                    outcome.report = tr("%1 refers to things the binary does not already hold, and the patcher "
-                                        "cannot add data yet: %2").arg(functionName, unresolved.join(QStringLiteral(", ")));
+                    std::vector<QByteArray> missing;
+                    for (const ObjectFunction::Relocation &reloc : function->relocations)
+                        if (reloc.hasLiteral && !resolveLiteral(reloc.literal)
+                            && std::find(missing.begin(), missing.end(), reloc.literal) == missing.end())
+                            missing.push_back(reloc.literal);
+                    quint64 codeEnd = address + static_cast<quint64>(function->bytes.size());
+                    const quint64 spanEnd = address + span;
+                    std::vector<QByteArray> homeless;
+                    for (const QByteArray &literal : missing) {
+                        const QByteArray stored = literal + '\0';
+                        const quint64 at = codeEnd + static_cast<quint64>(tail.size());
+                        if (at + static_cast<quint64>(stored.size()) <= spanEnd) {
+                            tail += stored;
+                            placed.push_back({literal, at});
+                        } else {
+                            homeless.push_back(literal);
+                        }
+                    }
+                    // Caves: runs of zero bytes at least as long as needed,
+                    // taken from executable segments only, where a zero run
+                    // is padding between sections and never data. The search
+                    // runs from the end of the segment backwards so strings
+                    // land in the padding after the code, never in the page
+                    // holding the file header, which the loader parses.
+                    const quint64 imageBase = document_->imageBase();
+                    for (const QByteArray &literal : homeless) {
+                        const QByteArray stored = literal + '\0';
+                        bool found = false;
+                        for (const SegmentEntry &seg : document_->segments()) {
+                            if (!seg.executable || seg.size == 0)
+                                continue;
+                            const QByteArray bytes = document_->read(seg.address, seg.size);
+                            const QByteArray zeros(stored.size() + 8, '\0');
+                            const quint64 floor = seg.address == imageBase ? seg.address + 0x1000 : seg.address;
+                            qsizetype at = bytes.lastIndexOf(zeros);
+                            while (at >= 0) {
+                                const quint64 candidate = seg.address + static_cast<quint64>(at) + 4;
+                                bool taken = candidate < floor;
+                                for (const auto &cave : caves)
+                                    if (candidate < cave.first + static_cast<quint64>(cave.second.size()) + 4
+                                        && candidate + static_cast<quint64>(stored.size()) + 4 > cave.first)
+                                        taken = true;
+                                if (!taken && !(candidate >= address && candidate < spanEnd)) {
+                                    caves.push_back({candidate, stored});
+                                    placed.push_back({literal, candidate});
+                                    found = true;
+                                    break;
+                                }
+                                if (at == 0)
+                                    break;
+                                at = bytes.lastIndexOf(zeros, at - 1);
+                            }
+                            if (found)
+                                break;
+                        }
+                        if (!found) {
+                            outcome.report = tr("%1 needs the string %2 somewhere in the binary and no room was found for it")
+                                                 .arg(functionName, QString::fromLatin1(literal.left(32)));
+                            onDone(outcome);
+                            return;
+                        }
+                    }
+                    auto resolveAny = [&](const QByteArray &literal) -> std::optional<quint64> {
+                        for (const Placement &pl : placed)
+                            if (pl.literal == literal)
+                                return pl.address;
+                        return resolveLiteral(literal);
+                    };
+                    unresolved = relocate(*function, address, resolve, resolveAny);
+                }
+                if (!unresolved.isEmpty()) {
+                    outcome.report = tr("%1 refers to things the binary does not hold and the patcher "
+                                        "cannot provide: %2").arg(functionName, unresolved.join(QStringLiteral(", ")));
                     onDone(outcome);
                     return;
                 }
-                if (static_cast<quint64>(function->bytes.size()) > span) {
+                if (static_cast<quint64>(function->bytes.size()) + static_cast<quint64>(tail.size()) > span) {
                     outcome.report = tr("%1 compiles to %2 bytes but only %3 are available in place")
                                          .arg(functionName).arg(function->bytes.size()).arg(span);
                     onDone(outcome);
                     return;
                 }
-                // Pad to the original span with no-ops so nothing stale runs.
-                QByteArray bytes = function->bytes;
+                // Pad the rest of the span with no-ops so nothing stale runs;
+                // the literals sit after the code, past the final return.
+                QByteArray bytes = function->bytes + tail;
                 if (function->arch == ObjectFunction::Arm64) {
                     static const char nop[4] = {'\x1f', '\x20', '\x03', '\xd5'};
                     while (static_cast<quint64>(bytes.size()) + 4 <= span)
@@ -575,6 +731,15 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                 } else {
                     while (static_cast<quint64>(bytes.size()) < span)
                         bytes.append('\x90');
+                }
+                for (const auto &cave : caves) {
+                    QString caveError;
+                    if (!document_->patchBytes(cave.first, cave.second,
+                                               tr("string for %1").arg(functionName), caveError)) {
+                        outcome.report = caveError;
+                        onDone(outcome);
+                        return;
+                    }
                 }
                 QString patchError;
                 if (!document_->patchBytes(address, bytes, tr("%1 rewritten from edited C").arg(functionName), patchError)) {
@@ -585,9 +750,15 @@ void PatchBuilder::build(const QString &source, const QString &functionName, qui
                 outcome.ok = true;
                 outcome.bytes = bytes;
                 outcome.relocationsResolved = static_cast<int>(function->relocations.size());
-                outcome.report = tr("%1: %2 bytes of new code queued at 0x%3, %4 relocation(s) resolved, %5 bytes padded")
+                QStringList where;
+                for (const Placement &pl : placed)
+                    where << QStringLiteral("\"%1\" at 0x%2").arg(QString::fromLatin1(pl.literal.left(20))).arg(pl.address, 0, 16);
+                outcome.report = tr("%1: %2 bytes of new code queued at 0x%3, %4 relocation(s) resolved, "
+                                    "%5 bytes padded%6")
                                      .arg(functionName).arg(function->bytes.size()).arg(address, 0, 16)
-                                     .arg(function->relocations.size()).arg(bytes.size() - function->bytes.size());
+                                     .arg(function->relocations.size())
+                                     .arg(bytes.size() - function->bytes.size() - tail.size())
+                                     .arg(where.isEmpty() ? QString() : QStringLiteral("; strings: ") + where.join(QStringLiteral(", ")));
                 onDone(outcome);
             });
     connect(process, &QProcess::errorOccurred, this, [process, onDone, dir](QProcess::ProcessError) {

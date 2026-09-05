@@ -36,3 +36,4 @@ token.label       = #e3b341
 token.address     = #5d626b
 token.mnemonic    = #82aaff
 token.register    = #f5b8d0
+token.dirty       = #ffb86c

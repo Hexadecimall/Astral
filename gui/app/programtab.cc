@@ -1,6 +1,8 @@
 #include "app/programtab.hh"
 #include "model/functionlistmodel.hh"
+#include "views/codeview.hh"
 #include "views/decompilerview.hh"
+#include "views/hexpane.hh"
 #include "views/hexview.hh"
 #include "model/patchbuilder.hh"
 
@@ -8,6 +10,7 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QRegularExpression>
+#include <QTimer>
 #include <QStackedWidget>
 
 #include <QVBoxLayout>
@@ -17,13 +20,18 @@ namespace astral::gui {
 ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *parent)
     : QWidget(parent), document_(std::move(document)),
       functions_(new FunctionListModel(this)), decompiler_(new DecompilerView),
-      pseudo_(new DecompilerView), hex_(new HexView), views_(new QStackedWidget)
+      pseudo_(new DecompilerView), hex_(new HexView), hexPane_(new HexPane(hex_)),
+      views_(new QStackedWidget)
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
     pseudo_->setPseudo(true);
+    // Both source views offer the same actions on the word under the cursor.
+    for (DecompilerView *view : {decompiler_, pseudo_})
+        connect(view->codeView(), &CodeView::contextMenuAboutToShow, this,
+                [this](QMenu *menu, const QString &word) { Q_EMIT contextActionsWanted(menu, word); });
     connect(decompiler_, &DecompilerView::compileRequested, this, [this] { compileCurrent(); });
     auto placeholder = [](const QString &text) {
         auto *label = new QLabel(text);
@@ -34,7 +42,10 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
     views_->addWidget(decompiler_);
     views_->addWidget(pseudo_);
     views_->addWidget(placeholder(tr("Control-flow graph arrives in a later step.")));
-    views_->addWidget(hex_);
+    views_->addWidget(hexPane_);
+    hexPane_->setDocument(document_.get());
+    connect(hexPane_, &HexPane::logMessage, this, &ProgramTab::logMessage);
+    connect(hexPane_, &HexPane::patchApplied, this, &ProgramTab::patchApplied);
     connect(views_, &QStackedWidget::currentChanged, this, [this](int index) {
         if (index == Hex)
             refreshHex();
@@ -45,6 +56,17 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
     functions_->setFunctions(document_->functions());
     connect(document_.get(), &ProgramDocument::functionsChanged, this, [this] {
         functions_->setFunctions(document_->functions());
+    });
+    // A patch rewrites the image, so what the views hold is a picture of code
+    // that is no longer there. One refresh covers a burst of patches.
+    connect(document_.get(), &ProgramDocument::patchesChanged, this, [this] {
+        if (refreshPending_)
+            return;
+        refreshPending_ = true;
+        QTimer::singleShot(120, this, [this] {
+            refreshPending_ = false;
+            refreshCurrent();
+        });
     });
 
     connect(document_.get(), &ProgramDocument::functionReady, this, [this](const Decompiled &f) {
@@ -114,6 +136,45 @@ void ProgramTab::setView(View view)
     views_->setCurrentIndex(static_cast<int>(view));
 }
 
+void ProgramTab::reportPatchWritten()
+{
+    decompiler_->showPatchWritten();
+}
+
+void ProgramTab::reportPatchFailed(const QString &reason)
+{
+    decompiler_->showRefused(reason);
+}
+
+QString ProgramTab::currentWord() const
+{
+    switch (views_->currentIndex()) {
+    case Code:
+        return decompiler_->codeView()->wordUnderCursor();
+    case PseudoC:
+        return pseudo_->codeView()->wordUnderCursor();
+    default:
+        return QString();
+    }
+}
+
+void ProgramTab::refreshCurrent()
+{
+    if (current_ == 0)
+        return;
+    // The pill says what is happening; the patch verdict is in the log and
+    // the status text, which showFunction leaves alone.
+    const auto entry = document_->functionAt(current_);
+    const QString name = entry ? entry->name : QStringLiteral("sub%1").arg(current_, 0, 16);
+    decompiler_->showPending(name, current_);
+    pseudo_->showPending(name, current_);
+    listing_ = document_->disassemble(current_, entry ? entry->size : 0);
+    Q_EMIT listingChanged(listing_);
+    if (views_->currentIndex() == Hex)
+        refreshHex();
+    document_->decompile(current_);
+}
+
 void ProgramTab::replaceCodeText(const QString &text)
 {
     decompiler_->setText(text);
@@ -137,13 +198,14 @@ void ProgramTab::compileCurrent()
             name = m.captured(1);
     }
     const quint64 span = cachedFunction ? cachedFunction->size : entry ? entry->size : 0;
-    decompiler_->showCompileResult(true, 0);
+    decompiler_->showPatching();
     auto *builder = new PatchBuilder(document_.get(), this);
     builder->build(decompiler_->text(), name, current_, span, [this, builder, name](const PatchOutcome &outcome) {
         builder->deleteLater();
         if (outcome.ok) {
             Q_EMIT logMessage(tr("patch %1").arg(outcome.report));
-            decompiler_->showPatched();
+            decompiler_->showPatchQueued();
+            Q_EMIT patchApplied();
             return;
         }
         if (!outcome.diagnostics.isEmpty())

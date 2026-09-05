@@ -3,6 +3,8 @@
 #ifndef ASTRAL_GUI_PROGRAMDOCUMENT_HH
 #define ASTRAL_GUI_PROGRAMDOCUMENT_HH
 
+#include "model/programstate.hh"
+
 #include <astral/astral.hpp>
 
 #include <QAtomicInt>
@@ -107,6 +109,11 @@ public:
     const std::vector<FunctionEntry> &functions() const { return functions_; }
     std::optional<FunctionEntry> functionAt(quint64 address) const;
     std::optional<FunctionEntry> functionNamed(const QString &name) const;
+    // The address a word in the source stands for: a function or symbol name,
+    // one of the address-encoded names Astral emits (subE5c, g100004130,
+    // loc758, dat138c), or a plain hex number. Empty when it stands for
+    // nothing the program knows.
+    std::optional<quint64> resolveName(const QString &word) const;
     quint64 entryPoint() const { return entry_; }
 
     QByteArray read(quint64 address, quint64 size);
@@ -141,6 +148,9 @@ public:
     bool writePatched(const QString &outPath, QString &error);
     // Synchronous and cheap: the disassembly covering [address, address+size).
     QString disassemble(quint64 address, quint64 size);
+    // Lines the engine's listing up in columns and says what each address in
+    // an operand refers to. The numbers stay, so the text still assembles.
+    QString readableListing(const QStringList &lines, quint64 start, quint64 end);
     // The p-code the instructions at an address lower to.
     QString pcode(quint64 address, int instructions);
 
@@ -165,19 +175,34 @@ public:
     // The length of the instruction at an address, 0 if it will not decode.
     int instructionLength(quint64 address);
 
+    // What a project stores about this program. Every rename, patch and
+    // discovered function the session made is recorded here as it happens,
+    // because the engine holds no history a project could read back.
+    ProgramState journal() const;
+    // Replaces the journal with what a project loaded, so replaying that
+    // state on open does not count as a fresh round of edits.
+    void resetJournal(const ProgramState &state);
+    void recordComment(quint64 address, const QString &kind, const QString &body);
+    void recordBookmark(quint64 address, const QString &label);
+
 Q_SIGNALS:
     void functionReady(const Decompiled &function);
     void functionFailed(quint64 address, const QString &error);
     void analysisProgress(int done, int total, const QString &name);
-    void analysisFinished(int done, int failed, qint64 milliseconds);
+    void analysisFinished(int done, int failed, int discovered, qint64 milliseconds);
     void functionsChanged();
     void patchesChanged();
 
 private:
     ProgramDocument(QString path, astral::Program program);
     void loadSymbols();
+    // After any patch lands: drops stale results and signals, outside the lock.
+    void patchLanded();
     // Runs on a worker with the lock held; fills `error` on failure.
     Decompiled decompileLocked(quint64 address, QString &error, std::vector<quint64> *callees = nullptr);
+    // The same, against any session; the caller owns the session's serialisation.
+    Decompiled decompileWith(astral::Program &program, quint64 address, QString &error,
+                             std::vector<quint64> *callees);
 
     QString path_;
     astral::Program program_;
@@ -188,6 +213,12 @@ private:
     std::vector<StringEntry> strings_;
     bool stringsScanned_ = false;
     quint64 entry_ = 0;
+    // The session's edit history, for whatever project owns this program.
+    mutable QMutex journalLock_;
+    ProgramState journal_;
+    void recordRename(quint64 address, const QString &name, bool learned);
+    void recordPatch(const QString &kind, quint64 address, const QByteArray &payload,
+                     const QString &note);
     mutable QMutex cacheLock_;
     std::map<quint64, Decompiled> cache_;
     QAtomicInt analyzing_;

@@ -9,7 +9,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QScrollArea>
-#include <QSettings>
+#include "model/settings.hh"
 #include <QVBoxLayout>
 
 namespace astral::gui {
@@ -17,7 +17,7 @@ namespace astral::gui {
 namespace {
 constexpr int kMaxRecent = 8;
 constexpr int kColumnWidth = 820;
-const auto kRecentKey = QStringLiteral("recent/projects");
+const auto kRecentKey = QStringLiteral("recent");
 
 QLabel *label(const QString &text, const char *name)
 {
@@ -189,18 +189,19 @@ void WelcomePage::refresh()
 
 void WelcomePage::rememberRecent(const QString &path)
 {
-    QSettings settings;
-    QStringList paths = settings.value(kRecentKey).toStringList();
+    Settings &settings = Settings::instance();
+    QStringList paths = settings.listValue(kRecentKey);
     paths.removeAll(path);
     paths.prepend(path);
-    while (paths.size() > kMaxRecent)
+    const int limit = qMax(1, settings.intValue(QStringLiteral("recent.limit"), kMaxRecent));
+    while (paths.size() > limit)
         paths.removeLast();
-    settings.setValue(kRecentKey, paths);
+    settings.setList(kRecentKey, paths);
 }
 
 QStringList WelcomePage::recentPaths()
 {
-    return QSettings().value(kRecentKey).toStringList();
+    return Settings::instance().listValue(kRecentKey);
 }
 
 } // namespace astral::gui

@@ -68,11 +68,24 @@ int main(int argc, char **argv)
     }
     const QString editFile = qEnvironmentVariable("ASTRAL_GUI_EDIT");
     const QString writeOut = qEnvironmentVariable("ASTRAL_GUI_WRITE");
-    if (!editFile.isEmpty() && !writeOut.isEmpty())
+    if (!editFile.isEmpty())
         QTimer::singleShot(2000, &window, [&window, editFile, writeOut] { window.runEditHook(editFile, writeOut); });
+    const QString exportOut = qEnvironmentVariable("ASTRAL_GUI_EXPORT");
+    if (!exportOut.isEmpty())
+        QTimer::singleShot(1500, &window, [&window, exportOut] { window.runExportHook(exportOut); });
+    if (qEnvironmentVariableIsSet("ASTRAL_GUI_DUMP_LISTING"))
+        QTimer::singleShot(1500, &window, &astral::gui::MainWindow::dumpListing);
+    if (qEnvironmentVariableIsSet("ASTRAL_GUI_ANALYZE"))
+        QTimer::singleShot(1500, &window, [&window] { window.runAnalyzeHook(); });
+    const QString probe = qEnvironmentVariable("ASTRAL_GUI_SEARCH");
+    if (!probe.isEmpty())
+        QTimer::singleShot(1800, &window, [&window, probe] { window.typeInSearch(probe); });
     if (parser.isSet(shotOption)) {
         const QString target = parser.value(shotOption);
-        QTimer::singleShot(2500, &window, [&window, target] {
+        const int delay = qEnvironmentVariableIntValue("ASTRAL_GUI_SHOT_DELAY") > 0
+                              ? qEnvironmentVariableIntValue("ASTRAL_GUI_SHOT_DELAY")
+                              : 2500;
+        QTimer::singleShot(delay, &window, [&window, target] {
             window.grab().save(target);
             QCoreApplication::quit();
         });

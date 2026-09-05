@@ -10,7 +10,7 @@ namespace astral::gui {
 namespace {
 
 // The order here is the order a theme file is expected to read in.
-constexpr std::array<std::pair<const char *, const char *>, 30> kDefaults = {{
+constexpr std::array<std::pair<const char *, const char *>, 31> kDefaults = {{
     // Surfaces, darkest to lightest.
     {"background", "#1b1c1f"},
     {"panel", "#222428"},
@@ -44,6 +44,8 @@ constexpr std::array<std::pair<const char *, const char *>, 30> kDefaults = {{
     {"token.address", "#5d626b"},
     {"token.mnemonic", "#82aaff"},
     {"token.register", "#f5b8d0"},
+    // A byte changed in the hex view and not yet queued.
+    {"token.dirty", "#ffb86c"},
 }};
 
 } // namespace
@@ -205,8 +207,8 @@ QTabWidget::pane { border: none; border-top: 1px solid %border%; background: %ed
 QTabBar { background: %panel%; }
 QWidget#tabHeader { background: %panel%; border-bottom: 1px solid %border%; }
 QFrame#tabDivider { background: %border%; margin: 8px 6px; }
-QTabBar#programTabs::tab { padding: 7px 10px 7px 14px; }
-QTabBar#viewTabs::tab { padding: 7px 12px; font-size: 12px; }
+QTabBar#programTabs::tab, QTabBar#viewTabs::tab { height: 20px; padding: 6px 12px; font-size: 13px; }
+QTabBar#programTabs::tab { padding-right: 8px; }
 QTabBar::tab { background: %panel%; color: %textMuted%; padding: 6px 14px; border: none; border-bottom: 2px solid transparent; }
 QTabBar::tab:selected { color: %text%; border-bottom: 2px solid %accent%; }
 QTabBar::tab:hover:!selected { background: %hover%; }
@@ -245,6 +247,11 @@ QLabel#success { color: %success%; }
 QFrame#editorLine { background: %editorLine%; }
 QWidget#decompilerHeader { background: %panel%; border-bottom: 1px solid %border%; }
 QLabel#decompilerName { font-size: 13px; color: %text%; }
+QFrame#searchResults { background: %panelRaised%; border: 1px solid %accent%; border-radius: 6px; }
+QListWidget#searchResultsList { background: %panelRaised%; border: none; font-size: 12px; }
+QListWidget#searchResultsList::item { padding: 3px 10px; }
+QLabel#searchResultsSummary { background: %panel%; color: %textMuted%; font-size: 11px; border-top: 1px solid %border%; }
+QLabel#busyPill { background: %panelRaised%; color: %text%; border: 1px solid %accent%; border-radius: 12px; padding: 5px 14px; font-size: 12px; }
 QToolButton#headerButton { border: 1px solid %border%; border-radius: 4px; padding: 2px 10px; color: %text%; font-size: 11px; }
 QToolButton#headerButton:hover { background: %hover%; border-color: %accent%; }
 QToolButton#headerButton:disabled { color: %textDisabled%; }

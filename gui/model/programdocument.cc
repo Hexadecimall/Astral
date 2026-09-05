@@ -1,12 +1,17 @@
 #include "model/programdocument.hh"
 
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QMutexLocker>
+#include <QRegularExpression>
 #include <QThread>
 #include <QThreadPool>
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <set>
+#include <thread>
 #include <utility>
 
 namespace astral::gui {
@@ -40,7 +45,12 @@ bool ensureLibrary(QString &error)
 
 void ProgramDocument::open(const QString &path, QObject *context, OpenResult onDone)
 {
-    QThreadPool::globalInstance()->start([path, context, onDone = std::move(onDone)] {
+    // The engine binds a translator to the thread that built it, so the main
+    // session is built on the thread that owns the window: that thread lives
+    // as long as the document does, where a pool thread is retired when idle.
+    // Loading the specifications the first time is the slow part, and it is
+    // done here so the window shows the wait rather than a frozen frame.
+    QMetaObject::invokeMethod(context, [path, onDone = std::move(onDone)] {
         QString error;
         std::unique_ptr<ProgramDocument> document;
         if (ensureLibrary(error)) {
@@ -51,16 +61,8 @@ void ProgramDocument::open(const QString &path, QObject *context, OpenResult onD
                 error = QString::fromStdString(e.what());
             }
         }
-        // Ownership crosses to the receiving thread with the result. The move
-        // has to happen here, since only the owning thread may push an object
-        // away.
-        if (document)
-            document->moveToThread(context->thread());
-        ProgramDocument *raw = document.release();
-        QMetaObject::invokeMethod(context, [raw, error, onDone] {
-            onDone(std::unique_ptr<ProgramDocument>(raw), error);
-        }, Qt::QueuedConnection);
-    });
+        onDone(std::move(document), error);
+    }, Qt::QueuedConnection);
 }
 
 ProgramDocument::ProgramDocument(QString path, astral::Program program)
@@ -216,9 +218,15 @@ std::optional<Decompiled> ProgramDocument::cached(quint64 address) const
 
 Decompiled ProgramDocument::decompileLocked(quint64 address, QString &error, std::vector<quint64> *callees)
 {
+    return decompileWith(program_, address, error, callees);
+}
+
+Decompiled ProgramDocument::decompileWith(astral::Program &program, quint64 address, QString &error,
+                                          std::vector<quint64> *callees)
+{
     Decompiled result;
     try {
-        astral::Function function = program_.decompile(address);
+        astral::Function function = program.decompile(address);
         result.name = QString::fromStdString(function.name());
         result.signature = QString::fromStdString(function.signature());
         result.pseudoCode = QString::fromStdString(function.c_code());
@@ -226,7 +234,7 @@ Decompiled ProgramDocument::decompileLocked(quint64 address, QString &error, std
         options.self_contained = false;
         options.comments = true;
         options.explain = true;
-        result.code = QString::fromStdString(program_.emit_c({address}, options));
+        result.code = QString::fromStdString(program.emit_c({address}, options));
         result.address = function.address();
         result.size = function.size();
         result.namingReason = QString::fromUtf8(astral_function_naming_reason(function.get()));
@@ -274,6 +282,40 @@ Decompiled ProgramDocument::decompileLocked(quint64 address, QString &error, std
     return result;
 }
 
+std::optional<quint64> ProgramDocument::resolveName(const QString &word) const
+{
+    const QString text = word.trimmed();
+    if (text.isEmpty())
+        return std::nullopt;
+    if (const auto function = functionNamed(text))
+        return function->address;
+    {
+        QMutexLocker guard(&cacheLock_);
+        for (const SymbolEntry &symbol : symbols_)
+            if (symbol.name == text)
+                return symbol.address;
+    }
+    // The names Astral makes from an address carry it in hex.
+    static const QRegularExpression encoded(
+        QStringLiteral(R"(^(?:sub|loc|dat|unk|fn|g|s)([0-9a-fA-F]{3,16})$)"));
+    const auto match = encoded.match(text);
+    bool ok = false;
+    quint64 address = 0;
+    if (match.hasMatch())
+        address = match.captured(1).toULongLong(&ok, 16);
+    else if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        address = QStringView(text).mid(2).toULongLong(&ok, 16);
+    else if (text.size() >= 5)
+        address = text.toULongLong(&ok, 16);
+    if (!ok)
+        return std::nullopt;
+    // Only an address the image actually maps is worth going to.
+    for (const SegmentEntry &segment : segments())
+        if (address >= segment.address && address < segment.address + segment.size)
+            return address;
+    return std::nullopt;
+}
+
 void ProgramDocument::decompile(quint64 address)
 {
     if (const auto hit = cached(address)) {
@@ -306,61 +348,103 @@ void ProgramDocument::analyzeAll()
     QThreadPool::globalInstance()->start([this] {
         QElapsedTimer timer;
         timer.start();
-        // Worklist: every known function, then whatever they call that the
-        // symbol table did not know about. A stripped binary's functions
-        // come to light this way.
-        std::vector<quint64> work;
-        std::set<quint64> seen;
-        for (quint64 e : entryPoints())
-            if (seen.insert(e).second)
-                work.push_back(e);
-        for (const FunctionEntry &f : functions_)
-            if (!f.isImport && seen.insert(f.address).second)
-                work.push_back(f.address);
-        std::set<quint64> imports;
-        for (const FunctionEntry &f : functions_)
-            if (f.isImport)
-                imports.insert(f.address);
 
-        int done = 0, failed = 0, discovered = 0;
-        for (size_t i = 0; i < work.size(); ++i) {
-            if (cancel_.loadRelaxed())
-                break;
-            const quint64 address = work[i];
-            std::vector<quint64> callees;
-            QString name;
-            if (!cached(address)) {
-                QString error;
-                Decompiled result;
-                {
-                    QMutexLocker guard(&lock_);
-                    result = decompileLocked(address, error, &callees);
-                }
-                if (!error.isEmpty())
-                    ++failed;
-                name = result.name;
-            } else {
-                name = cached(address)->name;
-            }
-            if (!functionAt(address)) {
-                addDiscovered(address, name.isEmpty() ? QStringLiteral("sub%1").arg(address, 0, 16) : name);
-                ++discovered;
-            }
-            for (quint64 callee : callees)
-                if (!imports.count(callee) && seen.insert(callee).second)
-                    work.push_back(callee);
-            ++done;
-            const int total = static_cast<int>(work.size());
-            QMetaObject::invokeMethod(this, [this, done, total, name] {
-                Q_EMIT analysisProgress(done, total, name);
-            }, Qt::QueuedConnection);
+        // Shared worklist: every known function, then whatever they call that
+        // the symbol table did not know about. Workers pull from it under
+        // `workLock`; a stripped binary's functions come to light this way.
+        struct Shared {
+            QMutex workLock;
+            std::vector<quint64> work;
+            size_t next = 0;
+            std::set<quint64> seen;
+            std::set<quint64> imports;
+            std::atomic<int> done{0}, failed{0}, discovered{0};
+        } shared;
+        for (quint64 e : entryPoints())
+            if (shared.seen.insert(e).second)
+                shared.work.push_back(e);
+        for (const FunctionEntry &f : functions_) {
+            if (f.isImport)
+                shared.imports.insert(f.address);
+            else if (shared.seen.insert(f.address).second)
+                shared.work.push_back(f.address);
         }
+
+        // One engine session per worker, built on the worker's own thread
+        // because a translator belongs to the thread that made it. The main
+        // session stays free for the window. Small jobs get fewer workers:
+        // a session costs more to build than a couple of functions cost to
+        // decompile.
+        const int cores = std::clamp(QThread::idealThreadCount(), 1, 8);
+        const int active = std::clamp(static_cast<int>((shared.work.size() + 3) / 4), 1, cores);
+
+        auto worker = [this, &shared]() {
+            std::unique_ptr<astral::Program> owned;
+            try {
+                owned = std::make_unique<astral::Program>(astral::Program::open(path_.toStdString()));
+            } catch (const astral::Error &) {
+                // Fall back to the shared session, serialised by its lock.
+            }
+            astral::Program *session = owned.get();
+            for (;;) {
+                if (cancel_.loadRelaxed())
+                    return;
+                quint64 address;
+                {
+                    QMutexLocker guard(&shared.workLock);
+                    if (shared.next >= shared.work.size())
+                        return;
+                    address = shared.work[shared.next++];
+                }
+                std::vector<quint64> callees;
+                QString name;
+                if (const auto hit = cached(address)) {
+                    name = hit->name;
+                } else {
+                    QString error;
+                    Decompiled result;
+                    if (session) {
+                        result = decompileWith(*session, address, error, &callees);
+                    } else {
+                        QMutexLocker guard(&lock_);
+                        result = decompileLocked(address, error, &callees);
+                    }
+                    if (!error.isEmpty())
+                        ++shared.failed;
+                    name = result.name;
+                }
+                if (!functionAt(address)) {
+                    addDiscovered(address, name.isEmpty() ? QStringLiteral("sub%1").arg(address, 0, 16) : name);
+                    ++shared.discovered;
+                }
+                int total;
+                {
+                    QMutexLocker guard(&shared.workLock);
+                    for (quint64 callee : callees)
+                        if (!shared.imports.count(callee) && shared.seen.insert(callee).second)
+                            shared.work.push_back(callee);
+                    total = static_cast<int>(shared.work.size());
+                }
+                const int done = ++shared.done;
+                QMetaObject::invokeMethod(this, [this, done, total, name] {
+                    Q_EMIT analysisProgress(done, total, name);
+                }, Qt::QueuedConnection);
+            }
+        };
+
+        std::vector<std::thread> threads;
+        for (int i = 0; i < active; ++i)
+            threads.emplace_back(worker);
+        for (std::thread &t : threads)
+            t.join();
+
         const qint64 ms = timer.elapsed();
+        const int done = shared.done, failed = shared.failed, discovered = shared.discovered;
         analyzing_.storeRelaxed(0);
         QMetaObject::invokeMethod(this, [this, done, failed, ms, discovered] {
             if (discovered)
                 Q_EMIT functionsChanged();
-            Q_EMIT analysisFinished(done, failed, ms);
+            Q_EMIT analysisFinished(done, failed, discovered, ms);
         }, Qt::QueuedConnection);
     });
 }
@@ -376,6 +460,10 @@ void ProgramDocument::addDiscovered(quint64 address, const QString &name)
     if (at != functions_.end() && at->address == address)
         return;
     functions_.insert(at, entry);
+    {
+        QMutexLocker note(&journalLock_);
+        journal_.discovered.push_back({address, name});
+    }
 }
 
 namespace {
@@ -390,48 +478,76 @@ bool report(astral_status status, QString &error)
 
 bool ProgramDocument::patchBytes(quint64 address, const QByteArray &bytes, const QString &note, QString &error)
 {
-    QMutexLocker guard(&lock_);
-    const bool ok = report(astral_program_patch_bytes(program_.get(), address, bytes.constData(),
-                                                      static_cast<size_t>(bytes.size()), note.toUtf8().constData()),
-                           error);
+    bool ok;
+    {
+        QMutexLocker guard(&lock_);
+        ok = report(astral_program_patch_bytes(program_.get(), address, bytes.constData(),
+                                               static_cast<size_t>(bytes.size()), note.toUtf8().constData()),
+                    error);
+    }
     if (ok) {
-        // The edit lands in the open image, so anything decompiled before it
-        // is a picture of code that is no longer there.
-        {
-            QMutexLocker cache(&cacheLock_);
-            cache_.clear();
-            callers_.clear();
-        }
-        Q_EMIT patchesChanged();
+        recordPatch(QString::fromLatin1(patchKind::kBytes), address, bytes, note);
+        patchLanded();
     }
     return ok;
 }
 
 bool ProgramDocument::patchNop(quint64 address, int count, QString &error)
 {
-    QMutexLocker guard(&lock_);
-    const bool ok = report(astral_program_patch_nop(program_.get(), address, count), error);
-    if (ok)
-        Q_EMIT patchesChanged();
+    bool ok;
+    {
+        QMutexLocker guard(&lock_);
+        ok = report(astral_program_patch_nop(program_.get(), address, count), error);
+    }
+    if (ok) {
+        recordPatch(QString::fromLatin1(patchKind::kNop), address,
+                    QByteArray::number(count), QString());
+        patchLanded();
+    }
     return ok;
 }
 
 bool ProgramDocument::patchInvert(quint64 address, QString &error)
 {
-    QMutexLocker guard(&lock_);
-    const bool ok = report(astral_program_patch_invert(program_.get(), address), error);
-    if (ok)
-        Q_EMIT patchesChanged();
+    bool ok;
+    {
+        QMutexLocker guard(&lock_);
+        ok = report(astral_program_patch_invert(program_.get(), address), error);
+    }
+    if (ok) {
+        recordPatch(QString::fromLatin1(patchKind::kInvert), address, QByteArray(), QString());
+        patchLanded();
+    }
     return ok;
 }
 
 bool ProgramDocument::patchReturn(quint64 address, quint64 value, QString &error)
 {
-    QMutexLocker guard(&lock_);
-    const bool ok = report(astral_program_patch_return(program_.get(), address, value), error);
-    if (ok)
-        Q_EMIT patchesChanged();
+    bool ok;
+    {
+        QMutexLocker guard(&lock_);
+        ok = report(astral_program_patch_return(program_.get(), address, value), error);
+    }
+    if (ok) {
+        recordPatch(QString::fromLatin1(patchKind::kReturn), address,
+                    QByteArray::number(static_cast<qulonglong>(value)), QString());
+        patchLanded();
+    }
     return ok;
+}
+
+void ProgramDocument::patchLanded()
+{
+    // The edit lands in the open image, so anything decompiled before it is
+    // a picture of code that is no longer there.
+    {
+        QMutexLocker cache(&cacheLock_);
+        cache_.clear();
+        callers_.clear();
+    }
+    // Signalled outside the engine lock: a listener may well call back into
+    // the engine, and the lock does not recurse.
+    Q_EMIT patchesChanged();
 }
 
 int ProgramDocument::patchCount()
@@ -446,6 +562,11 @@ void ProgramDocument::patchUndo()
         QMutexLocker guard(&lock_);
         astral_program_patch_undo(program_.get());
     }
+    {
+        QMutexLocker note(&journalLock_);
+        if (!journal_.patches.empty())
+            journal_.patches.pop_back();
+    }
     Q_EMIT patchesChanged();
 }
 
@@ -454,6 +575,10 @@ void ProgramDocument::patchClear()
     {
         QMutexLocker guard(&lock_);
         astral_program_patch_clear(program_.get());
+    }
+    {
+        QMutexLocker note(&journalLock_);
+        journal_.patches.clear();
     }
     Q_EMIT patchesChanged();
 }
@@ -475,29 +600,103 @@ bool ProgramDocument::writePatched(const QString &outPath, QString &error)
 
 QString ProgramDocument::disassemble(quint64 address, quint64 size)
 {
-    QMutexLocker guard(&lock_);
-    // The library counts instructions, not bytes. Ask for the most that could
-    // fit and cut at the first line past the end.
-    const int most = static_cast<int>(std::min<quint64>(size == 0 ? 64 : size, 4096));
     QString listing;
-    try {
-        listing = QString::fromStdString(program_.disassemble(address, most));
-    } catch (const astral::Error &e) {
-        return QString::fromStdString(e.what());
+    {
+        QMutexLocker guard(&lock_);
+        // The library counts instructions, not bytes. Ask for the most that
+        // could fit and cut at the first line past the end.
+        const int most = static_cast<int>(std::min<quint64>(size == 0 ? 64 : size, 4096));
+        try {
+            listing = QString::fromStdString(program_.disassemble(address, most));
+        } catch (const astral::Error &e) {
+            return QString::fromStdString(e.what());
+        }
     }
-    if (size == 0)
-        return listing;
+
+    const quint64 end = size == 0 ? 0 : address + size;
     QStringList kept;
-    const quint64 end = address + size;
     for (const QString &line : listing.split(QLatin1Char('\n'))) {
         const int colon = line.indexOf(QLatin1Char(':'));
         bool ok = false;
         const quint64 at = line.left(colon).trimmed().toULongLong(&ok, 16);
-        if (ok && at >= end)
+        if (end != 0 && ok && at >= end)
             break;
         kept << line;
     }
-    return kept.join(QLatin1Char('\n'));
+    return readableListing(kept, address, end);
+}
+
+QString ProgramDocument::readableListing(const QStringList &lines, quint64 start, quint64 end)
+{
+    // The engine prints `0xADDR: mnemonic operands`. Read as-is that is a wall
+    // of hex: every branch is a number the reader has to look up. This lines
+    // the columns up and says what each address actually refers to, while
+    // leaving the numbers in place so the text still assembles.
+    static const QRegularExpression instruction(QStringLiteral(R"(^\s*(0x[0-9a-fA-F]+):\s*(\S+)\s*(.*)$)"));
+    static const QRegularExpression operandAddress(QStringLiteral(R"(\b0x([0-9a-fA-F]{4,16})\b)"));
+
+    int widest = 0;
+    std::vector<std::array<QString, 3>> rows;
+    rows.reserve(lines.size());
+    for (const QString &line : lines) {
+        const auto match = instruction.match(line);
+        if (!match.hasMatch()) {
+            rows.push_back({QString(), line, QString()});
+            continue;
+        }
+        // The engine pads addresses to the pointer width; the zeros carry no
+        // information and cost three columns on every line.
+        QString at = match.captured(1);
+        static const QRegularExpression leadingZeros(QStringLiteral("^0x0+(?=[0-9a-fA-F])"));
+        at.replace(leadingZeros, QStringLiteral("0x"));
+        widest = std::max(widest, static_cast<int>(match.captured(2).size()));
+        rows.push_back({at, match.captured(2), match.captured(3).trimmed()});
+    }
+
+    QStringList out;
+    out.reserve(lines.size());
+    for (const auto &row : rows) {
+        if (row[0].isEmpty()) {
+            out << row[1];
+            continue;
+        }
+        QString text = QStringLiteral("%1:  %2").arg(row[0], row[1].leftJustified(widest, QLatin1Char(' ')));
+        if (!row[2].isEmpty())
+            text += QLatin1Char(' ') + row[2];
+
+        // What the addresses in the operands stand for, once each, in a
+        // trailing comment. A target inside this function is an offset from
+        // its start; anything else gets whatever name the program has for it.
+        QStringList notes;
+        auto seen = std::set<quint64>();
+        auto it = operandAddress.globalMatch(row[2]);
+        while (it.hasNext()) {
+            const auto found = it.next();
+            bool ok = false;
+            const quint64 target = found.captured(1).toULongLong(&ok, 16);
+            if (!ok || !seen.insert(target).second)
+                continue;
+            if (end != 0 && target >= start && target < end) {
+                const qint64 delta = static_cast<qint64>(target) - static_cast<qint64>(start);
+                notes << QStringLiteral("+0x%1").arg(delta, 0, 16);
+                continue;
+            }
+            if (const auto function = functionAt(target)) {
+                notes << function->name;
+                continue;
+            }
+            QMutexLocker guard(&cacheLock_);
+            for (const SymbolEntry &symbol : symbols_)
+                if (symbol.address == target) {
+                    notes << symbol.name;
+                    break;
+                }
+        }
+        if (!notes.isEmpty())
+            text = text.leftJustified(38, QLatin1Char(' ')) + QStringLiteral("  ; ") + notes.join(QStringLiteral(", "));
+        out << text;
+    }
+    return out.join(QLatin1Char('\n'));
 }
 
 QString ProgramDocument::pcode(quint64 address, int instructions)
@@ -529,7 +728,80 @@ bool ProgramDocument::rename(quint64 address, const QString &name, bool learn, Q
         callers_.clear();
     }
     loadSymbols();
+    recordRename(address, name, learn);
     return true;
+}
+
+// The journal is the only record of what the session changed: the engine
+// applies an edit and keeps no history of it, so a project reading state back
+// would otherwise have nothing to read.
+ProgramState ProgramDocument::journal() const
+{
+    QMutexLocker guard(&journalLock_);
+    return journal_;
+}
+
+void ProgramDocument::resetJournal(const ProgramState &state)
+{
+    QMutexLocker guard(&journalLock_);
+    journal_ = state;
+}
+
+void ProgramDocument::recordRename(quint64 address, const QString &name, bool learned)
+{
+    QMutexLocker guard(&journalLock_);
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (RenameRecord &record : journal_.renames) {
+        if (record.address == address) {
+            record.name = name;
+            // A name learned once stays learned, whatever a later rename does.
+            record.learned = record.learned || learned;
+            record.changedAt = now;
+            return;
+        }
+    }
+    journal_.renames.push_back({address, name, learned, now});
+}
+
+void ProgramDocument::recordPatch(const QString &kind, quint64 address, const QByteArray &payload,
+                                  const QString &note)
+{
+    QMutexLocker guard(&journalLock_);
+    PatchRecord record;
+    record.address = address;
+    record.kind = kind;
+    record.payload = payload;
+    record.note = note;
+    record.changedAt = QDateTime::currentSecsSinceEpoch();
+    journal_.patches.push_back(record);
+}
+
+void ProgramDocument::recordComment(quint64 address, const QString &kind, const QString &body)
+{
+    QMutexLocker guard(&journalLock_);
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (CommentRecord &record : journal_.comments) {
+        if (record.address == address && record.kind == kind) {
+            record.body = body;
+            record.changedAt = now;
+            return;
+        }
+    }
+    journal_.comments.push_back({address, kind, body, now});
+}
+
+void ProgramDocument::recordBookmark(quint64 address, const QString &label)
+{
+    QMutexLocker guard(&journalLock_);
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    for (BookmarkRecord &record : journal_.bookmarks) {
+        if (record.address == address) {
+            record.label = label;
+            record.changedAt = now;
+            return;
+        }
+    }
+    journal_.bookmarks.push_back({address, label, now});
 }
 
 int ProgramDocument::learnSymbols()

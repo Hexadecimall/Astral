@@ -7,6 +7,7 @@
 
 #include <QWidget>
 
+class QMenu;
 class QStackedWidget;
 
 #include <memory>
@@ -15,6 +16,7 @@ namespace astral::gui {
 
 class DecompilerView;
 class HexView;
+class HexPane;
 class FunctionListModel;
 
 class ProgramTab : public QWidget {
@@ -41,10 +43,20 @@ public:
 
     void compileCurrent();
     void replaceCodeText(const QString &text);
-
+    // The word the cursor sits in, in whichever view is showing.
+    QString currentWord() const;
+    // Re-reads the current function from the engine, discarding what the view
+    // holds. Used after a patch, when the old text describes code that is gone.
+    void refreshCurrent();
+    void reportPatchWritten();
+    void reportPatchFailed(const QString &reason);
 Q_SIGNALS:
     void viewChanged(int index);
+    // A menu wants the actions that apply to `word` at `pos`.
+    void contextActionsWanted(QMenu *menu, const QString &word);
     void logMessage(const QString &line);
+    // A patch landed in the engine queue and is ready to write out.
+    void patchApplied();
     // The current function changed; the window updates panes bound to it.
     void locationChanged(quint64 address, const QString &name);
     void listingChanged(const QString &listing);
@@ -55,9 +67,11 @@ private:
     DecompilerView *decompiler_;
     DecompilerView *pseudo_;
     HexView *hex_;
+    HexPane *hexPane_;
     QStackedWidget *views_;
     quint64 current_ = 0;
     quint64 hexAddress_ = 0;
+    bool refreshPending_ = false;
     QString listing_;
 };
 

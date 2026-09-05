@@ -4,6 +4,8 @@
 #define ASTRAL_GUI_CODEVIEW_HH
 
 #include <QPlainTextEdit>
+
+class QMenu;
 #include <QRegularExpression>
 #include <QSyntaxHighlighter>
 #include <QTextCharFormat>
@@ -19,6 +21,10 @@ public:
     explicit CodeView(QWidget *parent = nullptr);
 
     void setEditable(bool editable);
+    // The identifier or number the cursor sits in, empty when it sits in
+    // whitespace or punctuation.
+    QString wordUnderCursor() const;
+    QString wordAt(const QPoint &pos) const;
     // For listings: the address at the start of the line under `pos`, if any.
     std::optional<quint64> addressAtLine(int blockNumber) const;
     std::optional<quint64> addressAtCursor() const;
@@ -26,7 +32,13 @@ public:
     int gutterWidth() const;
     void paintGutter(QPaintEvent *event);
 
+Q_SIGNALS:
+    // Raised before the context menu is shown, so whoever owns the view can
+    // add what it can do with `word` at the top of the menu.
+    void contextMenuAboutToShow(QMenu *menu, const QString &word);
+
 protected:
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
 
 private:

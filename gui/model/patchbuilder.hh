@@ -6,6 +6,7 @@
 #define ASTRAL_GUI_PATCHBUILDER_HH
 
 #include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -63,6 +64,20 @@ struct ObjectFunction {
     enum Format { MachO, Elf } format = MachO;
     enum Arch { Arm64, X86_64 } arch = Arm64;
 };
+
+// The whole text section of a relocatable object, plus where every local
+// symbol in it sits. The assembler places a block of code rather than one
+// named function, so it needs the section, not a symbol's extent.
+struct ObjectText {
+    QByteArray bytes;
+    // symbol name -> offset into `bytes`
+    QHash<QString, quint64> symbols;
+    ObjectFunction::Format format = ObjectFunction::MachO;
+    ObjectFunction::Arch arch = ObjectFunction::Arm64;
+};
+
+// Reads the text section out of an object file. Fills `error` on failure.
+std::optional<ObjectText> readObjectText(const QByteArray &object, QString &error);
 
 // Reads `functionName` out of an object file. Fills `error` on failure.
 std::optional<ObjectFunction> readObjectFunction(const QByteArray &object, const QString &functionName,
