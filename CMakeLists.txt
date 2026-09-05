@@ -79,6 +79,7 @@ set(ASTRAL_LIB_SRC
     src/error.cc
     src/image.cc
     src/demangle.cc
+    src/cxx_idioms.cc
     src/patch.cc
     src/sha256.cc
     src/macho_sign.cc
@@ -175,6 +176,12 @@ elseif(NOT CARGO_EXECUTABLE)
 else()
     message(STATUS "ASTRAL_BUILD_TUI is off: the astral command will not be built, "
                    "so this build produces only the libraries and headers")
+endif()
+
+# ---------------------------------------------------------------- the application
+option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)
+if(ASTRAL_BUILD_GUI)
+    add_subdirectory(gui)
 endif()
 
 # ---------------------------------------------------------------- sleigh specs

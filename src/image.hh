@@ -35,6 +35,18 @@ struct Symbol {
     // worth having so calls read properly, but its body is not this program's
     // code and should not be decompiled or emitted.
     bool is_import = false;
+    // For a demangled C++ symbol: the original mangled name, so the rebuilt
+    // unit can still link against the real thing.
+    std::string linkage_name;
+    // A prototype in the engine's type names, read out of the mangled
+    // signature ("extern void *stdOperatorShl(void *os, char *s);").
+    std::string prototype;
+    // For a stream inserter: the printf conversion that writes the same thing
+    // ("%s", "%d"), or "manip" for an endl-style manipulator.
+    std::string stream_format;
+    // What a C++ library function does, when it is one the idiom pass can
+    // write in C: "stringFromCStr", "stringDestroy", "stringEqCStr", ...
+    std::string role;
 };
 
 // Architecture facts a loader can read out of a container format. These feed the

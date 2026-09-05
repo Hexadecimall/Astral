@@ -1740,7 +1740,18 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
                     // start at their real value (zero for .bss), or a `!= NULL`
                     // test on one reads true before the program allocates it.
                     bool named_import = options.data_names.count(declaration.address) != 0;
-                    if (!real_global.empty()) {
+                    auto linkage = options.data_linkage.find(declaration.address);
+                    if (linkage != options.data_linkage.end()) {
+                        // The slot holds the address of an object another
+                        // image defines under a mangled name. An asm label
+                        // reaches it from C without spelling the mangling in
+                        // the identifier.
+                        std::string object = declaration.name + "Object";
+                        definitions.emplace(declaration.name,
+                                            "extern unsigned char " + object + "[] __asm__(\"" +
+                                                linkage->second + "\");\n" + decl + " = (void *)" +
+                                                object + ";");
+                    } else if (!real_global.empty()) {
                         definitions.emplace(declaration.name,
                                             decl + " = (void *)&" + real_global + ";");
                     } else if (data_pointer && named_import) {
@@ -1771,13 +1782,25 @@ std::string emit_c_unit(const std::vector<FunctionResult> &raw_functions,
             if (declaration.is_function) {
                 std::string proto = Knowledge::instance().prototype_for(declaration.name);
                 if (!proto.empty()) {
-                    externals.emplace(declaration.name,
-                                      standardize_types(size_types_for(proto), used_stdint));
+                    std::string text = standardize_types(size_types_for(proto), used_stdint);
+                    auto linkage = options.function_linkage.find(declaration.name);
+                    if (linkage != options.function_linkage.end() && !text.empty() && text.back() == ';') {
+                        text.pop_back();
+                        text += " __asm__(\"" + linkage->second + "\");";
+                    }
+                    externals.emplace(declaration.name, text);
                     continue;
                 }
             }
-            externals.emplace(declaration.name,
-                              standardize_types(declaration.text, used_stdint));
+            std::string text = standardize_types(declaration.text, used_stdint);
+            if (declaration.is_function) {
+                auto linkage = options.function_linkage.find(declaration.name);
+                if (linkage != options.function_linkage.end() && !text.empty() && text.back() == ';') {
+                    text.pop_back();
+                    text += " __asm__(\"" + linkage->second + "\");";
+                }
+            }
+            externals.emplace(declaration.name, text);
         }
     }
 

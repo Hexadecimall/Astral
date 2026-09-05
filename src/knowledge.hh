@@ -50,6 +50,12 @@ public:
 
     // Library knowledge.
     std::string prototype_for(const std::string &name) const;
+    // Adds a prototype for this process only, never written to a database:
+    // what a mangled C++ name says about its own signature.
+    void note_prototype(const std::string &name, const std::string &declaration)
+    {
+        protos_[name] = declaration;
+    }
     std::string header_for(const std::string &name) const;
     const std::map<std::string, std::string> &prototypes() const { return protos_; }
 

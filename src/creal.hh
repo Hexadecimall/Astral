@@ -31,6 +31,13 @@ struct CEmitOptions {
     // real libc global (__stdoutp) can be pointed at the true symbol rather than
     // zeroed backing - which is what a rebuilt program needs to actually run.
     std::map<uint64_t, std::string> data_names;
+    // Address -> the linker-level name of the C++ object an import slot stands
+    // for, so the slot can be defined as a pointer to the real object.
+    std::map<uint64_t, std::string> data_linkage;
+    // Function name -> the linker-level name of the C++ function it stands
+    // for, so its extern carries an asm label and the unit links against the
+    // C++ runtime as it is.
+    std::map<std::string, std::string> function_linkage;
 };
 
 // Fills in c_code_real and signature_real: the same function written in C that
