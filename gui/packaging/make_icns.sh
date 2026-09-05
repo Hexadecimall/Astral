@@ -5,12 +5,17 @@ svg="$1"; out="$2"
 work="$(mktemp -d)"
 iconset="$work/Astral.iconset"
 mkdir -p "$iconset"
-# A rounded dark tile behind the mark, the way macOS icons are drawn.
+# A rounded dark tile behind the mark, the way macOS icons are drawn. The mark
+# is everything between the SVG's own tags: the opening one is the first line
+# and the closing one is a line of its own, so dropping both leaves the
+# drawing. (A range starting at line 1 looks for its end from line 2 onwards,
+# which for a one-root document means the whole file - and an icon with
+# nothing in it.)
 cat > "$work/tile.svg" <<SVG
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <rect x="100" y="100" width="824" height="824" rx="184" fill="#1b1c1f"/>
   <g transform="translate(232 232) scale(8.75)">
-$(sed -e '1,/<svg/d' -e '/<\/svg>/,$d' "$svg")
+$(sed -e '1d' -e '/<\/svg>/d' "$svg")
   </g>
 </svg>
 SVG

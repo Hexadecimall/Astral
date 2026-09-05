@@ -698,7 +698,15 @@ std::vector<SourcePrototype> prototypes_in_cxx_header(const std::string &text)
                 qualified += call[2].str();
                 prototype.name = cxx_identifier(qualified);
                 prototype.return_type = cxx_core_type(call[1].str());
-                bool usable = !prototype.name.empty() && !prototype.return_type.empty();
+                // Only a name the scope contributed to. A member read out of a
+                // header without the class it belongs to is learned under a
+                // bare name, and a bare name from a C++ header is exactly the
+                // kind that already means something else: basic_filebuf::close
+                // arriving as `close` teaches that close takes no arguments,
+                // and everything that calls the real one stops compiling.
+                const bool qualified_by_scope = qualified.find("::") != std::string::npos;
+                bool usable = qualified_by_scope && !prototype.name.empty() &&
+                              !prototype.return_type.empty();
                 if (usable) {
                     int unnamed = 0;
                     for (const std::string &part : split_top_level(call[3].str(), ',')) {
