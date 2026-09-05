@@ -181,6 +181,45 @@ public:
     // Compilable C for every function symbol in the program.
     std::string emit_c_all(const COptions &options = COptions()) const;
 
+    // Renames the function at an address. With `learn`, the new name is
+    // recorded against a fingerprint of the body, so the same code is
+    // recognised in another program.
+    void rename(uint64_t address, const std::string &name, bool learn = false);
+    // Records every named function against its fingerprint. Returns how many.
+    int learn_symbols();
+    // Whether names are recovered from evidence rather than left as addresses.
+    void set_auto_naming(bool enabled);
+    bool auto_naming() const;
+
+    // --- Patching ---------------------------------------------------------
+    // Edits queue against the open image and apply to the file that
+    // write_patched produces; the image in memory changes too, so a
+    // decompilation taken afterwards reflects the edit.
+
+    // Instruction length at an address, or 0 if it will not decode.
+    int instruction_length(uint64_t address) const;
+    // Queues a raw byte edit.
+    void patch_bytes(uint64_t address, const void *bytes, size_t size,
+                     const std::string &note = std::string());
+    void patch_bytes(uint64_t address, const std::vector<uint8_t> &bytes,
+                     const std::string &note = std::string());
+    // Queues `count` no-ops at an address.
+    void patch_nop(uint64_t address, int count = 1);
+    // Queues inverting the conditional branch at an address.
+    void patch_invert(uint64_t address);
+    // Queues overwriting the function at an address so it only returns a value.
+    void patch_return(uint64_t address, uint64_t value);
+
+    size_t patch_count() const;
+    void patch_undo();
+    void patch_clear();
+    // The queued patches as readable patches.astral text.
+    std::string patch_text() const;
+    // Writes the original file with every queued patch applied. An arm64
+    // Mach-O is re-signed on the way out, because the kernel will not run one
+    // whose signature no longer covers its bytes.
+    void write_patched(const std::string &out_path) const;
+
 private:
     explicit Program(astral_program *handle) noexcept;
     void reset();

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Astral VERSION 0.8.0 LANGUAGES CXX)
+project(Astral VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -181,6 +181,9 @@ endif()
 # ---------------------------------------------------------------- the application
 option(ASTRAL_BUILD_GUI "Build the Astral desktop application (needs Qt 6)" ON)
 if(ASTRAL_BUILD_GUI)
+    # Tests register with the root project, so ctest in the build tree finds
+    # them; enable_testing inside a subdirectory alone does not do that.
+    enable_testing()
     add_subdirectory(gui)
 endif()
 

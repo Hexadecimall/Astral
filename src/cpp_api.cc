@@ -350,4 +350,72 @@ std::string Program::emit_c_all(const COptions &options) const
                        ASTRAL_ERR_DECOMPILE_FAILED);
 }
 
+void Program::rename(uint64_t address, const std::string &name, bool learn)
+{
+    check(astral_program_rename(handle_, address, name.c_str(), learn ? 1 : 0));
+}
+
+int Program::learn_symbols() { return astral_program_learn_symbols(handle_); }
+
+void Program::set_auto_naming(bool enabled)
+{
+    astral_program_set_auto_naming(handle_, enabled ? 1 : 0);
+}
+
+bool Program::auto_naming() const { return astral_program_auto_naming(handle_) != 0; }
+
+int Program::instruction_length(uint64_t address) const
+{
+    return astral_program_instruction_length(handle_, address);
+}
+
+void Program::patch_bytes(uint64_t address, const void *bytes, size_t size,
+                          const std::string &note)
+{
+    check(astral_program_patch_bytes(handle_, address, bytes, size,
+                                     note.empty() ? nullptr : note.c_str()));
+}
+
+void Program::patch_bytes(uint64_t address, const std::vector<uint8_t> &bytes,
+                          const std::string &note)
+{
+    patch_bytes(address, bytes.data(), bytes.size(), note);
+}
+
+void Program::patch_nop(uint64_t address, int count)
+{
+    check(astral_program_patch_nop(handle_, address, count));
+}
+
+void Program::patch_invert(uint64_t address)
+{
+    check(astral_program_patch_invert(handle_, address));
+}
+
+void Program::patch_return(uint64_t address, uint64_t value)
+{
+    check(astral_program_patch_return(handle_, address, value));
+}
+
+size_t Program::patch_count() const { return astral_program_patch_count(handle_); }
+
+void Program::patch_undo() { astral_program_patch_undo(handle_); }
+
+void Program::patch_clear() { astral_program_patch_clear(handle_); }
+
+std::string Program::patch_text() const
+{
+    char *owned = astral_program_patch_serialize(handle_);
+    if (owned == nullptr)
+        return std::string(); // nothing queued is not a failure
+    std::string result(owned);
+    astral_string_free(owned);
+    return result;
+}
+
+void Program::write_patched(const std::string &out_path) const
+{
+    check(astral_program_write_patched(handle_, out_path.c_str()));
+}
+
 } // namespace astral
