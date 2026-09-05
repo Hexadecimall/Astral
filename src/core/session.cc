@@ -2045,7 +2045,7 @@ void rename_token(std::string &text, const std::string &from, const std::string 
     }
 }
 
-void tidy_names(std::string &out)
+void tidy_names(std::string &out, uint64_t image_base)
 {
     // First put the engine's spellings into one shape.
     struct Rule { std::regex re; std::string rep; };
@@ -2171,12 +2171,26 @@ void tidy_names(std::string &out)
                     }
                 }
             }
-            // The address the engine put in the name, spelled out: eight hex
-            // digits, so two of them line up when read one under the other.
+            // The address the engine put in the name, spelled out. Where the
+            // image starts is the same for every name in the file and so says
+            // nothing about any of them, so what is kept is the offset into
+            // the image - four digits at least, so they line up when read one
+            // under the other.
             std::string digits = name.substr(std::strlen(family.prefix));
             for (char &digit : digits)
                 digit = static_cast<char>(std::tolower(static_cast<unsigned char>(digit)));
-            while (digits.size() < 8)
+            if (image_base != 0) {
+                try {
+                    const uint64_t address = std::stoull(digits, nullptr, 16);
+                    if (address >= image_base) {
+                        std::ostringstream shortened;
+                        shortened << std::hex << (address - image_base);
+                        digits = shortened.str();
+                    }
+                } catch (...) {
+                }
+            }
+            while (digits.size() < 4)
                 digits.insert(digits.begin(), '0');
             if (chosen.empty()) {
                 const std::string candidate = std::string(family.word) + digits;
@@ -3192,7 +3206,7 @@ bool Session::emit_c(const std::vector<uint64_t> &addresses, bool self_contained
     emit_absolute_data(image_, code_ranges, out);
     // C++ stream output written the way C writes it.
     rewrite_stream_idioms(out, image_);
-    tidy_names(out);
+    tidy_names(out, image_.image_base);
     parenthesise_truth(out);
     return true;
 }
