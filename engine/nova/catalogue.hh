@@ -21,6 +21,7 @@
 #include "ir.hh"
 #include "opcodes.hh"
 
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -72,6 +73,29 @@ struct Form {
     // length this is that length; where forms differ, it is the first thing a
     // size budget would sort them by.
     int shortest = 0;
+
+    // The bits this form always has, and which of them are fixed.
+    //
+    // An instruction is these bits with the slots filled in around them. Two
+    // forms of the same operation differ here: on AARCH64 an add of two
+    // registers and an add of a number are the same operation with different
+    // fixed bits, and this is what says which is which.
+    //
+    // `fixed_mask` has a bit set wherever the form insists on a value, and
+    // `fixed_bits` is what it insists on there. A zero mask means the bits
+    // could not be worked out, which is said rather than passed off as a form
+    // that insists on nothing.
+    //
+    // What these are good for today is telling forms apart: two forms of the
+    // same operation differ here, and that is what makes them two forms. What
+    // they are NOT yet good for is being written into a program. The order the
+    // bits are in has not been checked against instructions anybody has seen,
+    // and until it has, treating them as an encoding would be trusting a
+    // convention nobody confirmed. Checking it is the next thing: build bytes
+    // from a form, hand them back to the same specification to read, and see
+    // whether the same form comes out.
+    uint64_t fixed_mask = 0;
+    uint64_t fixed_bits = 0;
 
     // Where in the specification it was written, so a form that behaves oddly
     // can be looked at rather than guessed about.

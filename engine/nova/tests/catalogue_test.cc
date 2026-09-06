@@ -221,6 +221,56 @@ void check_shapes()
     }
 }
 
+
+// The bits a form insists on. These come off the tree that decides which form a
+// stream of bits means, accumulated from the root down, because the pattern at
+// the bottom holds only what was left to distinguish by then.
+//
+// What is claimed here is only what has been checked: that forms carry bits,
+// and that forms of the same operation carry different ones. Whether those bits
+// in that order are what a processor would actually accept has not been checked
+// and is not asserted.
+void check_fixed_bits()
+{
+    catalogue::Catalogue arm;
+    if (catalogue_for("AARCH64:LE:64:AppleSilicon", arm)) {
+        size_t known = 0;
+        for (const catalogue::Form &form : arm.all()) {
+            if (form.fixed_mask != 0)
+                ++known;
+        }
+        report(known > arm.size() - 5,
+               "nearly every form says which bits it insists on",
+               std::to_string(known) + " of " + std::to_string(arm.size()));
+
+        // What a form insists on has to be within what it insists about.
+        bool consistent = true;
+        for (const catalogue::Form &form : arm.all())
+            consistent = consistent && (form.fixed_bits & ~form.fixed_mask) == 0;
+        report(consistent, "and insists on nothing outside the bits it named",
+               "one insisted on a bit it had not named");
+    }
+
+    // Two forms of the same operation are two forms because they differ, and if
+    // they did not differ here there would be no telling them apart.
+    catalogue::Catalogue riscv;
+    if (catalogue_for("RISCV:LE:64:default", riscv)) {
+        const std::vector<const catalogue::Form *> adding =
+            riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2);
+        bool all_different = true;
+        for (size_t i = 0; i < adding.size(); ++i) {
+            for (size_t j = i + 1; j < adding.size(); ++j) {
+                if (adding[i]->fixed_mask == adding[j]->fixed_mask &&
+                    adding[i]->fixed_bits == adding[j]->fixed_bits)
+                    all_different = false;
+            }
+        }
+        report(adding.size() > 1 && all_different,
+               "two ways of adding on one processor are told apart by their bits",
+               all_different ? std::to_string(adding.size()) + " ways" : "two were identical");
+    }
+}
+
 } // namespace
 
 int main()
@@ -235,6 +285,7 @@ int main()
     check_what_a_processor_has_not_got();
     check_reading_twice();
     check_shapes();
+    check_fixed_bits();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

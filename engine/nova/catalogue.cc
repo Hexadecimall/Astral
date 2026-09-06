@@ -2,6 +2,8 @@
 
 #include "semantics.hh"
 #include "sleighbase.hh"
+#include "slghpattern.hh"
+#include "slghpatexpress.hh"
 #include "slghsymbol.hh"
 #include "specification.hh"
 
@@ -59,6 +61,66 @@ Form::Piece read_piece(const ghidra::VarnodeTpl *value)
     return piece;
 }
 
+// The bits a form always has, and how they are found.
+//
+// A form is chosen from a stream of bits by a tree: each node looks at a few
+// bits and goes to the child they name, and a form sits at the bottom. So the
+// bits a form insists on are every decision made on the way down to it, plus
+// whatever the pattern at the bottom still says.
+//
+// They are not on the constructor. A constructor's own pattern is built while a
+// specification is being compiled and is not carried in the result, so on a
+// loaded specification it is always absent - and the pattern at the bottom of
+// the tree holds only what was left to distinguish by then. Taking either alone
+// says a form insists on almost nothing, which would make every form look like
+// every other.
+struct Constraint {
+    uint64_t mask = 0;
+    uint64_t bits = 0;
+};
+
+void walk(const ghidra::DecisionNode *node, Constraint sofar,
+          std::map<const ghidra::Constructor *, Constraint> &found)
+{
+    if (node == nullptr)
+        return;
+
+    for (int i = 0; i < node->numPatterns(); ++i) {
+        const ghidra::Constructor *made = node->getPatternConstructor(i);
+        if (made == nullptr)
+            continue;
+        Constraint whole = sofar;
+        if (const ghidra::DisjointPattern *pattern = node->getPattern(i)) {
+            whole.mask |= pattern->getMask(0, 4, false);
+            whole.bits |= pattern->getValue(0, 4, false);
+        }
+        found.emplace(made, whole);
+    }
+
+    // A node deciding on context is deciding on what the processor already
+    // knew rather than on what is written, so it adds nothing to the bits an
+    // instruction has to have.
+    if (node->isContextDecision()) {
+        for (int i = 0; i < node->numChildren(); ++i)
+            walk(node->getChild(i), sofar, found);
+        return;
+    }
+
+    const int start = node->getStartBit();
+    const int size = node->getBitSize();
+    for (int i = 0; i < node->numChildren(); ++i) {
+        Constraint below = sofar;
+        // Going to the i-th child is what happens when those bits are i.
+        if (size > 0 && size < 64 && start >= 0 && start + size <= 64) {
+            const uint64_t mask = ((static_cast<uint64_t>(1) << size) - 1)
+                                  << static_cast<unsigned>(start);
+            below.mask |= mask;
+            below.bits |= (static_cast<uint64_t>(i) << static_cast<unsigned>(start)) & mask;
+        }
+        walk(node->getChild(i), below, found);
+    }
+}
+
 } // namespace
 
 bool Catalogue::read(const ir::Target &target, std::string &error)
@@ -85,6 +147,11 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         error = std::string("this specification has no ") + kRoot + " table to read";
         return false;
     }
+
+    // The patterns, taken off the tree that decides which constructor a stream
+    // of bits means, since a loaded specification carries them nowhere else.
+    std::map<const ghidra::Constructor *, Constraint> patterns;
+    walk(root->getDecisionTree(), Constraint(), patterns);
 
     for (int i = 0; i < root->getNumConstructors(); ++i) {
         ghidra::Constructor *made = root->getConstructor(i);
@@ -119,6 +186,11 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 form.reads.push_back(read_piece(only->getIn(input)));
         }
 
+        auto pattern = patterns.find(made);
+        if (pattern != patterns.end()) {
+            form.fixed_mask = pattern->second.mask;
+            form.fixed_bits = pattern->second.bits & pattern->second.mask;
+        }
         forms_.push_back(std::move(form));
     }
 

@@ -571,6 +571,23 @@ public:
   void orderPatterns(DecisionProperties &props);
   void encode(Encoder &encoder) const;
   void decode(Decoder &decoder,DecisionNode *par,SubtableSymbol *sub);
+
+  /// \brief Read the tree rather than only walk it while decoding
+  ///
+  /// The patterns that decide which constructor a stream of bits means are
+  /// held here, and reading them is what lets bits be written as well as
+  /// recognised: a pattern says which bits a constructor insists on. They are
+  /// only reachable through the decision tree once a compiled specification
+  /// has been loaded, because a constructor's own TokenPattern is built while
+  /// compiling one and is not carried in the result.
+  int4 getStartBit(void) const { return startbit; }			///< First bit this node decides on
+  int4 getBitSize(void) const { return bitsize; }			///< How many bits it decides on
+  bool isContextDecision(void) const { return contextdecision; }	///< Whether it decides on context rather than on the instruction
+  int4 numPatterns(void) const { return list.size(); }			///< Number of pattern/constructor pairs here
+  const DisjointPattern *getPattern(int4 i) const { return list[i].first; }	///< The i-th pattern
+  const Constructor *getPatternConstructor(int4 i) const { return list[i].second; }	///< What the i-th pattern means
+  int4 numChildren(void) const { return children.size(); }		///< Number of nodes below this one
+  const DecisionNode *getChild(int4 i) const { return children[i]; }	///< The i-th node below this one
 };
 
 class SubtableSymbol : public TripleSymbol {
@@ -588,6 +605,7 @@ public:
   void buildDecisionTree(DecisionProperties &props);
   TokenPattern *buildPattern(ostream &s);
   TokenPattern *getPattern(void) const { return pattern; }
+  const DecisionNode *getDecisionTree(void) const { return decisiontree; }	///< The tree that decides which constructor a stream of bits means
   int4 getNumConstructors(void) const { return construct.size(); }
   Constructor *getConstructor(uintm id) const { return construct[id]; }
   virtual Constructor *resolve(ParserWalker &walker) { return decisiontree->resolve(walker); }
