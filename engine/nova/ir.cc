@@ -8,6 +8,8 @@
 #include "translate.hh"
 
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -169,15 +171,59 @@ protected:
     }
 };
 
+// The specifications, kept once each.
+//
+// Loading one reads a compiled file and builds a translator out of it, which is
+// slow enough that doing it per function - let alone per call, which is where
+// asking about a convention happens - makes compiling a program of any size
+// absurd. They are read-only once built and are asked the same questions every
+// time, so one of each is kept and shared.
+//
+// This is deliberately not cleared when the library is shut down. What it holds
+// belongs to the specification rather than to any program, and a process that
+// shuts the library down and starts it again wants the same answers.
+std::mutex &specification_lock()
+{
+    static std::mutex lock;
+    return lock;
+}
+
+DescribingArchitecture *specification_for(const std::string &target, std::string &error)
+{
+    static std::map<std::string, std::unique_ptr<DescribingArchitecture>> kept;
+
+    std::lock_guard<std::mutex> holding(specification_lock());
+    auto already = kept.find(target);
+    if (already != kept.end())
+        return already->second.get();
+
+    std::ostringstream complaints;
+    try {
+        auto made = std::unique_ptr<DescribingArchitecture>(
+            new DescribingArchitecture(target, &complaints));
+        ghidra::DocumentStorage storage;
+        made->init(storage);
+        DescribingArchitecture *answer = made.get();
+        kept.emplace(target, std::move(made));
+        return answer;
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return nullptr;
+    } catch (ghidra::DecoderError &failure) {
+        error = failure.explain;
+        return nullptr;
+    }
+}
+
 } // namespace
 
 bool Target::read_specification(std::string &error)
 {
-    std::ostringstream complaints;
     try {
-        DescribingArchitecture architecture(language_id, &complaints);
-        ghidra::DocumentStorage storage;
-        architecture.init(storage);
+        DescribingArchitecture *held = specification_for(language_id, error);
+        if (held == nullptr)
+            return false;
+        DescribingArchitecture &architecture = *held;
 
         // How many bytes one address counts. A word-addressed processor counts
         // more than one, and nineteen of the specifications here do.
@@ -240,12 +286,12 @@ bool Target::calling_convention(const std::vector<int> &widths, int result_width
     parameters.clear();
     result = Storage();
 
-    std::ostringstream complaints;
     try {
-        DescribingArchitecture architecture(
-            compiler.empty() ? language_id : language_id + ":" + compiler, &complaints);
-        ghidra::DocumentStorage storage;
-        architecture.init(storage);
+        DescribingArchitecture *held = specification_for(
+            compiler.empty() ? language_id : language_id + ":" + compiler, error);
+        if (held == nullptr)
+            return false;
+        DescribingArchitecture &architecture = *held;
 
         ghidra::ProtoModel *model = architecture.defaultfp;
         if (model == nullptr) {
