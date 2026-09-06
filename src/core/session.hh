@@ -130,6 +130,8 @@ public:
     // Which back-end writes the readable listing: "nova" or "astral-c". An
     // unknown name is kept and handed to the engine, which refuses it there.
     void set_readable_language(const std::string &name);
+    // What it resolves to, which is the setting's default until one is set.
+    std::string readable_language() const;
     bool auto_naming() const { return auto_naming_; }
     // Hands one option command to the decompiler's option database. The
     // engine takes up to three parameters; which of them mean what is the
@@ -246,10 +248,11 @@ private:
     // walks the whole reachable call graph and never looks at the readable
     // form, so producing it there is work nobody asked for.
     bool want_readable_ = true;
-    // Which back-end writes the readable form. The pseudo-C listing is what
-    // --pseudo-c has always meant and is still the default; Nova is asked for
-    // by name, and any other registered name is passed through as given.
-    std::string readable_language_ = "astral-c";
+    // Which back-end writes the readable form, or empty to mean "whatever the
+    // readableLanguage setting defaults to". There is deliberately no default
+    // spelled here: the option table is the one place that decides, and a
+    // second copy of the answer is a second thing to keep in step.
+    std::string readable_language_;
     void analyse_function(void *funcdata, FunctionResult &out);
     // Puts the user's chosen names on this function's values and prints the
     // body again, so the names appear everywhere the values are used.

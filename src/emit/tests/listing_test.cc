@@ -76,11 +76,17 @@ std::string line_with(const std::string &text, const std::string &needle)
 
 // A line reading "<type> <name> = ..." - a declaration standing on the
 // statement that gives the value, rather than in a block of its own.
+// A line that both introduces a name and gives it a value. Nova says
+// `var name: type = value` and the notation before it said `type name = value`,
+// so either shape counts: what is being checked is that the declaration stands
+// where the value arrives, not which language said so.
 bool declares_and_assigns(const std::string &line)
 {
     size_t at = line.find_first_not_of(" \t");
     if (at == std::string::npos)
         return false;
+    const bool nova = line.compare(at, 4, "var ") == 0 || line.compare(at, 4, "val ") == 0
+                      || line.compare(at, 6, "stack ") == 0;
     int words = 0;
     while (at < line.size() && line[at] != '=') {
         const size_t end = line.find_first_of(" \t", at);
@@ -91,7 +97,8 @@ bool declares_and_assigns(const std::string &line)
         if (at == std::string::npos)
             return false;
     }
-    return words == 2 && at < line.size() && line[at] == '=' && line[at + 1] != '=';
+    const int wanted = nova ? 3 : 2;
+    return words == wanted && at < line.size() && line[at] == '=' && line[at + 1] != '=';
 }
 
 // ------------------------------------------------------------------ tests

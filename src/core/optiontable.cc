@@ -124,7 +124,7 @@ std::vector<OptionDescriptor> build()
 
     const std::vector<std::string> braces = {"same", "next", "skip"};
     t.push_back(engineChoice("braceformat.function", "braceformat", "function", "Output",
-                             "Brace after a function", "skip", braces, false,
+                             "Brace after a function", "same", braces, false,
                              "Where a function body's opening brace goes: on the same line, "
                              "the next line, or the line after that."));
     t.push_back(engineChoice("braceformat.ifelse", "braceformat", "ifelse", "Output",

@@ -63,8 +63,11 @@ void PrintNova::resetDefaults(void)
   setNULLPrinting(true);
   // Nova's own keyword, not C's macro.
   nullToken = "null";
-  // Every brace in Nova opens on the line that opened the block. A function
-  // whose brace sits alone on the next line is C's habit, not Nova's.
+  // Every brace in Nova opens on the line that opened the block. This is the
+  // printer's default, not a decision that outranks the reader: the option
+  // commands are replayed after a printer is built, so braceformat still
+  // moves them. The settings table carries the same default, so the dialog
+  // and the listing never disagree about where a brace starts out.
   setBraceFormatFunction(Emit::same_line);
   setBraceFormatIfElse(Emit::same_line);
   setBraceFormatLoop(Emit::same_line);

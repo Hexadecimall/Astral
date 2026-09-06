@@ -165,12 +165,22 @@ void check_options_reach_the_engine()
     expect(whole_program(narrow) != whole_program(wide),
            "the line width reaches the decompiler");
 
+    // A value the setting does not already stand at, so a difference in the
+    // output is the setting arriving rather than a coincidence. The default
+    // is read rather than assumed, since it is allowed to change.
     astral::Program braces = open();
-    braces.set_setting("braceformat.function", "same");
+    const std::string standing = braces.setting("braceformat.function");
+    const char *other = standing == "next" ? "skip" : "next";
+    braces.set_setting("braceformat.function", other);
     const std::string moved = whole_program(braces);
     expect(moved != whole_program(wide), "the brace style reaches the decompiler");
-    expect(moved.find(") {") != std::string::npos,
-           "a function's brace is on the line its signature is");
+    // A brace of its own on a line can only be the function's: every other
+    // block in this subject opens on the line that opened it.
+    const std::string standard = whole_program(wide);
+    expect(standard.find("\n{\n") == std::string::npos,
+           "a function's brace starts out on the line its signature is");
+    expect(moved.find("\n{\n") != std::string::npos,
+           "and the setting moves it onto a line of its own");
 
     astral::Program plain = open();
     plain.set_setting("nullprinting", "on");

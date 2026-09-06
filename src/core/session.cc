@@ -1,6 +1,7 @@
 // Binds a loaded BinaryImage to Ghidra's decompiler core: a LoadImage over the
 // image, a SleighArchitecture that uses it, and the analysis entry points.
 #include "session.hh"
+#include "optiontable.hh"
 #include "format_finish.hh"
 #include "macho_sign.hh"
 
@@ -1506,6 +1507,19 @@ void Session::set_readable_language(const std::string &name)
     readable_language_ = name == "pseudo-c" ? "astral-c" : name;
 }
 
+// The back-end to print the readable form with. Nothing was asked for until
+// something asks, so the answer is the setting's own default, read from the
+// one table that holds it.
+std::string Session::readable_language() const
+{
+    if (!readable_language_.empty())
+        return readable_language_;
+    const OptionDescriptor *descriptor = findOption("readableLanguage");
+    if (descriptor == nullptr)
+        return "nova";
+    return descriptor->fallback == "pseudo-c" ? "astral-c" : descriptor->fallback;
+}
+
 // Prints one function twice: once with the c-language printer, which is what
 // the compilable path is built from, and once with the readable one. Both come
 // from the same decompiled form, so the two never disagree about the code.
@@ -1527,7 +1541,8 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
     const std::string chosen = arch_->print->getName();
     std::ostringstream pretty;
     try {
-        arch_->setPrintLanguage(readable_language_);
+        const std::string language = readable_language();
+        arch_->setPrintLanguage(language);
         // A printer just built carries the decompiler's defaults, not what
         // this session was configured with.
         if (!option_commands_.empty())
@@ -1537,7 +1552,7 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
         // The layout pass names labels in order and moves declarations down to
         // where the value is first given. Both are true of Nova as well, and
         // Nova declarations are the ones it was taught to recognise.
-        readable = readable_listing(pretty.str(), readable_language_ == "nova");
+        readable = readable_listing(pretty.str(), language == "nova");
     } catch (ghidra::LowlevelError &) {
         // Nothing readable came out, so the plain listing stands. The listing
         // the rest of the library uses was already taken.
