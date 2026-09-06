@@ -1,6 +1,8 @@
 #include "ir.hh"
 
 #include "architecture.hh"
+#include "fspec.hh"
+#include "type.hh"
 #include "loadimage.hh"
 #include "sleigh_arch.hh"
 #include "translate.hh"
@@ -85,6 +87,14 @@ bool Target::from_language_id(const std::string &language_id, Target &target, st
 
     target = Target();
     target.language_id = found->getId();
+    // A five-field id names a compiler as well as a language, and which
+    // compiler it is decides how arguments are passed. Dropping it would make
+    // every x86-64 call follow whichever convention happened to be default.
+    {
+        const std::vector<std::string> asked = fields_of(language_id);
+        if (asked.size() >= 5)
+            target.compiler = asked[4];
+    }
     target.address_bits = found->getSize();
     read_endianness(parts.size() > 1 ? parts[1] : std::string(), found->isBigEndian(),
                     found->isInstructionBigEndian(), target.instruction_big_endian,
@@ -197,6 +207,100 @@ bool Target::read_specification(std::string &error)
         }
 
         spaces_read = true;
+        return true;
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return false;
+    } catch (ghidra::DecoderError &failure) {
+        error = failure.explain;
+        return false;
+    }
+}
+
+namespace {
+
+// The name a register goes by, worked out from where it is, because what comes
+// back from assigning parameters is a place rather than a name.
+std::string register_named_at(const ghidra::Translate *translate, const ghidra::Address &address,
+                              int size)
+{
+    try {
+        return translate->getRegisterName(address.getSpace(), address.getOffset(), size);
+    } catch (ghidra::LowlevelError &) {
+        return std::string();
+    }
+}
+
+} // namespace
+
+bool Target::calling_convention(const std::vector<int> &widths, int result_width,
+                                std::vector<Storage> &parameters, Storage &result,
+                                std::string &error) const
+{
+    parameters.clear();
+    result = Storage();
+
+    std::ostringstream complaints;
+    try {
+        DescribingArchitecture architecture(
+            compiler.empty() ? language_id : language_id + ":" + compiler, &complaints);
+        ghidra::DocumentStorage storage;
+        architecture.init(storage);
+
+        ghidra::ProtoModel *model = architecture.defaultfp;
+        if (model == nullptr) {
+            error = "this processor's specification says nothing about how a call is made";
+            return false;
+        }
+
+        // The prototype is described in the decompiler's own types, so each
+        // width becomes an integer of that many bytes. What is being asked is
+        // where a value of this size goes, and the size is what decides it.
+        ghidra::PrototypePieces proto;
+        proto.model = model;
+        proto.name = "asked";
+        proto.outtype = result_width > 0
+                            ? architecture.types->getBase(result_width, ghidra::TYPE_INT)
+                            : architecture.types->getTypeVoid();
+        proto.firstVarArgSlot = -1;
+        for (int width : widths) {
+            proto.intypes.push_back(
+                architecture.types->getBase(width > 0 ? width : 1, ghidra::TYPE_INT));
+            proto.innames.push_back(std::string());
+        }
+
+        std::vector<ghidra::ParameterPieces> places;
+        model->assignParameterStorage(proto, places, true);
+
+        // What comes back is the answer first and the arguments after it.
+        ghidra::AddrSpace *stack = model->getSpacebase();
+        auto as_storage = [&](const ghidra::ParameterPieces &piece, int size) {
+            Storage where;
+            if (piece.addr.isInvalid())
+                return where;
+            if (stack != nullptr && piece.addr.getSpace() == stack) {
+                // On the stack, which is a frame offset like any other.
+                where.kind = Storage::Kind::Frame;
+                where.offset = static_cast<int64_t>(piece.addr.getOffset());
+                return where;
+            }
+            const std::string name = register_named_at(architecture.translate, piece.addr, size);
+            if (name.empty())
+                return where;
+            where.kind = Storage::Kind::Register;
+            where.register_name = name;
+            return where;
+        };
+
+        for (size_t i = 0; i < places.size(); ++i) {
+            const int size = i == 0 ? result_width
+                                    : (i - 1 < widths.size() ? widths[i - 1] : 0);
+            const Storage where = as_storage(places[i], size > 0 ? size : 1);
+            if (i == 0)
+                result = where;
+            else
+                parameters.push_back(where);
+        }
         return true;
     } catch (ghidra::LowlevelError &failure) {
         error = failure.explain;

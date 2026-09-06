@@ -71,6 +71,13 @@ enum class Space {
 struct Target {
     std::string language_id;  // "AARCH64:LE:64:AppleSilicon", entire and exact
 
+    // Which compiler's conventions to follow, when the id said. The same
+    // instruction set passes arguments one way under one compiler and another
+    // way under another - x86-64 is the loud example - so this is not a detail
+    // that can be dropped when an id is read. Empty means the specification's
+    // own default.
+    std::string compiler;
+
     int address_bits = 0;   // 16 on a z80, 24 on a PIC-24, 32, 64
     int pointer_bytes = 0;  // four on a sixty-four bit machine, under ilp32
 
@@ -143,6 +150,23 @@ struct Target {
     // Where the named register sits, or nothing when the specification has no
     // register by that name or has not been read.
     const RegisterPlace *register_place(const std::string &name) const;
+
+    // Where a call puts its arguments and its answer, according to this
+    // processor's own compiler specification.
+    //
+    // This is the other half of what a pin is. A pinned parameter says where a
+    // value already is because a recovered function put it there; this says
+    // where one goes when nothing has said. Both end up as the same kind of
+    // storage, and neither is guessed: the specification that describes the
+    // calling convention is the one shipped with the processor, so a machine
+    // nobody has written support for still passes arguments correctly.
+    //
+    // `widths` is how many bytes each argument takes and `result_width` how
+    // many the answer does; zero means it answers with nothing. Returns false
+    // and says why when the specification cannot be read.
+    bool calling_convention(const std::vector<int> &widths, int result_width,
+                            std::vector<Storage> &parameters, Storage &result,
+                            std::string &error) const;
 };
 
 // ------------------------------------------------------------------- values

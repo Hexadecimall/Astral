@@ -464,6 +464,74 @@ void check_building()
     }
 }
 
+
+// Where a call puts its arguments, according to each processor's own compiler
+// specification rather than anything written here.
+void check_calling_conventions()
+{
+    auto places = [](const std::string &language_id, std::string &joined) {
+        ir::Target target;
+        std::string error;
+        if (!ir::Target::from_language_id(language_id, target, error)) {
+            joined = error;
+            return false;
+        }
+        std::vector<Storage> parameters;
+        Storage result;
+        if (!target.calling_convention({4, 4, 4, 8}, 4, parameters, result, error)) {
+            joined = error;
+            return false;
+        }
+        joined = result.register_name;
+        for (const Storage &where : parameters) {
+            joined += " ";
+            joined += where.kind == Storage::Kind::Frame ? "stack" : where.register_name;
+        }
+        return true;
+    };
+
+    struct Case {
+        const char *language;
+        const char *wanted;
+        const char *what;
+    };
+    const Case cases[] = {
+        {"AARCH64:LE:64:AppleSilicon", "w0 w0 w1 w2 x3",
+         "AARCH64 passes in w0 upward and answers in w0"},
+        {"RISCV:LE:64:default", "a0 a0 a1 a2 a3", "RISC-V passes in a0 upward"},
+        // Three registers and then the stack, because the fourth here is eight
+        // bytes and does not fit where the third went.
+        {"ARM:LE:32:v8", "r0 r0 r1 r2 stack", "ARM passes three and then uses the stack"},
+        {"MIPS:BE:32:default", "v0 a0 a1 a2 stack", "MIPS answers in v0 and passes in a0 upward"},
+        // Everything on the stack, which is what a thirty-two bit x86 does.
+        {"x86:LE:32:default", "EAX stack stack stack stack",
+         "thirty-two bit x86 passes everything on the stack"},
+    };
+
+    for (const Case &one : cases) {
+        std::string joined;
+        const bool read = places(one.language, joined);
+        report(read && joined == one.wanted, one.what, read ? "got: " + joined : joined);
+    }
+
+    // The same instruction set, two conventions, and the id says which. This is
+    // the reason the compiler is not dropped when an id is read: on x86-64 the
+    // two disagree about every argument.
+    {
+        std::string with_gcc;
+        std::string with_windows;
+        const bool first = places("x86:LE:64:default:gcc", with_gcc);
+        const bool second = places("x86:LE:64:default:windows", with_windows);
+        report(first && with_gcc == "EAX EDI ESI EDX RCX",
+               "x86-64 under one compiler passes in EDI upward", first ? with_gcc : with_gcc);
+        report(second && with_windows == "EAX ECX EDX R8D R9",
+               "and under another passes in ECX upward", second ? with_windows : with_windows);
+        report(first && second && with_gcc != with_windows,
+               "which is to say the compiler in the id decides, and is not dropped",
+               with_gcc + " against " + with_windows);
+    }
+}
+
 } // namespace
 
 int main()
@@ -481,6 +549,7 @@ int main()
     check_widths();
     check_writing();
     check_building();
+    check_calling_conventions();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
