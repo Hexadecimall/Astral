@@ -1,6 +1,41 @@
 cmake_minimum_required(VERSION 3.20)
 project(Astral VERSION 2.3.0 LANGUAGES CXX)
 
+# ------------------------------------------------------- paths in the output
+#
+# A compiler records where a file was when it compiled it - Rust for the panic
+# messages, C and C++ for the debug information - and where it was is the build
+# machine's home directory. A binary that names the machine that built it is a
+# binary that says more about its author than about itself, and there is no
+# reason for it to.
+#
+# Both halves are rewritten, not only the Rust one. A release build carries no
+# debug information and so leaked nothing, which is exactly why this went
+# unnoticed: a Debug or RelWithDebInfo build of the C++ side wrote the path in
+# eight hundred times.
+#
+# -ffile-prefix-map covers the debug info, __FILE__ and anything else the
+# compiler stamps a path into. It is a compiler flag, not a linker one, so it
+# has to reach every target that compiles a source file here.
+foreach(_root ${CMAKE_CURRENT_SOURCE_DIR} $ENV{HOME})
+    if(_root)
+        if(_root STREQUAL ${CMAKE_CURRENT_SOURCE_DIR})
+            set(_as /astral)
+        else()
+            set(_as /home)
+        endif()
+        # Not every compiler has it; one that has not gets nothing rather than
+        # a build that will not run.
+        include(CheckCXXCompilerFlag)
+        string(MAKE_C_IDENTIFIER "has_file_prefix_map_${_as}" _probe)
+        check_cxx_compiler_flag("-ffile-prefix-map=${_root}=${_as}" ${_probe})
+        if(${_probe})
+            add_compile_options("-ffile-prefix-map=${_root}=${_as}")
+        endif()
+    endif()
+endforeach()
+
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -133,6 +168,7 @@ set(ASTRAL_LIB_SRC
     engine/nova/lower.cc
     engine/nova/lower_ir.cc
     engine/nova/pcode.cc
+    engine/nova/homes.cc
     engine/nova/select.cc
     engine/nova/nova.cc)
 
@@ -313,7 +349,7 @@ target_include_directories(astral_x86_test PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS}
 target_link_libraries(astral_x86_test PRIVATE astral_static)
 add_test(NAME assembler_x86 COMMAND astral_x86_test)
 
-foreach(suite lexer parser nova class ir lower_ir pcode catalogue select)
+foreach(suite lexer parser nova class ir lower_ir pcode catalogue homes select)
     add_executable(astral_nova_${suite}_test engine/nova/tests/${suite}_test.cc)
     # Nova's directory goes first: its headers share names with the C
     # compiler's, and a bare `#include "lexer.hh"` has to mean Nova's.

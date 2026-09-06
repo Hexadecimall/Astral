@@ -217,6 +217,23 @@ public:
                           std::vector<uint8_t> &bytes, std::vector<std::string> &used,
                           std::string &error);
 
+    // One place a value goes: a register under any of its names, or a number.
+    //
+    // Most instructions take both. An add of a register and a number is a
+    // different form from an add of two registers, and the number goes into a
+    // field of its own rather than into a register slot, so what is asked for
+    // has to be able to say which it is.
+    struct Wanted {
+        std::vector<std::string> names;  // a register, under any of these
+        bool is_number = false;
+        uint64_t number = 0;
+    };
+
+    // Writes an instruction whose places may be registers or numbers.
+    static bool write_mixed(const Form &form, const std::vector<Wanted> &places,
+                            std::vector<uint8_t> &bytes, std::vector<std::string> &used,
+                            std::string &error);
+
 private:
     std::vector<Form> forms_;
     std::map<ghidra::OpCode, std::vector<const Form *>> by_operation_;

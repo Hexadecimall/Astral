@@ -494,6 +494,19 @@ bool Catalogue::write_any(const Form &form,
                           std::vector<uint8_t> &bytes, std::vector<std::string> &used,
                           std::string &error)
 {
+    std::vector<Wanted> places;
+    for (const std::vector<std::string> &names : registers) {
+        Wanted one;
+        one.names = names;
+        places.push_back(std::move(one));
+    }
+    return write_mixed(form, places, bytes, used, error);
+}
+
+bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
+                            std::vector<uint8_t> &bytes, std::vector<std::string> &used,
+                            std::string &error)
+{
     used.clear();
     bytes.clear();
     if (form.shortest <= 0 || form.shortest > 8) {
@@ -508,14 +521,41 @@ bool Catalogue::write_any(const Form &form,
     uint64_t word = form.fixed_bits;
     size_t next = 0;
     for (const Form::Slot &slot : form.slots) {
+        if (next >= places.size())
+            break;
+
+        // A number goes in a field the form left open for one, and a register
+        // in a slot that names registers. A slot is one or the other, so the
+        // wrong kind of value skips it rather than being forced in.
+        if (places[next].is_number) {
+            if (slot.is_register() || !slot.is_placed())
+                continue;
+            const int width = slot.last_bit - slot.first_bit + 1;
+            const int shift = form.shortest * 8 - 1 - slot.last_bit;
+            if (width <= 0 || width >= 64 || shift < 0)
+                continue;
+            const uint64_t room = ((static_cast<uint64_t>(1) << width) - 1)
+                                  << static_cast<unsigned>(shift);
+            const uint64_t sitting = (places[next].number << static_cast<unsigned>(shift)) & room;
+            // A number too big for the field is not this instruction's number.
+            if ((sitting >> static_cast<unsigned>(shift)) != places[next].number) {
+                error = "this instruction has no room for a number that large";
+                return false;
+            }
+            const uint64_t may_touch = ~form.fixed_mask;
+            word = (word & ~(room & may_touch)) | (sitting & may_touch);
+            word = (word & ~form.fixed_mask) | form.fixed_bits;
+            used.push_back(std::to_string(places[next].number));
+            ++next;
+            continue;
+        }
+
         if (!slot.is_register())
             continue;
-        if (next >= registers.size())
-            break;
 
         // Whichever of this register's names the slot knows.
         auto found = slot.registers.end();
-        for (const std::string &name : registers[next]) {
+        for (const std::string &name : places[next].names) {
             found = slot.registers.find(name);
             if (found != slot.registers.end()) {
                 used.push_back(name);
@@ -524,7 +564,8 @@ bool Catalogue::write_any(const Form &form,
         }
         if (found == slot.registers.end()) {
             error = "this instruction cannot put " +
-                    (registers[next].empty() ? std::string("that") : registers[next].front()) +
+                    (places[next].names.empty() ? std::string("that")
+                                                : places[next].names.front()) +
                     " where it was asked to";
             return false;
         }
@@ -547,8 +588,8 @@ bool Catalogue::write_any(const Form &form,
         word = (word & ~form.fixed_mask) | form.fixed_bits;
         ++next;
     }
-    if (next < registers.size()) {
-        error = "this instruction has fewer places for registers than it was given";
+    if (next < places.size()) {
+        error = "this instruction has fewer places to fill than it was given";
         return false;
     }
 

@@ -67,15 +67,26 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // What each value could be called. A place with several names is
             // one register, and a form knows it by whichever name that form was
             // written with.
-            std::vector<std::vector<std::string>> called_any;
+            std::vector<catalogue::Catalogue::Wanted> called_any;
             bool nameable = true;
             auto want = [&](const pcode::Varnode &node, const char *reading) {
                 if (!nameable)
                     return;
+                // A number is written into the instruction rather than put
+                // somewhere first, which is what an instruction taking one is
+                // for.
+                if (node.is_constant()) {
+                    catalogue::Catalogue::Wanted number;
+                    number.is_number = true;
+                    number.number = node.offset;
+                    called_any.push_back(std::move(number));
+                    return;
+                }
                 if (node.where != pcode::Where::Register) {
                     problems.push_back(std::string("a ") + called + " " + reading + " " +
                                        where_it_is(node) +
-                                       ", and only a register can be named in an instruction");
+                                       ", and only a register or a number can be written into "
+                                       "an instruction");
                     nameable = false;
                     return;
                 }
@@ -86,7 +97,9 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     nameable = false;
                     return;
                 }
-                called_any.push_back(std::move(names));
+                catalogue::Catalogue::Wanted where;
+                where.names = std::move(names);
+                called_any.push_back(std::move(where));
             };
 
             if (operation.writes)
@@ -128,9 +141,10 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // one of the things it read, the two-register spelling of the same
             // thing. Each place is offered under every name it goes by and the
             // slot uses the one it knows.
-            std::vector<std::vector<std::vector<std::string>>> ways;
+            std::vector<std::vector<catalogue::Catalogue::Wanted>> ways;
             ways.push_back(called_any);
             if (operation.writes && called_any.size() == 3 &&
+                operation.output.where == operation.inputs[0].where &&
                 operation.output.offset == operation.inputs[0].offset)
                 ways.push_back({called_any[0], called_any[2]});
 
@@ -144,8 +158,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 std::string refused;
                 std::vector<std::string> used;
                 bool made = false;
-                for (const std::vector<std::vector<std::string>> &way : ways) {
-                    if (catalogue::Catalogue::write_any(*form, way, bytes, used, refused)) {
+                for (const std::vector<catalogue::Catalogue::Wanted> &way : ways) {
+                    if (catalogue::Catalogue::write_mixed(*form, way, bytes, used, refused)) {
                         made = true;
                         break;
                     }
