@@ -131,6 +131,11 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
         options.place_text = [&space](const std::string &text) -> std::optional<uint64_t> {
             return space.place(QByteArray::fromStdString(text));
         };
+        // A PE follows Windows' calling convention, whatever machine it is
+        // for. Nothing else about the program says this, so the format does.
+        options.abi = document_->formatName() == QStringLiteral("PE")
+                          ? engine::compiler::Abi::Microsoft
+                          : engine::compiler::Abi::SystemV;
         return options;
     };
 

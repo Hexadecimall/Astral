@@ -31,6 +31,14 @@ struct Environment {
     std::function<std::optional<uint64_t>(const std::string &)> address_of_text;
 };
 
+// Which set of rules a call follows. The instruction set does not decide this:
+// the same x86-64 machine passes arguments one way under Windows and another
+// everywhere else, so the format a program is in is what settles it.
+enum class Abi {
+    SystemV,    // Linux, macOS, the BSDs
+    Microsoft,  // Windows, and so every PE
+};
+
 struct Diagnostic {
     int line = 0;
     int column = 0;
@@ -70,6 +78,9 @@ struct Options {
     // can be reduced to the bytes that actually differ. Empty means emit the
     // whole function.
     std::vector<uint8_t> existing;
+    // Which calling convention the generated code has to follow. A PE is
+    // Microsoft's; everything else is the common one.
+    Abi abi = Abi::SystemV;
     // Rewrite a literal in place when that is the only thing that changed,
     // rather than regenerating the function around it. Only ever done when
     // the new value fits where the old one sat.

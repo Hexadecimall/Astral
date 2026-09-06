@@ -1529,11 +1529,11 @@ void Arm64::return_nothing()
 
 } // namespace
 
-std::unique_ptr<Machine> machine_for(assembler::Target target)
+std::unique_ptr<Machine> machine_for(assembler::Target target, Abi abi)
 {
     if (target == assembler::Target::Arm64)
         return std::unique_ptr<Machine>(new Arm64());
-    return machine_for_x86(target);
+    return machine_for_x86(target, abi);
 }
 
 } // namespace compiler

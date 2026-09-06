@@ -68,13 +68,30 @@ const char *size_word(int width)
     }
 }
 
-// The registers arguments arrive in, in order, under the convention every
-// system but Windows uses.
-const char *const kArgumentRegisters[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-const int kArgumentRegisterCount = 6;
+// What a call looks like, which is the whole of the difference between the two
+// conventions this machine runs under.
+struct CallRules {
+    const char *const *argument_registers;
+    int argument_register_count;
+    // Windows makes the caller set aside room for the register arguments as
+    // well, above anything passed on the stack, whether or not it is used.
+    uint64_t shadow_bytes;
+};
+
+const char *const kSystemVArguments[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+const char *const kMicrosoftArguments[] = {"rcx", "rdx", "r8", "r9"};
+
+CallRules rules_for(Abi abi)
+{
+    if (abi == Abi::Microsoft)
+        return CallRules{kMicrosoftArguments, 4, 32};
+    return CallRules{kSystemVArguments, 6, 0};
+}
 
 class X86_64 : public Machine {
 public:
+    explicit X86_64(Abi abi) : rules_(rules_for(abi)), abi_(abi) {}
+
     int slot_size() const override { return 8; }
     uint64_t frame_alignment() const override { return 16; }
     // The call that reached here pushed a return address, so the frame is
@@ -110,6 +127,9 @@ public:
     void return_nothing() override;
 
 private:
+    CallRules rules_;
+    Abi abi_ = Abi::SystemV;
+
     void say_line(const std::string &text) { out_->instruction(text); }
     int64_t slot_offset(int index) const { return eval_base_ + int64_t(index) * 8; }
     // How the slot is written as an address.
@@ -135,10 +155,10 @@ uint64_t X86_64::outgoing_bytes(const CallSite &site) const
     // Arguments past the sixth are handed over on the stack, and the machine
     // wants the stack aligned when the call is made.
     const size_t count = site.types.size();
-    if (count <= static_cast<size_t>(kArgumentRegisterCount))
-        return 0;
-    const uint64_t extra = (count - kArgumentRegisterCount) * 8;
-    return (extra + 15) / 16 * 16;
+    uint64_t extra = 0;
+    if (count > static_cast<size_t>(rules_.argument_register_count))
+        extra = (count - rules_.argument_register_count) * 8;
+    return (extra + rules_.shadow_bytes + 15) / 16 * 16;
 }
 
 void X86_64::constant(const std::string &into, uint64_t value)
@@ -172,15 +192,16 @@ void X86_64::spill_parameters(const std::vector<Parameter> &parameters)
     // what arrived above the frame is copied down to one.
     int in_register = 0;
     // The return address sits at the top of what the caller left, and stack
-    // arguments start just above it.
-    uint64_t from_caller = total() + 8;
+    // arguments start just above it. Under Windows the caller also set aside
+    // room for the register arguments, which sits in between.
+    uint64_t from_caller = total() + 8 + rules_.shadow_bytes;
     for (const Parameter &parameter : parameters) {
         const uint64_t size = TypeStore::size_of(parameter.type);
         const int width = size == 1 || size == 2 || size == 4 ? static_cast<int>(size) : 8;
         const std::string place =
             "[rsp+" + hex(static_cast<uint64_t>(parameter.frame_offset)) + "]";
-        if (in_register < kArgumentRegisterCount) {
-            const char *source = kArgumentRegisters[in_register++];
+        if (in_register < rules_.argument_register_count) {
+            const char *source = rules_.argument_registers[in_register++];
             // The whole slot is written so nothing of an earlier value is left
             // in the bytes this one does not fill.
             if (width == 8) {
@@ -447,17 +468,18 @@ void X86_64::call(int depth, const CallSite &site)
     // written to the bottom of the frame, where the callee looks for them.
     for (size_t i = 0; i < count; ++i) {
         const int index = first + static_cast<int>(i);
-        if (i < static_cast<size_t>(kArgumentRegisterCount)) {
-            load(kArgumentRegisters[i], index);
+        if (i < static_cast<size_t>(rules_.argument_register_count)) {
+            load(rules_.argument_registers[i], index);
             continue;
         }
         load("rax", index);
-        const uint64_t at = (i - kArgumentRegisterCount) * 8;
+        const uint64_t at = rules_.shadow_bytes + (i - rules_.argument_register_count) * 8;
         say_line("mov [rsp+" + hex(at) + "], rax");
     }
-    if (site.variadic)
-        // A variadic callee reads how many arguments came in vector registers
-        // out of al, and none of them did.
+    // A variadic callee under the common convention reads how many arguments
+    // came in vector registers out of al, and none of them did. Windows has no
+    // such rule.
+    if (site.variadic && abi_ != Abi::Microsoft)
         say_line("mov eax, 0x0");
 
     if (site.through_pointer) {
@@ -483,12 +505,287 @@ void X86_64::return_nothing()
     say_line("jmp %" + leave_ + "%");
 }
 
+// ------------------------------------------------------------------ i386
+//
+// The same shape as above with the machine's own width taken away: every
+// argument arrives on the stack, every value is four bytes, and the answer
+// goes back in eax. What a 32-bit machine cannot do is work on eight bytes at
+// once, so that is refused rather than written wrongly.
+class X86 : public Machine {
+public:
+    int slot_size() const override { return 4; }
+    uint64_t frame_alignment() const override { return 16; }
+    // The call that reached here pushed four bytes, and the convention wants
+    // the stack aligned to sixteen at the next one. Twelve puts it back.
+    uint64_t reserved_bytes() const override { return 12; }
+    uint64_t outgoing_bytes(const CallSite &site) const override
+    {
+        return (site.types.size() * 4 + 15) / 16 * 16;
+    }
+
+    void prologue() override
+    {
+        if (total() > 0)
+            say_line("sub esp, " + hex(total()));
+    }
+    void epilogue() override
+    {
+        if (total() > 0)
+            say_line("add esp, " + hex(total()));
+        say_line("ret");
+        out_->tighten();
+    }
+
+    void spill_parameters(const std::vector<Parameter> &parameters) override
+    {
+        // Everything arrived above the frame, in order, four bytes each.
+        uint64_t from_caller = total() + 4;
+        for (const Parameter &parameter : parameters) {
+            if (TypeStore::size_of(parameter.type) > 4) {
+                say("a value of more than four bytes cannot be passed in 32-bit code yet");
+                return;
+            }
+            say_line("mov eax, [esp+" + hex(from_caller) + "]");
+            say_line("mov [esp+" + hex(static_cast<uint64_t>(parameter.frame_offset)) + "], eax");
+            from_caller += 4;
+        }
+    }
+
+    void push_constant(int depth, uint64_t value) override
+    {
+        say_line("mov dword ptr " + slot(depth) + ", " + hex(value & 0xffffffffu));
+    }
+    void push_frame_address(int depth, int64_t offset) override
+    {
+        say_line("lea eax, [esp+" + hex(static_cast<uint64_t>(offset)) + "]");
+        store(depth, "eax");
+    }
+    void push_absolute(int depth, uint64_t address) override
+    {
+        say_line("mov eax, " + hex(address & 0xffffffffu));
+        store(depth, "eax");
+    }
+    void duplicate(int depth) override
+    {
+        load("eax", depth - 1);
+        store(depth, "eax");
+    }
+    void move_slot(int to, int from) override
+    {
+        if (to == from)
+            return;
+        load("eax", from);
+        store(to, "eax");
+    }
+    void swap_slots(int first, int second) override
+    {
+        if (first == second)
+            return;
+        load("eax", first);
+        load("ecx", second);
+        store(first, "ecx");
+        store(second, "eax");
+    }
+
+    void load_indirect(int depth, const Operation &op) override
+    {
+        const int index = depth - 1;
+        if (!fits(op.width))
+            return;
+        load("ecx", index);
+        if (op.width == 4)
+            say_line("mov eax, dword ptr [ecx]");
+        else
+            say_line(std::string(op.is_signed ? "movsx" : "movzx") + " eax, " +
+                     size_word(op.width) + " ptr [ecx]");
+        store(index, "eax");
+    }
+    void store_indirect(int depth, const Operation &op) override
+    {
+        if (!fits(op.width))
+            return;
+        const int value_index = depth - 1;
+        const int address_index = depth - 2;
+        load("eax", value_index);
+        load("ecx", address_index);
+        say_line("mov " + std::string(size_word(op.width)) + " ptr [ecx], " +
+                 reg("rax", op.width * 8));
+        store(address_index, "eax");
+    }
+
+    void unary(int depth, UnaryOp what, const Operation &op) override
+    {
+        (void)op;
+        const int index = depth - 1;
+        load("eax", index);
+        switch (what) {
+        case UnaryOp::Minus: say_line("neg eax"); break;
+        case UnaryOp::BitNot: say_line("not eax"); break;
+        case UnaryOp::Not:
+            say_line("test eax, eax");
+            say_line("sete al");
+            say_line("movzx eax, al");
+            break;
+        case UnaryOp::Plus: break;
+        default:
+            say("that operation cannot be written yet");
+            return;
+        }
+        store(index, "eax");
+    }
+
+    void binary(int depth, BinaryOp what, const Operation &op) override
+    {
+        if (!fits(op.width))
+            return;
+        const int right = depth - 1;
+        const int left = depth - 2;
+        load("eax", left);
+        load("ecx", right);
+        auto compare_into = [&](const char *set) {
+            say_line("cmp eax, ecx");
+            say_line(std::string("set") + set + " al");
+            say_line("movzx eax, al");
+        };
+        switch (what) {
+        case BinaryOp::Add: say_line("add eax, ecx"); break;
+        case BinaryOp::Subtract: say_line("sub eax, ecx"); break;
+        case BinaryOp::Multiply: say_line("imul eax, ecx"); break;
+        case BinaryOp::BitAnd: say_line("and eax, ecx"); break;
+        case BinaryOp::BitOr: say_line("or eax, ecx"); break;
+        case BinaryOp::BitXor: say_line("xor eax, ecx"); break;
+        case BinaryOp::Divide:
+        case BinaryOp::Modulo:
+            if (op.is_signed) {
+                say_line("cdq");
+                say_line("idiv ecx");
+            } else {
+                say_line("xor edx, edx");
+                say_line("div ecx");
+            }
+            if (what == BinaryOp::Modulo)
+                say_line("mov eax, edx");
+            break;
+        case BinaryOp::ShiftLeft: say_line("shl eax, cl"); break;
+        case BinaryOp::ShiftRight: say_line(op.is_signed ? "sar eax, cl" : "shr eax, cl"); break;
+        case BinaryOp::Less: compare_into(op.is_signed ? "l" : "b"); break;
+        case BinaryOp::LessEqual: compare_into(op.is_signed ? "le" : "be"); break;
+        case BinaryOp::Greater: compare_into(op.is_signed ? "g" : "a"); break;
+        case BinaryOp::GreaterEqual: compare_into(op.is_signed ? "ge" : "ae"); break;
+        case BinaryOp::Equal: compare_into("e"); break;
+        case BinaryOp::NotEqual: compare_into("ne"); break;
+        case BinaryOp::LogicalAnd:
+        case BinaryOp::LogicalOr:
+            say_line("test eax, eax");
+            say_line("setne al");
+            say_line("movzx eax, al");
+            say_line("test ecx, ecx");
+            say_line("setne cl");
+            say_line("movzx ecx, cl");
+            say_line(what == BinaryOp::LogicalAnd ? "and eax, ecx" : "or eax, ecx");
+            break;
+        default:
+            say("that operation cannot be written yet");
+            return;
+        }
+        store(left, "eax");
+    }
+
+    void convert(int depth, const Operation &from, const Operation &to) override
+    {
+        if (!fits(from.width) || !fits(to.width))
+            return;
+        const int index = depth - 1;
+        if (from.width == to.width && from.is_signed == to.is_signed)
+            return;
+        load("eax", index);
+        if (to.width >= from.width && from.width < 4)
+            say_line(std::string(from.is_signed ? "movsx" : "movzx") + " eax, " +
+                     reg("rax", from.width * 8));
+        else if (to.width < 4)
+            say_line("movzx eax, " + reg("rax", to.width * 8));
+        store(index, "eax");
+    }
+
+    void jump(int depth, const std::string &label) override
+    {
+        (void)depth;
+        say_line("jmp %" + label + "%");
+    }
+    void branch_if_zero(int depth, const std::string &label) override
+    {
+        load("eax", depth - 1);
+        say_line("test eax, eax");
+        say_line("je %" + label + "%");
+    }
+    void branch_if_nonzero(int depth, const std::string &label) override
+    {
+        load("eax", depth - 1);
+        say_line("test eax, eax");
+        say_line("jne %" + label + "%");
+    }
+    void branch_if_equal(int depth, uint64_t value, const std::string &label) override
+    {
+        load("eax", depth - 1);
+        say_line("cmp eax, " + hex(value & 0xffffffffu));
+        say_line("je %" + label + "%");
+    }
+
+    void call(int depth, const CallSite &site) override
+    {
+        // Everything goes on the stack, in order, starting at the bottom of
+        // the frame where the callee looks for it.
+        const size_t count = site.types.size();
+        const int first = depth - static_cast<int>(count);
+        for (size_t i = 0; i < count; ++i) {
+            load("eax", first + static_cast<int>(i));
+            say_line("mov [esp+" + hex(i * 4) + "], eax");
+        }
+        if (site.through_pointer) {
+            load("edx", first - 1);
+            say_line("call edx");
+        } else {
+            say_line("call " + hex(site.address));
+        }
+        if (site.result != nullptr)
+            store(site.through_pointer ? first - 1 : first, "eax");
+    }
+
+    void return_value(int depth) override
+    {
+        load("eax", depth - 1);
+        say_line("jmp %" + leave_ + "%");
+    }
+    void return_nothing() override { say_line("jmp %" + leave_ + "%"); }
+
+private:
+    void say_line(const std::string &text) { out_->instruction(text); }
+    int64_t slot_offset(int index) const { return eval_base_ + int64_t(index) * 4; }
+    std::string slot(int index) const
+    {
+        return "[esp+" + hex(static_cast<uint64_t>(slot_offset(index))) + "]";
+    }
+    uint64_t total() const { return frame_size_ + 12; }
+    void load(const std::string &into, int index) { say_line("mov " + into + ", " + slot(index)); }
+    void store(int index, const std::string &from) { say_line("mov " + slot(index) + ", " + from); }
+    // Eight bytes at once is what this machine does not have.
+    bool fits(int width)
+    {
+        if (width <= 4)
+            return true;
+        say("a value of more than four bytes cannot be worked on in 32-bit code yet");
+        return false;
+    }
+};
+
 } // namespace
 
-std::unique_ptr<Machine> machine_for_x86(assembler::Target target)
+std::unique_ptr<Machine> machine_for_x86(assembler::Target target, Abi abi)
 {
     if (target == assembler::Target::X86_64)
-        return std::unique_ptr<Machine>(new X86_64());
+        return std::unique_ptr<Machine>(new X86_64(abi));
+    if (target == assembler::Target::X86)
+        return std::unique_ptr<Machine>(new X86());
     return nullptr;
 }
 

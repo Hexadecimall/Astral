@@ -177,7 +177,7 @@ Result build(assembler::Target target, const std::string &source, uint64_t addre
              const Environment &environment, const Options &options, bool bytes_too)
 {
     Result result;
-    std::unique_ptr<c::Machine> machine = c::machine_for(target);
+    std::unique_ptr<c::Machine> machine = c::machine_for(target, options.abi);
     if (!machine)
         return refuse(std::string("Astral cannot compile Nova for ") + assembler::target_name(target)
                       + " yet; it compiles for arm64 and x86-64");

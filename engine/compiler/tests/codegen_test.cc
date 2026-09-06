@@ -744,6 +744,37 @@ void an_unsupported_target_is_refused_clearly()
            std::to_string(wide.bytes.size()) + " bytes");
 }
 
+// Two conventions on one instruction set. Which registers an argument arrives
+// in is not a property of the machine, so the same function written for a PE
+// and for everything else has to differ in exactly that and nothing else.
+void the_two_x86_conventions_differ_where_they_should()
+{
+    std::printf("x86-64 follows the convention it was told to\n");
+    compiler::Environment environment;
+    const char *source = "long f(long a, long b) { return a + b; }";
+
+    compiler::Options common;
+    common.keep_assembly = true;
+    const compiler::Result usual =
+        compiler::compile(assembler::Target::X86_64, source, 0x1000, environment, common);
+    expect(usual.ok, "it compiled for the common convention", usual.error);
+
+    compiler::Options windows = common;
+    windows.abi = compiler::Abi::Microsoft;
+    const compiler::Result pe =
+        compiler::compile(assembler::Target::X86_64, source, 0x1000, environment, windows);
+    expect(pe.ok, "it compiled for Windows", pe.error);
+
+    // The first argument arrives in rdi everywhere but Windows, where it is rcx.
+    expect(usual.assembly.find("rdi") != std::string::npos,
+           "the common convention takes its first argument in rdi");
+    expect(pe.assembly.find("rdi") == std::string::npos,
+           "Windows does not, since rdi is the callee's to keep there");
+    expect(pe.assembly.find("rcx") != std::string::npos,
+           "Windows takes it in rcx");
+    expect(usual.bytes != pe.bytes, "so the two are not the same code");
+}
+
 // ------------------------------------------------------------------ by hand
 
 void a_tree_built_by_hand()
@@ -1420,6 +1451,7 @@ int main(int argc, char **argv)
     a_literal_with_nowhere_to_go_is_refused();
     too_big_is_refused_with_both_sizes();
     an_unsupported_target_is_refused_clearly();
+    the_two_x86_conventions_differ_where_they_should();
     only_what_changed_is_compiled();
     the_whole_check_function_runs();
     values_that_outlive_a_branch_or_a_call();

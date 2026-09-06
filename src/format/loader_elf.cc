@@ -118,7 +118,10 @@ bool load_elf(const std::vector<uint8_t> &bytes, BinaryImage &out, std::string &
     const uint64_t e_entry = r.u(is64 ? 0x18 : 0x18, ptr);
     const uint64_t e_phoff = r.u(is64 ? 0x20 : 0x1c, ptr);
     const uint64_t e_shoff = r.u(is64 ? 0x28 : 0x20, ptr);
-    const size_t hdr_tail = is64 ? 0x30 : 0x28;
+    // Where the fixed-width tail of the header starts, which is e_flags in
+    // both classes: 0x30 when the addresses are eight bytes and 0x24 when they
+    // are four. Everything after it is read as an offset from here.
+    const size_t hdr_tail = is64 ? 0x30 : 0x24;
     const unsigned e_phentsize = r.u16(hdr_tail + 6);
     const unsigned e_phnum = r.u16(hdr_tail + 8);
     const unsigned e_shentsize = r.u16(hdr_tail + 10);
