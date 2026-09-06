@@ -5,7 +5,7 @@ svg="$1"; out="$2"
 work="$(mktemp -d)"
 iconset="$work/Astral.iconset"
 mkdir -p "$iconset"
-# A rounded dark tile behind the mark. The tile fills the canvas edge to edge:
+# A rounded black tile behind the mark. The tile fills the canvas edge to edge:
 # an inset one leaves a ring of nothing around it, which at the sizes the Dock
 # draws reads as a border rather than as breathing room. The mark is everything
 # between the SVG's own tags: the opening one is the first line and the closing
@@ -14,7 +14,7 @@ mkdir -p "$iconset"
 # one-root document means the whole file - and an icon with nothing in it.)
 cat > "$work/tile.svg" <<SVG
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="#1b1c1f"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="#000000"/>
   <g transform="translate(64 64) scale(14)">
 $(sed -e '1d' -e '/<\/svg>/d' "$svg")
   </g>
