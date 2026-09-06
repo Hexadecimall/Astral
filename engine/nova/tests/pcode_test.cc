@@ -16,6 +16,7 @@
 #include "session.hh"
 
 #include <cstdio>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -247,6 +248,211 @@ void check_raw_is_refused()
            wrote ? "it was written" : "it gave no reason");
 }
 
+
+// Running what was written, which is the only way to know a translation kept
+// the meaning. Everything before this compares text; this compares answers.
+namespace {
+
+// Nova in, answer out: parsed, lowered, written as p-code and run.
+bool answer_for(const std::string &source, const std::string &language_id,
+                const std::map<std::string, uint64_t> &given, uint64_t &value, std::string &why)
+{
+    std::vector<compiler::Diagnostic> diagnostics;
+    const std::vector<Token> tokens = tokenise(source, diagnostics);
+    Types types;
+    Unit unit;
+    if (!parse(tokens, types, unit, diagnostics)) {
+        why = "it did not parse";
+        return false;
+    }
+
+    ir::Target target;
+    if (!ir::Target::from_language_id(language_id, target, why))
+        return false;
+    if (!target.read_specification(why))
+        return false;
+
+    ir::Unit lowered;
+    if (!lower_to_ir(unit, types, target, lowered, diagnostics) || lowered.functions.empty()) {
+        why = "it did not lower";
+        return false;
+    }
+
+    pcode::Sequence sequence;
+    std::vector<std::string> problems;
+    if (!pcode::to_pcode(lowered.functions.front(), lowered.target, sequence, problems)) {
+        why = problems.empty() ? "it was not written" : problems.front();
+        return false;
+    }
+
+    // Registers are set by the offset the specification gives them, which is
+    // what p-code means by a register.
+    pcode::Machine machine;
+    for (const auto &one : given) {
+        const ir::Target::RegisterPlace *place = lowered.target.register_place(one.first);
+        if (place == nullptr) {
+            why = "this processor has no register called " + one.first;
+            return false;
+        }
+        machine.registers[place->offset] = one.second;
+    }
+
+    const pcode::Answer answer = pcode::run(sequence, machine);
+    if (!answer.ok) {
+        why = answer.error;
+        return false;
+    }
+    value = answer.value;
+    return true;
+}
+
+} // namespace
+
+void check_it_computes_what_the_source_said()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+
+    // A pinned parameter, doubled. Twenty-one in, forty-two out, and the
+    // twenty-one is put in the register the source named.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for("func doubled(@w0): i32 {\n    return w0 + w0;\n}\n", arm,
+                                    {{"w0", 21}}, value, why);
+        report(ran && value == 42, "doubling a pinned register gives back twice it",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A local, which goes through a frame slot: written, read back, added to.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "func total(): i32 {\n"
+            "    var running: i32 = 2;\n"
+            "    running = running + 40;\n"
+            "    return running;\n"
+            "}\n",
+            arm, {}, value, why);
+        report(ran && value == 42, "a local written and read back holds what was put in it",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A branch, taken and not taken, from the same source with different input.
+    {
+        const char *source =
+            "func which(@w0): i32 {\n"
+            "    if (w0 == 0) {\n"
+            "        return 10;\n"
+            "    } else {\n"
+            "        return 20;\n"
+            "    }\n"
+            "}\n";
+        uint64_t taken = 0;
+        uint64_t otherwise = 0;
+        std::string why;
+        const bool first = answer_for(source, arm, {{"w0", 0}}, taken, why);
+        const bool second = answer_for(source, arm, {{"w0", 7}}, otherwise, why);
+        report(first && second && taken == 10 && otherwise == 20,
+               "a branch goes both ways, and the right way each time",
+               first && second ? "got " + std::to_string(taken) + " and " +
+                                     std::to_string(otherwise)
+                               : why);
+    }
+
+    // A loop, which has to go round the right number of times. This is the one
+    // that catches a branch wired to the wrong block: everything else still
+    // reads correctly when a loop runs once or forever.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "func counts(): i32 {\n"
+            "    var seen: i32 = 0;\n"
+            "    while (seen < 10) {\n"
+            "        seen = seen + 1;\n"
+            "    }\n"
+            "    return seen;\n"
+            "}\n",
+            arm, {}, value, why);
+        report(ran && value == 10, "a loop goes round until its test says to stop",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // The same source on a processor with different registers and a different
+    // word. Nothing about any of this was written per-processor.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "func total(): i32 {\n"
+            "    var running: i32 = 2;\n"
+            "    running = running + 40;\n"
+            "    return running;\n"
+            "}\n",
+            "x86:LE:64:default", {}, value, why);
+        report(ran && value == 42, "the same source gives the same answer on another processor",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // Signed and unsigned comparison differ on the same bits, which is the
+    // whole reason two opcodes exist. Minus one is above everything unsigned
+    // and below everything signed.
+    {
+        ir::Target target;
+        std::string why;
+        if (ir::Target::from_language_id(arm, target, why) && target.read_specification(why)) {
+            for (bool is_signed : {false, true}) {
+                ir::Builder builder("compares");
+                builder.block();
+                const ir::Value minus_one = builder.constant(0xffffffffu, 4);
+                const ir::Value one = builder.constant(1, 4);
+                const ir::Value answer =
+                    builder.binary(ir::Operation::Less, minus_one, one, 4, is_signed);
+                builder.ret(answer);
+
+                ir::Function function;
+                std::vector<std::string> problems;
+                if (!builder.finish(function, problems))
+                    continue;
+                pcode::Sequence sequence;
+                if (!pcode::to_pcode(function, target, sequence, problems))
+                    continue;
+                const pcode::Answer ran = pcode::run(sequence, pcode::Machine());
+                const uint64_t wanted = is_signed ? 1 : 0;
+                report(ran.ok && ran.value == wanted,
+                       is_signed ? "minus one is less than one when the comparison is signed"
+                                 : "the same bits are not less than one when it is not",
+                       ran.ok ? "got " + std::to_string(ran.value) : ran.error);
+            }
+        }
+    }
+
+    // A loop that never finishes stops rather than hanging whatever ran it.
+    {
+        ir::Target target;
+        std::string why;
+        if (ir::Target::from_language_id(arm, target, why)) {
+            ir::Builder builder("forever");
+            const uint32_t round = builder.block();
+            builder.jump(round);
+            ir::Function function;
+            std::vector<std::string> problems;
+            if (builder.finish(function, problems)) {
+                pcode::Sequence sequence;
+                if (pcode::to_pcode(function, target, sequence, problems)) {
+                    pcode::Machine machine;
+                    machine.budget = 1000;
+                    const pcode::Answer ran = pcode::run(sequence, machine);
+                    report(!ran.ok && !ran.error.empty(),
+                           "something that never finishes is stopped rather than run forever",
+                           ran.ok ? "it finished" : ran.error);
+                }
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main()
@@ -261,6 +467,7 @@ int main()
     check_the_two_that_read_backwards();
     check_a_pinned_value_is_its_register();
     check_raw_is_refused();
+    check_it_computes_what_the_source_said();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

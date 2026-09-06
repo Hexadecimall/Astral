@@ -20,6 +20,7 @@
 #include "opcodes.hh"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -86,6 +87,38 @@ std::string to_text(const Sequence &sequence);
 
 // The name a p-code operation goes by.
 const char *opcode_name(ghidra::OpCode opcode);
+
+// ------------------------------------------------------------------ running
+
+// Running the p-code, on nothing but itself.
+//
+// This exists to answer one question that nothing else can: whether what was
+// written means what the source said. Everything up to here is a translation,
+// and a translation is only right if the answer comes out the same, so the
+// operations are carried out and the answer is compared.
+//
+// It is also what the next step needs. Choosing which instructions a machine
+// should use means proposing some and checking they do the same thing, and
+// this is the thing they are checked against.
+struct Machine {
+    // What each register holds when it starts, by the offset the specification
+    // gives for it. Registers not named here begin at zero.
+    std::map<uint64_t, uint64_t> registers;
+    // How many operations may run before it is called a loop that never ends.
+    // A recovered function is not always a function that finishes.
+    uint64_t budget = 100000;
+};
+
+struct Answer {
+    bool ok = false;
+    bool returned = false;
+    uint64_t value = 0;      // what was returned, when something was
+    std::string error;       // why it stopped, when it stopped badly
+    uint64_t steps = 0;      // how many operations ran
+};
+
+// Runs `sequence` from its entry block and answers with what it returned.
+Answer run(const Sequence &sequence, const Machine &machine);
 
 } // namespace pcode
 } // namespace nova

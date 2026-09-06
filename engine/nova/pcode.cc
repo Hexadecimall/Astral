@@ -353,6 +353,244 @@ std::string to_text(const Sequence &sequence)
     return out.str();
 }
 
+
+// ------------------------------------------------------------------ running
+
+namespace {
+
+// A value cut down to the width it is held in. p-code is explicit about width
+// everywhere, and an operation that works in four bytes must not answer with
+// eight; the truncation is the operation, not an afterthought.
+uint64_t narrowed(uint64_t value, int size)
+{
+    if (size <= 0 || size >= 8)
+        return value;
+    const uint64_t keep = (static_cast<uint64_t>(1) << (size * 8)) - 1;
+    return value & keep;
+}
+
+// The same value read as signed, which is what the signed operations mean by
+// it. Widening the top bit is what makes -1 in four bytes still -1 in eight.
+int64_t as_signed(uint64_t value, int size)
+{
+    if (size <= 0 || size >= 8)
+        return static_cast<int64_t>(value);
+    const uint64_t sign = static_cast<uint64_t>(1) << (size * 8 - 1);
+    if ((value & sign) == 0)
+        return static_cast<int64_t>(value);
+    const uint64_t ones = ~((static_cast<uint64_t>(1) << (size * 8)) - 1);
+    return static_cast<int64_t>(value | ones);
+}
+
+// Everywhere a value can be while this runs. Memory is kept by address rather
+// than as a block, because a function under test touches a handful of places
+// and reserving a program's worth of memory to hold them would say nothing.
+class Running {
+public:
+    explicit Running(const Machine &machine) : machine_(machine)
+    {
+        for (const auto &entry : machine.registers)
+            registers_[entry.first] = entry.second;
+    }
+
+    uint64_t read(const Varnode &node) const
+    {
+        if (node.is_constant())
+            return narrowed(node.offset, node.size);
+        const std::map<uint64_t, uint64_t> &from = store_for(node.where);
+        auto found = from.find(node.offset);
+        return narrowed(found == from.end() ? 0 : found->second, node.size);
+    }
+
+    void write(const Varnode &node, uint64_t value)
+    {
+        if (node.is_constant())
+            return;
+        store_for(node.where)[node.offset] = narrowed(value, node.size);
+    }
+
+private:
+    const std::map<uint64_t, uint64_t> &store_for(Where where) const
+    {
+        switch (where) {
+        case Where::Register: return registers_;
+        case Where::Unique: return uniques_;
+        case Where::Frame: return frame_;
+        default: return memory_;
+        }
+    }
+    std::map<uint64_t, uint64_t> &store_for(Where where)
+    {
+        return const_cast<std::map<uint64_t, uint64_t> &>(
+            static_cast<const Running *>(this)->store_for(where));
+    }
+
+    const Machine &machine_;
+    std::map<uint64_t, uint64_t> registers_;
+    std::map<uint64_t, uint64_t> uniques_;
+    std::map<uint64_t, uint64_t> memory_;
+    std::map<uint64_t, uint64_t> frame_;
+};
+
+const Block *block_named(const Sequence &sequence, uint32_t identifier)
+{
+    for (const Block &block : sequence.blocks) {
+        if (block.identifier == identifier)
+            return &block;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+Answer run(const Sequence &sequence, const Machine &machine)
+{
+    Answer answer;
+    Running running(machine);
+
+    const Block *block = block_named(sequence, sequence.entry);
+    if (block == nullptr) {
+        answer.error = "there is no entry block to start from";
+        return answer;
+    }
+
+    while (block != nullptr) {
+        const Block *next = nullptr;
+        for (const Operation &operation : block->operations) {
+            if (++answer.steps > machine.budget) {
+                answer.error = "it ran longer than it was allowed to, so it does not finish";
+                return answer;
+            }
+
+            auto input = [&](size_t which) -> uint64_t {
+                return which < operation.inputs.size() ? running.read(operation.inputs[which]) : 0;
+            };
+            auto width = [&](size_t which) -> int {
+                return which < operation.inputs.size() ? operation.inputs[which].size : 8;
+            };
+
+            const int out_size = operation.writes ? operation.output.size : 8;
+            uint64_t made = 0;
+            bool wrote = true;
+
+            switch (operation.opcode) {
+            case ghidra::CPUI_COPY: made = input(0); break;
+            case ghidra::CPUI_INT_ADD: made = input(0) + input(1); break;
+            case ghidra::CPUI_INT_SUB: made = input(0) - input(1); break;
+            case ghidra::CPUI_INT_MULT: made = input(0) * input(1); break;
+            case ghidra::CPUI_INT_DIV:
+                if (input(1) == 0) {
+                    answer.error = "it divided by nothing";
+                    return answer;
+                }
+                made = input(0) / input(1);
+                break;
+            case ghidra::CPUI_INT_SDIV: {
+                const int64_t divisor = as_signed(input(1), width(1));
+                if (divisor == 0) {
+                    answer.error = "it divided by nothing";
+                    return answer;
+                }
+                made = static_cast<uint64_t>(as_signed(input(0), width(0)) / divisor);
+                break;
+            }
+            case ghidra::CPUI_INT_REM:
+                if (input(1) == 0) {
+                    answer.error = "it took a remainder by nothing";
+                    return answer;
+                }
+                made = input(0) % input(1);
+                break;
+            case ghidra::CPUI_INT_SREM: {
+                const int64_t divisor = as_signed(input(1), width(1));
+                if (divisor == 0) {
+                    answer.error = "it took a remainder by nothing";
+                    return answer;
+                }
+                made = static_cast<uint64_t>(as_signed(input(0), width(0)) % divisor);
+                break;
+            }
+            case ghidra::CPUI_INT_AND: made = input(0) & input(1); break;
+            case ghidra::CPUI_INT_OR: made = input(0) | input(1); break;
+            case ghidra::CPUI_INT_XOR: made = input(0) ^ input(1); break;
+            case ghidra::CPUI_INT_LEFT: made = input(0) << (input(1) & 63); break;
+            case ghidra::CPUI_INT_RIGHT: made = input(0) >> (input(1) & 63); break;
+            case ghidra::CPUI_INT_SRIGHT:
+                made = static_cast<uint64_t>(as_signed(input(0), width(0)) >>
+                                             (input(1) & 63));
+                break;
+            case ghidra::CPUI_INT_2COMP: made = ~input(0) + 1; break;
+            case ghidra::CPUI_INT_NEGATE: made = ~input(0); break;
+            case ghidra::CPUI_INT_EQUAL: made = input(0) == input(1) ? 1 : 0; break;
+            case ghidra::CPUI_INT_NOTEQUAL: made = input(0) != input(1) ? 1 : 0; break;
+            case ghidra::CPUI_INT_LESS: made = input(0) < input(1) ? 1 : 0; break;
+            case ghidra::CPUI_INT_LESSEQUAL: made = input(0) <= input(1) ? 1 : 0; break;
+            case ghidra::CPUI_INT_SLESS:
+                made = as_signed(input(0), width(0)) < as_signed(input(1), width(1)) ? 1 : 0;
+                break;
+            case ghidra::CPUI_INT_SLESSEQUAL:
+                made = as_signed(input(0), width(0)) <= as_signed(input(1), width(1)) ? 1 : 0;
+                break;
+            case ghidra::CPUI_INT_ZEXT: made = input(0); break;
+            case ghidra::CPUI_INT_SEXT:
+                made = static_cast<uint64_t>(as_signed(input(0), width(0)));
+                break;
+            case ghidra::CPUI_SUBPIECE: made = input(0) >> (input(1) * 8); break;
+
+            case ghidra::CPUI_LOAD:
+                // The space is the first input and the address the second.
+                made = running.read(Varnode{Where::Memory, input(1), out_size});
+                break;
+            case ghidra::CPUI_STORE:
+                running.write(Varnode{Where::Memory, input(1), width(2)}, input(2));
+                wrote = false;
+                break;
+
+            case ghidra::CPUI_BRANCH:
+                if (operation.successors.empty()) {
+                    answer.error = "a branch with nowhere to go";
+                    return answer;
+                }
+                next = block_named(sequence, operation.successors.front());
+                wrote = false;
+                break;
+            case ghidra::CPUI_CBRANCH:
+                if (operation.successors.size() < 2) {
+                    answer.error = "a conditional branch with only one way out";
+                    return answer;
+                }
+                next = block_named(sequence,
+                                   input(0) != 0 ? operation.successors[0]
+                                                 : operation.successors[1]);
+                wrote = false;
+                break;
+            case ghidra::CPUI_RETURN:
+                answer.ok = true;
+                answer.returned = true;
+                answer.value = operation.inputs.empty() ? 0 : input(0);
+                return answer;
+
+            default:
+                answer.error = std::string("nothing here knows how to run a ") +
+                               opcode_name(operation.opcode);
+                return answer;
+            }
+
+            if (wrote && operation.writes)
+                running.write(operation.output, narrowed(made, out_size));
+        }
+
+        if (next == nullptr) {
+            answer.error = "a block ran off its end without leaving";
+            return answer;
+        }
+        block = next;
+    }
+
+    answer.error = "it went somewhere that is not a block";
+    return answer;
+}
+
 } // namespace pcode
 } // namespace nova
 } // namespace astral_internal
