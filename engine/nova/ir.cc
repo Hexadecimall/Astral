@@ -312,6 +312,16 @@ Block *Builder::block_named(uint32_t identifier)
     return nullptr;
 }
 
+bool Builder::block_is_open() const
+{
+    for (const Block &block : function_.blocks) {
+        if (block.identifier != current_)
+            continue;
+        return block.instructions.empty() || !is_terminator(block.instructions.back().operation);
+    }
+    return false;
+}
+
 Value Builder::emit(Instruction instruction)
 {
     Block *block = block_named(current_);

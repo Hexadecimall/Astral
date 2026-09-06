@@ -282,6 +282,13 @@ public:
     void resume(uint32_t identifier);
     uint32_t current() const { return current_; }
 
+    // Whether the block being written into is still open. A lowering asks this
+    // before adding a way out: a body whose last statement was a return has
+    // already left, and writing a second one is how a function ends up leaving
+    // twice. Blocks reached only by falling into them are the ones that need
+    // the ending nobody wrote.
+    bool block_is_open() const;
+
     // Adds an instruction to the block being written into, and answers with its
     // result. Refused, with `failed()` set, once that block has been left.
     Value emit(Instruction instruction);
