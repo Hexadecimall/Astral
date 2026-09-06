@@ -61,8 +61,11 @@ void ThemeTest::styleSheetMentionsEveryColour()
     auto theme = astral::gui::Theme::defaults();
     QString sheet = theme.styleSheet();
     for (const QString &key : astral::gui::Theme::keys()) {
+        // A token colour and a terminal colour are painted by the widget that
+        // uses them rather than named in a stylesheet, so neither is expected
+        // to appear in one.
         QVERIFY2(sheet.contains(theme.colour(key).name(), Qt::CaseInsensitive)
-                     || key.startsWith("token."),
+                     || key.startsWith("token.") || key.startsWith("term."),
                  qPrintable(key));
     }
 }
