@@ -158,9 +158,11 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 std::string refused;
                 std::vector<std::string> used;
                 bool made = false;
+                const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
                 for (const std::vector<catalogue::Catalogue::Wanted> &way : ways) {
                     if (catalogue::Catalogue::write_mixed(*form, way, bytes, used, refused)) {
                         made = true;
+                        taken = &way;
                         break;
                     }
                 }
@@ -183,11 +185,26 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 // Every register asked for has to be named in what comes back,
                 // or the bytes are some other instruction that happens to be
                 // readable.
-                // Checked against the names actually written, not against some
-                // other name the same register goes by.
+                // Every register asked for has to be named in what comes back,
+                // or the bytes are some other instruction that happens to be
+                // readable. Any of the names it goes by will do, since a
+                // disassembler writes whichever it prefers.
+                //
+                // Numbers are not looked for. A field was given an exact value
+                // and that is a stronger check than reading it back, which
+                // would fail on spelling alone: twenty written into an
+                // instruction comes back as 0x14.
                 bool mentions_all = true;
-                for (const std::string &named : used)
-                    mentions_all = mentions_all && reads.find(named) != std::string::npos;
+                if (taken != nullptr) {
+                    for (const catalogue::Catalogue::Wanted &place : *taken) {
+                        if (place.is_number)
+                            continue;
+                        bool any = false;
+                        for (const std::string &name : place.names)
+                            any = any || reads.find(name) != std::string::npos;
+                        mentions_all = mentions_all && any;
+                    }
+                }
                 if (!mentions_all) {
                     last_refusal = "the bytes it would write read back as: " + reads;
                     continue;
