@@ -797,6 +797,94 @@ void check_frames_become_addresses()
            "adding two four-byte values answers in four", text);
 }
 
+
+// Taking the room the locals need, and giving it back.
+void check_the_frame_is_taken_and_given_back()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+
+    // A function with two ways out gives the room back at both. Giving it back
+    // at one of them is a stack that never comes back.
+    {
+        uint64_t taken = 0;
+        uint64_t otherwise = 0;
+        std::string why;
+        const char *source =
+            "func which(@w0): i32 {\n"
+            "  var held: i32 = 5;\n"
+            "  if (w0 == 0) {\n"
+            "    return held;\n"
+            "  } else {\n"
+            "    return held + 1;\n"
+            "  }\n"
+            "}\n";
+        const bool first = answer_for(source, arm, {{"w0", 0}}, taken, why);
+        const bool second = answer_for(source, arm, {{"w0", 1}}, otherwise, why);
+        report(first && second && taken == 5 && otherwise == 6,
+               "a function with two ways out works through both of them",
+               first && second ? "got " + std::to_string(taken) + " and " +
+                                     std::to_string(otherwise)
+                               : why);
+    }
+
+    // A function that touches no frame takes none.
+    {
+        std::vector<compiler::Diagnostic> diagnostics;
+        const std::string source = "func plain(@w0): i32 {\n  return w0 + w0;\n}\n";
+        const std::vector<Token> tokens = tokenise(source, diagnostics);
+        Types types;
+        Unit unit;
+        ir::Target target;
+        std::string why;
+        if (parse(tokens, types, unit, diagnostics) &&
+            ir::Target::from_language_id(arm, target, why)) {
+            ir::Unit lowered;
+            if (lower_to_ir(unit, types, target, lowered, diagnostics) &&
+                !lowered.functions.empty()) {
+                report(lowered.functions.front().frame_bytes == 0,
+                       "a function that touches no frame takes none",
+                       std::to_string(lowered.functions.front().frame_bytes) + " bytes");
+
+                pcode::Sequence sequence;
+                std::vector<std::string> problems;
+                if (pcode::to_pcode(lowered.functions.front(), lowered.target, sequence,
+                                    problems)) {
+                    const std::string text = pcode::to_text(sequence);
+                    report(!contains(text, "INT_SUB (register"),
+                           "and so does not move the stack at all", text);
+                }
+            }
+        }
+    }
+
+    // One that does, takes exactly what its locals need and gives it back.
+    {
+        std::vector<compiler::Diagnostic> diagnostics;
+        const std::string source =
+            "func holds(): i32 {\n  var first: i32 = 1;\n  var second: i32 = 2;\n"
+            "  return first + second;\n}\n";
+        const std::vector<Token> tokens = tokenise(source, diagnostics);
+        Types types;
+        Unit unit;
+        ir::Target target;
+        std::string why;
+        if (parse(tokens, types, unit, diagnostics) &&
+            ir::Target::from_language_id(arm, target, why)) {
+            ir::Unit lowered;
+            if (lower_to_ir(unit, types, target, lowered, diagnostics) &&
+                !lowered.functions.empty()) {
+                report(lowered.functions.front().frame_bytes == 8,
+                       "two four-byte locals need eight bytes of frame",
+                       std::to_string(lowered.functions.front().frame_bytes) + " bytes");
+            }
+        }
+        uint64_t value = 0;
+        const bool ran = answer_for(source, arm, {}, value, why);
+        report(ran && value == 3, "and the function still answers correctly",
+               ran ? "got " + std::to_string(value) : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -817,6 +905,7 @@ int main()
     check_reaching_and_choosing();
     check_calling();
     check_frames_become_addresses();
+    check_the_frame_is_taken_and_given_back();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

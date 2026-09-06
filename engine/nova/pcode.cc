@@ -41,6 +41,9 @@ private:
 
     bool operation(const ir::Instruction &instruction, Block &into);
 
+    // Moves the stack by `bytes`, the way this processor's frame grows.
+    bool move_stack(uint64_t bytes, bool giving_back, Block &into);
+
     const ir::Target &target_;
     std::vector<std::string> &problems_;
     std::map<uint32_t, Varnode> placed_;
@@ -104,6 +107,38 @@ Varnode Writer::place(const ir::Value &value, int width)
 
     placed_.emplace(value.identifier, node);
     return node;
+}
+
+bool Writer::move_stack(uint64_t bytes, bool giving_back, Block &into)
+{
+    if (!frame_.known) {
+        complain("this function needs a frame and this processor has no stack");
+        return false;
+    }
+    const ir::Target::RegisterPlace *pointer = target_.register_place(frame_.pointer);
+    if (pointer == nullptr) {
+        complain("this processor's stack register " + frame_.pointer + " has no place");
+        return false;
+    }
+
+    Varnode stack;
+    stack.where = Where::Register;
+    stack.offset = pointer->offset;
+    stack.size = pointer->width;
+
+    // Taking room on a downward frame is subtracting, and giving it back is
+    // adding; on a processor whose frame grows the other way it is the other
+    // way round, which is why the specification is asked which it is.
+    const bool subtracting = frame_.grows_downward != giving_back;
+
+    Operation made;
+    made.opcode = subtracting ? ghidra::CPUI_INT_SUB : ghidra::CPUI_INT_ADD;
+    made.writes = true;
+    made.output = stack;
+    made.inputs.push_back(stack);
+    made.inputs.push_back(constant(bytes, pointer->width));
+    into.operations.push_back(std::move(made));
+    return true;
 }
 
 bool Writer::operation(const ir::Instruction &instruction, Block &into)
@@ -323,7 +358,21 @@ bool Writer::write(const ir::Function &function, Sequence &out)
     for (const ir::Block &block : function.blocks) {
         Block written;
         written.identifier = block.identifier;
+
+        // Taking the room the locals need, before anything reaches for it.
+        if (block.identifier == function.entry && function.frame_bytes != 0) {
+            if (!move_stack(function.frame_bytes, false, written))
+                return false;
+        }
+
         for (const ir::Instruction &instruction : block.instructions) {
+            // And giving it back before leaving, at every way out rather than
+            // at one of them: a function with two returns gives it back twice
+            // or not at all, and not at all is a stack that never comes back.
+            if (instruction.operation == ir::Operation::Return && function.frame_bytes != 0) {
+                if (!move_stack(function.frame_bytes, true, written))
+                    return false;
+            }
             if (!operation(instruction, written))
                 return false;
         }

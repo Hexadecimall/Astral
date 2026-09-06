@@ -1257,6 +1257,10 @@ bool Lowerer::function(const Function &source, ir::Function &out)
     if (walked && !failed_ && builder.block_is_open())
         builder.ret();
 
+    // The frame is as deep as the lowest slot handed out, which is known only
+    // once every one of them has been.
+    builder.set_frame_bytes(next_offset_ < 0 ? static_cast<uint64_t>(-next_offset_) : 0);
+
     std::vector<std::string> problems;
     if (!builder.finish(out, problems)) {
         for (const std::string &problem : problems)

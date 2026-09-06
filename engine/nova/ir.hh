@@ -321,6 +321,11 @@ struct Function {
     uint64_t address = 0;  // where it must sit; zero when it may go anywhere
     uint64_t budget = 0;   // bytes it must not exceed; zero when unbounded
 
+    // How many bytes of frame the locals need. A function has to take that room
+    // before it uses it and give it back before it leaves, or the next thing to
+    // push anything writes over what this was still holding.
+    uint64_t frame_bytes = 0;
+
     // What is already at `address`, so what comes out can be reduced to the
     // parts that differ. Empty asks for the whole function.
     std::vector<uint8_t> existing;
@@ -390,6 +395,7 @@ public:
     void set_address(uint64_t address) { function_.address = address; }
     void set_budget(uint64_t budget) { function_.budget = budget; }
     void set_result(Value result) { function_.result = result; }
+    void set_frame_bytes(uint64_t bytes) { function_.frame_bytes = bytes; }
 
     // Whether anything was refused along the way, and what.
     bool failed() const { return !problems_.empty(); }
