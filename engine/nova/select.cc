@@ -347,8 +347,39 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
         }
     }
 
+    // The registers a value may be put in on the way to something else.
+    //
+    // A number too big for any field has to be in a register before it can be
+    // used, and the register has to be one nothing is keeping anything in.
+    std::vector<uint64_t> scratch;
+    {
+        std::vector<Storage> places;
+        Storage answer;
+        std::string trouble;
+        if (target.calling_convention({8, 8, 8, 8, 8, 8, 8, 8}, 8, places, answer, trouble)) {
+            for (const Storage &where : places) {
+                if (where.kind != Storage::Kind::Register)
+                    continue;
+                const ir::Target::RegisterPlace *place =
+                    target.register_place(where.register_name);
+                if (place != nullptr && in_use.count(place->offset) == 0)
+                    scratch.push_back(place->offset);
+            }
+        }
+    }
+
     for (const pcode::Block &block : sequence.blocks) {
-        for (const pcode::Operation &operation : block.operations) {
+        // What is left to write for this block. An operation the processor has
+        // no single instruction for can be replaced here by the two or three it
+        // does have, and those go through the same choosing as everything else
+        // rather than being written by some other rule.
+        std::vector<pcode::Operation> pending(block.operations.begin(),
+                                              block.operations.end());
+        std::set<size_t> already_split;   // an operand put in a register
+        std::set<size_t> already_built;   // a number made out of smaller ones
+
+        for (size_t step = 0; step < pending.size() && step < 4096; ++step) {
+            const pcode::Operation operation = pending[step];
             const char *called = pcode::opcode_name(operation.opcode);
 
             // Every value has to be somewhere that can be named. A value with
@@ -516,8 +547,11 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 std::vector<int> roles;
                 if (operation.writes)
                     roles.push_back(form->writes_to.is_slot ? form->writes_to.slot : -1);
-                for (const catalogue::Form::Piece &piece : form->reads)
-                    roles.push_back(piece.is_slot ? piece.slot : -1);
+                // The space a load or a store names is passed over here for the
+                // same reason it was passed over above: it is which memory,
+                // not a value, and nothing is put into it.
+                for (size_t at = first_input; at < form->reads.size(); ++at)
+                    roles.push_back(form->reads[at].is_slot ? form->reads[at].slot : -1);
 
                 const std::vector<int> none;
                 for (const std::vector<catalogue::Catalogue::Wanted> &way : ways) {
@@ -630,6 +664,138 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             }
 
             if (best == nullptr) {
+                // A number no field can hold goes in a register first.
+                //
+                // Every processor has instructions that take a number and a
+                // limit on how big it may be, and an address is over that limit
+                // on all of them. The instruction that adds an address is the
+                // one that adds a register, with the address put in a register
+                // beforehand - so that is what is written, and both halves go
+                // through this same choosing rather than being written by some
+                // other rule that could be wrong differently.
+                // A number no single instruction can hold is built in pieces.
+                //
+                // Every processor puts a limit on how big a number an
+                // instruction may carry, and an address is over it on all of
+                // them: AARCH64 carries sixteen bits and an address is
+                // thirty-three. So the number is made out of a smaller one
+                // shifted up and the rest put in underneath, which are three
+                // operations this already knows how to choose - and if the
+                // smaller one is still too big it is made the same way again.
+                if (operation.opcode == ghidra::CPUI_COPY && operation.writes &&
+                    operation.inputs.size() == 1 && operation.inputs[0].is_constant() &&
+                    operation.inputs[0].offset > 0xffff && !scratch.empty() &&
+                    already_built.count(step) == 0) {
+                    const uint64_t whole = operation.inputs[0].offset;
+                    const int width = operation.output.size > 0 ? operation.output.size : 8;
+                    const uint64_t low = whole & 0xffff;
+
+                    pcode::Varnode held;
+                    held.where = pcode::Where::Register;
+                    held.offset = scratch.front();
+                    held.size = width;
+                    for (uint64_t candidate : scratch) {
+                        if (candidate != operation.output.offset) {
+                            held.offset = candidate;
+                            break;
+                        }
+                    }
+
+                    pcode::Varnode number;
+                    number.where = pcode::Where::Constant;
+                    number.offset = whole >> 16;
+                    number.size = width;
+
+                    pcode::Operation top;      // the rest of it, in a register
+                    top.opcode = ghidra::CPUI_COPY;
+                    top.writes = true;
+                    top.output = held;
+                    top.inputs.push_back(number);
+
+                    pcode::Varnode sixteen;
+                    sixteen.where = pcode::Where::Constant;
+                    sixteen.offset = 16;
+                    sixteen.size = width;
+
+                    pcode::Operation shifted;   // moved up out of the way
+                    shifted.opcode = ghidra::CPUI_INT_LEFT;
+                    shifted.writes = true;
+                    shifted.output = held;
+                    shifted.inputs.push_back(held);
+                    shifted.inputs.push_back(sixteen);
+
+                    pcode::Varnode bottom;
+                    bottom.where = pcode::Where::Constant;
+                    bottom.offset = low;
+                    bottom.size = width;
+
+                    pcode::Operation joined;    // and the bottom put underneath
+                    joined.opcode = ghidra::CPUI_INT_OR;
+                    joined.writes = true;
+                    joined.output = operation.output;
+                    joined.inputs.push_back(held);
+                    joined.inputs.push_back(bottom);
+
+                    // Only the two that are finished are marked. The top is
+                    // built again if it is still too big, which it may be:
+                    // sixteen bits at a time takes four rounds to reach the top
+                    // of a sixty-four bit address, and each round is smaller
+                    // than the last, so it ends.
+                    already_built.insert(step + 1);
+                    already_built.insert(step + 2);
+                    pending[step] = top;
+                    pending.insert(pending.begin() + static_cast<long>(step) + 1, joined);
+                    pending.insert(pending.begin() + static_cast<long>(step) + 1, shifted);
+                    --step;
+                    continue;
+                }
+
+                size_t too_big = operation.inputs.size();
+                for (size_t at = first_input; at < operation.inputs.size(); ++at) {
+                    if (operation.inputs[at].is_constant() && operation.inputs[at].offset != 0)
+                        too_big = at;
+                }
+                uint64_t where = 0;
+                bool have_somewhere = false;
+                for (uint64_t candidate : scratch) {
+                    // Not one this operation is already using: putting the
+                    // number there would write over what it was to be used with.
+                    bool clashes = operation.writes && operation.output.offset == candidate;
+                    for (const pcode::Varnode &input : operation.inputs)
+                        clashes = clashes ||
+                                  (input.where == pcode::Where::Register &&
+                                   input.offset == candidate);
+                    if (!clashes) {
+                        where = candidate;
+                        have_somewhere = true;
+                        break;
+                    }
+                }
+                if (too_big < operation.inputs.size() && have_somewhere &&
+                    already_split.count(step) == 0) {
+                    const int width = operation.inputs[too_big].size > 0
+                                          ? operation.inputs[too_big].size
+                                          : (target.word_bytes > 0 ? target.word_bytes : 8);
+
+                    pcode::Operation putting;
+                    putting.opcode = ghidra::CPUI_COPY;
+                    putting.writes = true;
+                    putting.output.where = pcode::Where::Register;
+                    putting.output.offset = where;
+                    putting.output.size = width;
+                    putting.inputs.push_back(operation.inputs[too_big]);
+
+                    pcode::Operation again = operation;
+                    again.inputs[too_big] = putting.output;
+
+                    already_split.insert(step);
+                    already_split.insert(step + 1);
+                    pending[step] = putting;
+                    pending.insert(pending.begin() + static_cast<long>(step) + 1, again);
+                    --step;  // and the copy is chosen next, like anything else
+                    continue;
+                }
+
                 problems.push_back(std::string("no way of doing a ") + called +
                                    " on this processor writes those registers" +
                                    (last_refusal.empty() ? std::string()

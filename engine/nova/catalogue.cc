@@ -744,12 +744,22 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         const ghidra::OpTpl *only = nullptr;
         size_t only_at = 0;
         if (templ != nullptr) {
+            // The last operation, but not a `callother`.
+            //
+            // A callother is what a specification writes when p-code has no
+            // way to say the thing: a barrier, a cache hint, a mode change. It
+            // is a remark about the instruction rather than what the
+            // instruction is for, and it is often written last - so a store
+            // followed by its release barrier looked like a form that performs
+            // a barrier and happens to store on the way.
             size_t at = 0;
             for (const ghidra::OpTpl *operation : templ->getOpvec()) {
                 if (operation != nullptr && !is_bookkeeping(operation->getOpcode())) {
                     form.does.push_back(operation->getOpcode());
-                    only = operation;
-                    only_at = at;
+                    if (operation->getOpcode() != ghidra::CPUI_CALLOTHER || only == nullptr) {
+                        only = operation;
+                        only_at = at;
+                    }
                 }
                 ++at;
             }
@@ -976,9 +986,22 @@ std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int in
         // So a fixed read is part of what the instruction is rather than part of
         // what is put into it, and whether the form really is the instruction
         // meant is settled where it always is, by reading the bytes back.
+        // Which memory a load or a store touches is not one of its values.
+        //
+        // p-code names the space first because it describes machines that have
+        // more than one and has to say which. It is not a number and not a
+        // place: it comes back as neither, which made every load and every
+        // store on every processor look like a form with something unnameable
+        // in it. An instruction does not name a memory - the choice is in which
+        // instruction it is - so it is passed over here as it is everywhere
+        // else.
+        const bool names_a_space =
+            opcode == ghidra::CPUI_LOAD || opcode == ghidra::CPUI_STORE;
+
         int to_fill = 0;
         bool all_known = true;
-        for (const Form::Piece &piece : form->reads) {
+        for (size_t at = names_a_space ? 1 : 0; at < form->reads.size(); ++at) {
+            const Form::Piece &piece = form->reads[at];
             if (piece.is_slot)
                 ++to_fill;
             else if (!piece.is_fixed)
