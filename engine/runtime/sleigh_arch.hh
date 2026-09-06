@@ -27,6 +27,7 @@ namespace ghidra {
 
 extern AttributeId ATTRIB_DEPRECATED;	///< Marshaling attribute "deprecated"
 extern AttributeId ATTRIB_ENDIAN;	///< Marshaling attribute "endian"
+extern AttributeId ATTRIB_INSTRUCTIONENDIAN;	///< Marshaling attribute "instructionEndian"
 extern AttributeId ATTRIB_PROCESSOR;	///< Marshaling attribute "processor"
 extern AttributeId ATTRIB_PROCESSORSPEC;	///< Marshaling attribute "processorspec"
 extern AttributeId ATTRIB_SLAFILE;	///< Marshaling attribute "slafile"
@@ -66,6 +67,7 @@ public:
 class LanguageDescription {
   string processor;		///< Name of processor
   bool isbigendian;		///< Set to \b true if this processor is \e big-endian
+  bool instructionbigendian;	///< Set to \b true if instructions are big-endian, which is not always the same answer
   int4 size;			///< Size of address bus in bits
   string variant;		///< Name of processor variant or "default"
   string version;		///< Version of the specification
@@ -81,6 +83,7 @@ public:
   void decode(Decoder &decoder);				///< Parse \b this description from a stream
   const string &getProcessor(void) const { return processor; }	///< Get the name of the processor
   bool isBigEndian(void) const { return isbigendian; }		///< Return \b true if the processor is big-endian
+  bool isInstructionBigEndian(void) const { return instructionbigendian; }	///< Return \b true if instructions are big-endian; a few processors read their instructions in the opposite order to their data
   int4 getSize(void) const { return size; }			///< Get the size of the address bus
   const string &getVariant(void) const { return variant; }	///< Get the processor variant
   const string &getVersion(void) const { return version; }	///< Get the processor version

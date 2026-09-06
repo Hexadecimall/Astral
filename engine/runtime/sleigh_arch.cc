@@ -22,6 +22,7 @@ namespace ghidra {
 
 AttributeId ATTRIB_DEPRECATED = AttributeId("deprecated",136);
 AttributeId ATTRIB_ENDIAN = AttributeId("endian",137);
+AttributeId ATTRIB_INSTRUCTIONENDIAN = AttributeId("instructionEndian",152);
 AttributeId ATTRIB_PROCESSOR = AttributeId("processor",138);
 AttributeId ATTRIB_PROCESSORSPEC = AttributeId("processorspec",139);
 AttributeId ATTRIB_SLAFILE = AttributeId("slafile",140);
@@ -67,11 +68,16 @@ void LanguageDescription::decode(Decoder &decoder)
   processorspec = decoder.readString(ATTRIB_PROCESSORSPEC);
   id = decoder.readString(ATTRIB_ID);
   deprecated = false;
+  // Most processors read instructions in the same order they read data, so the
+  // one endianness answers for both unless the specification says otherwise.
+  instructionbigendian = isbigendian;
   for(;;) {
     uint4 attribId = decoder.getNextAttributeId();
     if (attribId == 0) break;
     if (attribId==ATTRIB_DEPRECATED)
       deprecated = decoder.readBool();
+    else if (attribId==ATTRIB_INSTRUCTIONENDIAN)
+      instructionbigendian = (decoder.readString()=="big");
   }
   for(;;) {
     uint4 subId = decoder.peekElement();

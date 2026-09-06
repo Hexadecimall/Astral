@@ -86,6 +86,16 @@ void check_targets()
                "big-endian MIPS is big-endian throughout");
     }
 
+    // The other way a processor disagrees with itself. Its id says BE with no
+    // hint of the split, and the specification says instructionEndian="little";
+    // reading only the id calls this big-endian throughout, which is wrong
+    // about every instruction on it.
+    if (target_for("AARCH64:BE:64:v8A", target)) {
+        expect(!target.instruction_big_endian,
+               "big-endian AARCH64 still reads little-endian instructions");
+        expect(target.data_big_endian, "big-endian AARCH64 reads big-endian data");
+    }
+
     // Sixteen bits, which nothing that assumes a machine word is eight bytes
     // will get right.
     if (target_for("z80:LE:16:default", target)) {
@@ -99,6 +109,19 @@ void check_targets()
         expect_equal(target.address_bits, 24, "a PIC-24 addresses twenty-four bits");
         expect_equal(target.pointer_bytes, 3, "a PIC-24 pointer is three bytes");
     }
+
+    // A processor whose pointers are narrower than its registers. The
+    // specification says so with a truncation, whose size is a count of bytes
+    // and not a width in bits; reading it as bits gave every truncated language
+    // one-byte pointers, which is not a pointer anywhere.
+    if (target_for("AARCH64:LE:32:ilp32", target))
+        expect_equal(target.pointer_bytes, 4, "an ilp32 pointer is four bytes");
+    if (target_for("PowerPC:BE:64:64-32addr", target))
+        expect_equal(target.pointer_bytes, 4,
+                     "a PowerPC addressing thirty-two bits has four-byte pointers");
+    if (target_for("MIPS:LE:64:64-32addr", target))
+        expect_equal(target.pointer_bytes, 4,
+                     "a MIPS addressing thirty-two bits has four-byte pointers");
 
     // A language id with a compiler on the end names the same language.
     {
@@ -313,6 +336,86 @@ void check_writing()
     }
 }
 
+// The builder keeps two rules so that whatever lowers into this does not have
+// to: a value is numbered once, and a block is left exactly once. Both are
+// checked here by breaking them.
+void check_building()
+{
+    // A conditional, built the way a lowering would build one.
+    {
+        ir::Builder builder("chooses");
+        Storage in_first;
+        in_first.kind = Storage::Kind::Register;
+        in_first.register_name = "x0";
+        const ir::Value given = builder.parameter(nullptr, in_first);
+
+        const uint32_t start = builder.block();
+        const ir::Value zero = builder.constant(0, 4);
+        const ir::Value same = builder.binary(ir::Operation::Equal, given, zero, 4, false);
+
+        const uint32_t when_zero = builder.block();
+        const uint32_t otherwise = builder.block();
+
+        builder.resume(start);
+        builder.branch(same, when_zero, otherwise);
+
+        builder.resume(when_zero);
+        builder.ret(builder.constant(1, 4));
+
+        builder.resume(otherwise);
+        builder.ret(builder.constant(2, 4));
+
+        ir::Function built;
+        std::vector<std::string> problems;
+        report(builder.finish(built, problems), "a branch built the ordinary way comes out valid",
+               problems.empty() ? "" : problems.front());
+        expect_equal(static_cast<long long>(built.blocks.size()), 3,
+                     "the three blocks that were opened are all there");
+        expect(built.entry == start, "the first block opened is the entry");
+        report(ir::to_text(built).find("@x0") != std::string::npos,
+               "the parameter kept the register it was pinned to", ir::to_text(built));
+    }
+
+    // Every value the builder hands out is a different one, which is what makes
+    // single assignment true by construction rather than by care.
+    {
+        ir::Builder builder("counts");
+        builder.block();
+        const ir::Value first = builder.constant(1, 4);
+        const ir::Value second = builder.constant(1, 4);
+        expect(first.identifier != second.identifier,
+               "two values are never given the same number");
+        builder.ret();
+    }
+
+    // Writing into a block that has already been left is the mistake worth
+    // catching where it happens.
+    {
+        ir::Builder builder("writes past the end");
+        builder.block();
+        builder.ret();
+        builder.constant(9, 4);
+        expect(builder.failed(), "writing into a block already left is refused");
+    }
+
+    // And a block that was never opened cannot be written into either.
+    {
+        ir::Builder builder("resumes nothing");
+        builder.resume(17);
+        expect(builder.failed(), "resuming a block that was never opened is refused");
+    }
+
+    // A builder that was misused says so instead of handing back a function.
+    {
+        ir::Builder builder("never finished");
+        builder.block();  // opened and never left
+        ir::Function built;
+        std::vector<std::string> problems;
+        expect(!builder.finish(built, problems),
+               "a function whose block has no way out is not handed back");
+    }
+}
+
 } // namespace
 
 int main()
@@ -329,6 +432,7 @@ int main()
     check_verification();
     check_widths();
     check_writing();
+    check_building();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

@@ -24,20 +24,24 @@ std::vector<std::string> fields_of(const std::string &language_id)
     return out;
 }
 
-// The endian field says what order bytes go in, and on a few processors it says
-// two different things: "LEBE" is little-endian instructions over big-endian
-// data, which is a real ARM configuration and not a typo. Anything else means
-// both halves agree.
-void read_endianness(const std::string &endian_field, bool description_says_big,
-                     bool &instructions_big, bool &data_big)
+// Instructions and data do not always go in the same order, and a processor
+// that disagrees with itself says so in two different ways.
+//
+// Most say it with an `instructionEndian` attribute, which the description now
+// carries: AARCH64:BE reads big-endian data out of little-endian instructions
+// and would otherwise be described as big-endian throughout. The rest say it in
+// the id, where the endian field reads "LEBE" rather than "LE" or "BE"; that is
+// a real ARM configuration and not a typo. Both are honoured, because between
+// them they cover every processor that does it.
+void read_endianness(const std::string &endian_field, bool data_says_big,
+                     bool instructions_say_big, bool &instructions_big, bool &data_big)
 {
+    instructions_big = instructions_say_big;
+    data_big = data_says_big;
     if (endian_field == "LEBE") {
         instructions_big = false;
         data_big = true;
-        return;
     }
-    instructions_big = description_says_big;
-    data_big = description_says_big;
 }
 
 } // namespace
@@ -80,7 +84,8 @@ bool Target::from_language_id(const std::string &language_id, Target &target, st
     target.language_id = found->getId();
     target.address_bits = found->getSize();
     read_endianness(parts.size() > 1 ? parts[1] : std::string(), found->isBigEndian(),
-                    target.instruction_big_endian, target.data_big_endian);
+                    found->isInstructionBigEndian(), target.instruction_big_endian,
+                    target.data_big_endian);
 
     // An address bus of 24 bits is three bytes, and a machine with one exists,
     // so this rounds up rather than dividing and hoping.
@@ -92,8 +97,13 @@ bool Target::from_language_id(const std::string &language_id, Target &target, st
     // the machine: it is what makes AARCH64 ilp32 a sixty-four bit processor
     // holding four-byte pointers. The smallest truncation is the pointer size,
     // since that is the space code addresses through.
+    //
+    // The size on a truncation is already a count of bytes - it is described as
+    // the size of pointers into the truncated space - so it is taken as it is.
+    // Dividing it as though it were a width in bits gave every truncated
+    // language one-byte pointers, which is eighteen of them.
     for (int i = 0; i < found->numTruncations(); ++i) {
-        const int truncated = (found->getTruncation(i).getSize() + 7) / 8;
+        const int truncated = found->getTruncation(i).getSize();
         if (truncated > 0 && truncated < target.pointer_bytes)
             target.pointer_bytes = truncated;
     }
@@ -250,6 +260,169 @@ bool verify(const Function &function, std::vector<std::string> &problems)
     }
 
     return problems.size() == before;
+}
+
+// ----------------------------------------------------------------- building
+
+Builder::Builder(std::string name) { function_.name = std::move(name); }
+
+Value Builder::value(TypePtr type, Storage storage)
+{
+    Value made;
+    made.identifier = next_value_++;
+    made.type = type;
+    made.storage = storage;
+    return made;
+}
+
+Value Builder::parameter(TypePtr type, Storage storage)
+{
+    const Value made = value(type, storage);
+    function_.parameters.push_back(made);
+    return made;
+}
+
+uint32_t Builder::block()
+{
+    Block opened;
+    opened.identifier = next_block_++;
+    function_.blocks.push_back(opened);
+    if (function_.entry == 0)
+        function_.entry = opened.identifier;
+    current_ = opened.identifier;
+    return current_;
+}
+
+void Builder::resume(uint32_t identifier)
+{
+    if (block_named(identifier) == nullptr) {
+        problems_.push_back("nothing can be written into block " + std::to_string(identifier) +
+                            ", which was never opened");
+        return;
+    }
+    current_ = identifier;
+}
+
+Block *Builder::block_named(uint32_t identifier)
+{
+    for (Block &block : function_.blocks) {
+        if (block.identifier == identifier)
+            return &block;
+    }
+    return nullptr;
+}
+
+Value Builder::emit(Instruction instruction)
+{
+    Block *block = block_named(current_);
+    if (block == nullptr) {
+        problems_.push_back(std::string("a ") + name_of(instruction.operation) +
+                            " was written before any block was opened");
+        return Value();
+    }
+    // A block that has already been left cannot be added to. Saying so here
+    // names the instruction that did it; saying so at verification names only
+    // the block, long after whoever wrote it has moved on.
+    if (!block->instructions.empty() && is_terminator(block->instructions.back().operation)) {
+        problems_.push_back(std::string("a ") + name_of(instruction.operation) +
+                            " was written into block " + std::to_string(current_) +
+                            ", which had already been left by a " +
+                            name_of(block->instructions.back().operation));
+        return Value();
+    }
+    block->instructions.push_back(std::move(instruction));
+    return block->instructions.back().result;
+}
+
+void Builder::terminate(Instruction instruction) { emit(std::move(instruction)); }
+
+Value Builder::constant(uint64_t immediate, int width, TypePtr type)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Constant;
+    instruction.immediate = immediate;
+    instruction.width = width;
+    instruction.result = value(type);
+    return emit(std::move(instruction));
+}
+
+Value Builder::binary(Operation operation, Value left, Value right, int width, bool is_signed,
+                      TypePtr type)
+{
+    Instruction instruction;
+    instruction.operation = operation;
+    instruction.arguments.push_back(left);
+    instruction.arguments.push_back(right);
+    instruction.width = width;
+    instruction.is_signed = is_signed;
+    instruction.result = value(type);
+    return emit(std::move(instruction));
+}
+
+Value Builder::load(Value address, int width, Space space, TypePtr type)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Load;
+    instruction.arguments.push_back(address);
+    instruction.width = width;
+    instruction.space = space;
+    instruction.result = value(type);
+    return emit(std::move(instruction));
+}
+
+void Builder::store(Value address, Value held, int width, Space space)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Store;
+    instruction.arguments.push_back(address);
+    instruction.arguments.push_back(held);
+    instruction.width = width;
+    instruction.space = space;
+    emit(std::move(instruction));
+}
+
+void Builder::ret()
+{
+    Instruction instruction;
+    instruction.operation = Operation::Return;
+    terminate(std::move(instruction));
+}
+
+void Builder::ret(Value held)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Return;
+    instruction.arguments.push_back(held);
+    terminate(std::move(instruction));
+}
+
+void Builder::jump(uint32_t destination)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Jump;
+    instruction.successors.push_back(destination);
+    terminate(std::move(instruction));
+}
+
+void Builder::branch(Value condition, uint32_t when_true, uint32_t when_false)
+{
+    Instruction instruction;
+    instruction.operation = Operation::Branch;
+    instruction.arguments.push_back(condition);
+    instruction.successors.push_back(when_true);
+    instruction.successors.push_back(when_false);
+    terminate(std::move(instruction));
+}
+
+bool Builder::finish(Function &function, std::vector<std::string> &problems)
+{
+    const size_t before = problems.size();
+    problems.insert(problems.end(), problems_.begin(), problems_.end());
+    verify(function_, problems);
+    if (problems.size() != before)
+        return false;
+    function = function_;
+    return true;
 }
 
 // ------------------------------------------------------------------ writing

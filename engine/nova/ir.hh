@@ -235,6 +235,77 @@ struct Unit {
     std::vector<Function> functions;
 };
 
+// ------------------------------------------------------------------ building
+
+// Puts a function together, so that whatever is lowering into this has one
+// thing to think about at a time.
+//
+// Two rules are kept here rather than left to whoever is building, because
+// both are easy to break and expensive to find later: a value is numbered once
+// and never reused, and a block is finished by exactly one way out. Emitting
+// into a block that has already been left is refused at the point it happens,
+// which is where the mistake is, instead of surfacing as a verification failure
+// somewhere with no line attached.
+class Builder {
+public:
+    explicit Builder(std::string name);
+
+    // Numbers a fresh value. Storage is given here because at level 1 it is the
+    // only thing that identifies the value at all.
+    Value value(TypePtr type = nullptr, Storage storage = Storage());
+
+    // A parameter, which is a value the caller has already put somewhere.
+    Value parameter(TypePtr type = nullptr, Storage storage = Storage());
+
+    // Opens a block and makes it the one being written into. The first block
+    // opened becomes the entry.
+    uint32_t block();
+    // Writes into a block opened earlier.
+    void resume(uint32_t identifier);
+    uint32_t current() const { return current_; }
+
+    // Adds an instruction to the block being written into, and answers with its
+    // result. Refused, with `failed()` set, once that block has been left.
+    Value emit(Instruction instruction);
+
+    // The operations worth a shorthand, because a lowering writes them
+    // constantly and spelling each one out obscures what it is doing.
+    Value constant(uint64_t immediate, int width, TypePtr type = nullptr);
+    Value binary(Operation operation, Value left, Value right, int width, bool is_signed,
+                 TypePtr type = nullptr);
+    Value load(Value address, int width, Space space = Space::Data, TypePtr type = nullptr);
+    void store(Value address, Value held, int width, Space space = Space::Data);
+
+    // The ways out. Each finishes the block being written into.
+    void ret();
+    void ret(Value held);
+    void jump(uint32_t destination);
+    void branch(Value condition, uint32_t when_true, uint32_t when_false);
+
+    void set_level(Level level) { function_.level = level; }
+    void set_address(uint64_t address) { function_.address = address; }
+    void set_budget(uint64_t budget) { function_.budget = budget; }
+    void set_result(Value result) { function_.result = result; }
+
+    // Whether anything was refused along the way, and what.
+    bool failed() const { return !problems_.empty(); }
+    const std::vector<std::string> &problems() const { return problems_; }
+
+    // The finished function. Verified on the way out, so a builder that was
+    // misused says so before anything tries to generate code from it.
+    bool finish(Function &function, std::vector<std::string> &problems);
+
+private:
+    Block *block_named(uint32_t identifier);
+    void terminate(Instruction instruction);
+
+    Function function_;
+    uint32_t next_value_ = 1;
+    uint32_t next_block_ = 1;
+    uint32_t current_ = 0;
+    std::vector<std::string> problems_;
+};
+
 // ---------------------------------------------------------------- inspection
 
 // Whether an operation is a way out of a block. A block ends with exactly one
