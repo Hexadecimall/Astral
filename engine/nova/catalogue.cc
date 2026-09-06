@@ -439,6 +439,27 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         for (int slot = 0; slot < made->getNumOperands(); ++slot)
             form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
 
+        // A bit that a value goes in is not a bit the form insists on.
+        //
+        // The tree that picks a form also splits on the bits where values go,
+        // because that is how it tells one encoding from a neighbouring one,
+        // and those splits came back looking like demands. Left that way the
+        // fields are frozen: a number written into one came out as whatever
+        // number the form was reached through, so copying twenty produced
+        // eighteen.
+        for (const Form::Slot &slot : form.slots) {
+            form.fixed_mask &= ~slot.register_mask;
+            if (slot.is_register() || !slot.is_placed())
+                continue;
+            const int width = slot.last_bit - slot.first_bit + 1;
+            const int shift = form.shortest * 8 - 1 - slot.last_bit;
+            if (width <= 0 || width >= 64 || shift < 0)
+                continue;
+            form.fixed_mask &= ~(((static_cast<uint64_t>(1) << width) - 1)
+                                 << static_cast<unsigned>(shift));
+        }
+        form.fixed_bits &= form.fixed_mask;
+
         forms_.push_back(std::move(form));
     }
 
