@@ -562,6 +562,68 @@ void check_counting()
     }
 }
 
+
+// The expressions that reach into something, or choose between two things, or
+// change how wide a value is.
+void check_reaching_and_choosing()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for("func f(): i32 { return sizeof(i32); }\n", arm, {}, value, why);
+        report(ran && value == 4, "how big a thing is, is known before anything runs",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A conditional is an if that answers with something, so both halves have
+    // to leave their answer in the same place.
+    {
+        uint64_t taken = 0;
+        uint64_t otherwise = 0;
+        std::string why;
+        const bool first = answer_for("func f(): i32 { var a: i32 = 5; return a > 3 ? 11 : 22; }\n",
+                                      arm, {}, taken, why);
+        const bool second = answer_for("func f(): i32 { var a: i32 = 1; return a > 3 ? 11 : 22; }\n",
+                                       arm, {}, otherwise, why);
+        report(first && second && taken == 11 && otherwise == 22,
+               "a conditional answers with whichever half its condition chose",
+               first && second ? "got " + std::to_string(taken) + " and " +
+                                     std::to_string(otherwise)
+                               : why);
+    }
+
+    // Narrowing keeps the low bytes and nothing else, so three hundred in one
+    // byte is forty-four.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran =
+            answer_for("func f(): i32 { var a: i32 = 300; return a as u8; }\n", arm, {}, value, why);
+        report(ran && value == 44, "narrowing a value keeps the bytes that fit and no others",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A member is read and written at the offset its record gives it, so two
+    // members of the same thing have to be two different places.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "struct Point { var x: i32; var y: i32; }\n"
+            "func f(): i32 {\n"
+            "  var where: Point;\n"
+            "  where.x = 4;\n"
+            "  where.y = 9;\n"
+            "  return where.x + where.y;\n"
+            "}\n",
+            arm, {}, value, why);
+        report(ran && value == 13, "two members of one record are two different places",
+               ran ? "got " + std::to_string(value) : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -579,6 +641,7 @@ int main()
     check_it_computes_what_the_source_said();
     check_choosing_and_going();
     check_counting();
+    check_reaching_and_choosing();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

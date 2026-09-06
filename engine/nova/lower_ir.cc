@@ -133,6 +133,14 @@ private:
     ir::Value assign(const Expression &expression);
     ir::Value call(const Expression &expression);
     ir::Value name(const Expression &expression);
+    ir::Value cast(const Expression &expression);
+    ir::Value conditional(const Expression &expression);
+    ir::Value member(const Expression &expression);
+    ir::Value index(const Expression &expression);
+
+    // The address a member or an element is at, which is what both reading one
+    // and writing one need.
+    ir::Value address_of(const Expression &expression, int &width, TypePtr &type);
 
     // The width a binary operation works in. Its own type says so when it has
     // one; a level-1 expression has none, and then the operands do, which is
@@ -238,6 +246,210 @@ ir::Value Lowerer::name(const Expression &expression)
     }
     const ir::Value address = address_of_slot(*slot);
     return builder_->load(address, slot->width, ir::Space::Frame, slot->type);
+}
+
+// `value as u32`, which reinterprets a view over storage. The bits do not move
+// unless the widths differ, and when they do it is the sign of what is being
+// widened that decides what fills the top.
+ir::Value Lowerer::cast(const Expression &expression)
+{
+    if (!expression.left) {
+        complain(expression.where, "a cast with nothing to cast");
+        return ir::Value();
+    }
+    const ir::Value inner = this->expression(*expression.left);
+    if (!inner.is_valid())
+        return ir::Value();
+
+    const int from = width_of_value(expression.left->type, inner.storage, target_);
+    const int to = width_of_type(expression.named_type, target_);
+    if (to == from || to == 0)
+        return inner;
+
+    ir::Instruction instruction;
+    instruction.operation = to > from ? ir::Operation::Extend : ir::Operation::Truncate;
+    instruction.width = to;
+    // Widening keeps the sign of what it came from, not of what it becomes: a
+    // signed byte in a word is still negative.
+    instruction.is_signed = type_is_signed(expression.left->type);
+    instruction.arguments.push_back(inner);
+    instruction.result = builder_->value(expression.named_type);
+    return builder_->emit(std::move(instruction));
+}
+
+// `condition ? this : that`, which is an if that answers with something. The
+// answer is kept in a slot of its own because both halves have to leave it in
+// the same place for whatever reads it afterwards.
+ir::Value Lowerer::conditional(const Expression &expression)
+{
+    if (!expression.left || !expression.right || !expression.third) {
+        complain(expression.where, "a conditional missing one of its three parts");
+        return ir::Value();
+    }
+    const ir::Value condition = this->expression(*expression.left);
+    if (!condition.is_valid())
+        return ir::Value();
+
+    const int width = width_of_type(expression.type, target_);
+    Slot answer;
+    next_offset_ -= width > 0 ? width : 8;
+    answer.offset = next_offset_;
+    answer.type = expression.type;
+    answer.width = width > 0 ? width : 8;
+
+    const uint32_t deciding = builder_->current();
+    const uint32_t when_true = builder_->block();
+    const uint32_t when_false = builder_->block();
+    const uint32_t after = builder_->block();
+
+    builder_->resume(deciding);
+    builder_->branch(condition, when_true, when_false);
+
+    builder_->resume(when_true);
+    const ir::Value taken = this->expression(*expression.right);
+    if (!taken.is_valid())
+        return ir::Value();
+    builder_->store(address_of_slot(answer), taken, answer.width, ir::Space::Frame);
+    builder_->jump(after);
+
+    builder_->resume(when_false);
+    const ir::Value otherwise = this->expression(*expression.third);
+    if (!otherwise.is_valid())
+        return ir::Value();
+    builder_->store(address_of_slot(answer), otherwise, answer.width, ir::Space::Frame);
+    builder_->jump(after);
+
+    builder_->resume(after);
+    return builder_->load(address_of_slot(answer), answer.width, ir::Space::Frame, answer.type);
+}
+
+ir::Value Lowerer::address_of(const Expression &expression, int &width, TypePtr &type)
+{
+    width = 0;
+    type = nullptr;
+
+    if (expression.kind == Expression::Kind::Member) {
+        if (!expression.left) {
+            complain(expression.where, "a member of nothing");
+            return ir::Value();
+        }
+        // Where the thing itself is. A member is read through the address of
+        // what holds it, which is a slot when it is a local and an address when
+        // it is already one.
+        ir::Value base;
+        if (expression.left->kind == Expression::Kind::Name) {
+            const Slot *slot = look_up(expression.left->name);
+            if (slot == nullptr) {
+                complain(expression.left->where, "nothing here is called " + expression.left->name);
+                return ir::Value();
+            }
+            base = address_of_slot(*slot);
+        } else {
+            base = this->expression(*expression.left);
+        }
+        if (!base.is_valid())
+            return ir::Value();
+
+        // The member's offset within it, which the type says. The tree's own
+        // type is filled in while checking and is not there yet, so the slot a
+        // name stands for is what knows what it holds.
+        TypePtr holding = expression.left->type;
+        if (holding == nullptr && expression.left->kind == Expression::Kind::Name) {
+            const Slot *slot = look_up(expression.left->name);
+            if (slot != nullptr)
+                holding = slot->type;
+        }
+        uint64_t offset = 0;
+        bool found = false;
+        if (holding != nullptr && holding->kind == compiler::Type::Kind::Struct) {
+            for (const compiler::Type::Member &member : holding->members) {
+                if (member.name == expression.name) {
+                    offset = member.offset;
+                    type = member.type;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            complain(expression.where, "nothing in this has a member called " + expression.name);
+            return ir::Value();
+        }
+        width = width_of_type(type, target_);
+        const int pointer = target_.pointer_bytes > 0 ? target_.pointer_bytes : 8;
+        const ir::Value step = builder_->constant(offset, pointer);
+        return builder_->binary(ir::Operation::Add, base, step, pointer, false);
+    }
+
+    if (expression.kind == Expression::Kind::Index) {
+        if (!expression.left || !expression.right) {
+            complain(expression.where, "an index with nothing to index");
+            return ir::Value();
+        }
+        ir::Value base;
+        TypePtr holding = expression.left->type;
+        if (holding == nullptr && expression.left->kind == Expression::Kind::Name) {
+            const Slot *slot = look_up(expression.left->name);
+            if (slot != nullptr)
+                holding = slot->type;
+        }
+        if (expression.left->kind == Expression::Kind::Name) {
+            const Slot *slot = look_up(expression.left->name);
+            if (slot != nullptr && holding != nullptr &&
+                holding->kind == compiler::Type::Kind::Array) {
+                // An array's name is where it starts rather than something to
+                // read: the elements are the thing, not a pointer to them.
+                base = address_of_slot(*slot);
+            } else {
+                base = this->expression(*expression.left);
+            }
+        } else {
+            base = this->expression(*expression.left);
+        }
+        if (!base.is_valid())
+            return ir::Value();
+
+        type = holding != nullptr ? holding->target : nullptr;
+        if (type == nullptr) {
+            complain(expression.where, "this is not something with elements in it");
+            return ir::Value();
+        }
+        width = width_of_type(type, target_);
+
+        const ir::Value which = this->expression(*expression.right);
+        if (!which.is_valid())
+            return ir::Value();
+        const int pointer = target_.pointer_bytes > 0 ? target_.pointer_bytes : 8;
+        // An element is as many bytes along as it is elements in, which is the
+        // one multiplication an index means.
+        const ir::Value size = builder_->constant(static_cast<uint64_t>(width), pointer);
+        const ir::Value along =
+            builder_->binary(ir::Operation::Multiply, which, size, pointer, false);
+        return builder_->binary(ir::Operation::Add, base, along, pointer, false);
+    }
+
+    complain(expression.where, "this is not something with an address");
+    return ir::Value();
+}
+
+ir::Value Lowerer::member(const Expression &expression)
+{
+    int width = 0;
+    TypePtr type = nullptr;
+    const ir::Value where = address_of(expression, width, type);
+    if (!where.is_valid())
+        return ir::Value();
+    return builder_->load(where, width, ir::Space::Data, type);
+}
+
+ir::Value Lowerer::index(const Expression &expression)
+{
+    int width = 0;
+    TypePtr type = nullptr;
+    const ir::Value where = address_of(expression, width, type);
+    if (!where.is_valid())
+        return ir::Value();
+    return builder_->load(where, width, ir::Space::Data, type);
 }
 
 ir::Value Lowerer::binary(const Expression &expression)
@@ -352,6 +564,17 @@ ir::Value Lowerer::assign(const Expression &expression)
         return held;
     }
 
+    if (expression.left->kind == Expression::Kind::Member ||
+        expression.left->kind == Expression::Kind::Index) {
+        int width = 0;
+        TypePtr type = nullptr;
+        const ir::Value where = address_of(*expression.left, width, type);
+        if (!where.is_valid())
+            return ir::Value();
+        builder_->store(where, held, width, ir::Space::Data);
+        return held;
+    }
+
     complain(expression.where, "this is not something that can be assigned to yet");
     return ir::Value();
 }
@@ -412,6 +635,29 @@ ir::Value Lowerer::expression(const Expression &expression)
         return assign(expression);
     case Expression::Kind::Call:
         return call(expression);
+    case Expression::Kind::As:
+        return cast(expression);
+    case Expression::Kind::Conditional:
+        return conditional(expression);
+    case Expression::Kind::Member:
+        return member(expression);
+    case Expression::Kind::Index:
+        return index(expression);
+    case Expression::Kind::SizeOf: {
+        // How many bytes the thing takes, which is a number known here and so
+        // is one by the time anything runs.
+        const TypePtr measured =
+            expression.named_type != nullptr
+                ? expression.named_type
+                : (expression.left != nullptr ? expression.left->type : nullptr);
+        if (measured == nullptr) {
+            complain(expression.where, "there is no saying how big this is");
+            return ir::Value();
+        }
+        return builder_->constant(static_cast<uint64_t>(width_of_type(measured, target_)),
+                                  target_.pointer_bytes > 0 ? target_.pointer_bytes : 8,
+                                  expression.type);
+    }
     case Expression::Kind::AddressOfName: {
         const Slot *slot = look_up(expression.name);
         if (slot == nullptr) {
