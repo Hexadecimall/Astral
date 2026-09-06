@@ -265,12 +265,44 @@ void check_a_return_goes_back_through_the_return_address()
            "a return is not written as the instruction that returns from a debug exception",
            "it was written as: " + reads);
 
-    // And when it cannot be written, the reason says which register a return
-    // would have had to go back through rather than only that nothing fitted.
-    report(wrote || why.find("ra") != std::string::npos,
-           "and when none can be written the reason names the register a return goes back "
-           "through",
-           why);
+    // And when it cannot be written, the reason says the bytes do not mean a
+    // return rather than only that nothing fitted - because meaning is what was
+    // checked, and a reader who is told a form was refused wants to know that
+    // the refusal came from asking the processor rather than from a rule here.
+    report(wrote || why.find("do not mean a return") != std::string::npos,
+           "and when none can be written the reason says the bytes do not mean a return", why);
+}
+
+// An instruction that names no register is checked by what it means.
+//
+// Reading bytes back as text settles whether the right registers went in the
+// right fields, and for a return there are none to check - so any two bytes
+// that decode at all pass, and the shortest wins. On MIPS the shortest is a
+// coprocessor store, which reads back perfectly and is not a return. What tells
+// them apart is what the processor says they do.
+void check_meaning_is_asked_for_and_not_only_spelling()
+{
+    std::string trouble;
+
+    // `jr ra` means a return that goes back through ra.
+    const std::vector<Meaning> going_back =
+        means_as("MIPS:BE:32:default", {0x03, 0xe0, 0x00, 0x08}, trouble);
+    bool has_return = false;
+    for (const Meaning &one : going_back)
+        has_return = has_return || one.opcode == ghidra::CPUI_RETURN;
+    report(has_return, "the processor says its return instruction means a return",
+           going_back.empty() ? trouble : "it meant something else");
+
+    // The two bytes that would have been chosen for being shortest mean a
+    // store, and nothing about reading them back as text says so.
+    const std::vector<Meaning> shorter =
+        means_as("MIPS:BE:32:default", {0xe8, 0x2e}, trouble);
+    bool shorter_returns = false;
+    for (const Meaning &one : shorter)
+        shorter_returns = shorter_returns || one.opcode == ghidra::CPUI_RETURN;
+    report(!shorter_returns && !shorter.empty(),
+           "and the shorter bytes that read back cleanly do not mean one",
+           shorter.empty() ? trouble : "they meant a return after all");
 }
 
 // A form that names a register outright is still a form.
@@ -322,6 +354,7 @@ int main()
     check_a_value_with_no_home();
     check_a_return_goes_back_through_the_return_address();
     check_a_form_that_names_its_own_register_is_offered();
+    check_meaning_is_asked_for_and_not_only_spelling();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

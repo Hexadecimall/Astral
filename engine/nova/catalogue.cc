@@ -69,6 +69,103 @@ Form::Piece read_piece(const ghidra::VarnodeTpl *value)
     return piece;
 }
 
+// One place a template names, when it names one outright.
+struct PlaceKey {
+    const ghidra::AddrSpace *space = nullptr;
+    uint64_t offset = 0;
+
+    bool operator<(const PlaceKey &other) const
+    {
+        return space != other.space ? space < other.space : offset < other.offset;
+    }
+    bool operator==(const PlaceKey &other) const
+    {
+        return space == other.space && offset == other.offset;
+    }
+};
+
+bool key_of(const ghidra::VarnodeTpl *value, PlaceKey &out)
+{
+    if (value == nullptr)
+        return false;
+    const ghidra::ConstTpl &space = value->getSpace();
+    const ghidra::ConstTpl &offset = value->getOffset();
+    if (space.getType() != ghidra::ConstTpl::spaceid ||
+        offset.getType() != ghidra::ConstTpl::real)
+        return false;
+    out.space = space.getSpace();
+    out.offset = offset.getReal();
+    return true;
+}
+
+// Where a control transfer's target came from.
+//
+// A processor's return instruction almost never says "go back". It loads the
+// program counter from somewhere and goes through that, and the interesting
+// part is what it loaded. AARCH64's `ret` copies x30 into the program counter
+// and returns through it; MIPS's `jr ra` masks the low bit off ra first,
+// because that bit chooses an instruction set, and only then goes. In both the
+// value the return literally reads is the program counter, which is the same
+// register every other kind of return goes through too - so reading it says
+// nothing about which kind this is.
+//
+// What does say is where the value came from. This walks that backwards: from
+// the place the transfer goes through, to whatever else in the same template
+// put something there, to whatever those read, until it reaches places nothing
+// in the template wrote. Those arrived with the instruction, and they are what
+// the form really goes back through.
+void sources_of(const std::vector<ghidra::OpTpl *> &operations, size_t before,
+                const ghidra::VarnodeTpl *target, std::vector<Form::Piece> &out)
+{
+    std::vector<const ghidra::VarnodeTpl *> waiting;
+    waiting.push_back(target);
+    std::set<PlaceKey> seen;
+
+    // A template is short and this only walks backwards, but a specification is
+    // somebody else's file and a bound costs nothing.
+    for (int steps = 0; !waiting.empty() && steps < 64; ++steps) {
+        const ghidra::VarnodeTpl *value = waiting.back();
+        waiting.pop_back();
+        if (value == nullptr)
+            continue;
+
+        // A slot is where the trail ends: what goes in it is chosen when an
+        // instruction is written rather than by the form.
+        if (value->getOffset().getType() == ghidra::ConstTpl::handle) {
+            out.push_back(read_piece(value));
+            continue;
+        }
+
+        PlaceKey key;
+        if (!key_of(value, key) || !seen.insert(key).second)
+            continue;
+
+        const ghidra::OpTpl *wrote = nullptr;
+        for (size_t i = 0; i < before && i < operations.size(); ++i) {
+            const ghidra::OpTpl *operation = operations[i];
+            if (operation == nullptr || is_bookkeeping(operation->getOpcode()))
+                continue;
+            PlaceKey where;
+            if (operation->getOut() != nullptr && key_of(operation->getOut(), where) &&
+                where == key)
+                wrote = operation;
+        }
+
+        if (wrote == nullptr) {
+            // Nothing in the template put it there, so it was already there
+            // when the instruction ran. Only a register is worth reporting: the
+            // constants a template masks and shifts with are its own arithmetic
+            // and say nothing about where control is going.
+            const Form::Piece piece = read_piece(value);
+            if (piece.is_fixed && piece.fixed_is_register)
+                out.push_back(piece);
+            continue;
+        }
+        for (int i = 0; i < wrote->numInput(); ++i)
+            waiting.push_back(wrote->getIn(i));
+    }
+}
+
 // The bits a form always has, and how they are found.
 //
 // A form is chosen from a stream of bits by a tree: each node looks at a few
@@ -416,12 +513,16 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
 
         ghidra::ConstructTpl *templ = made->getTempl();
         const ghidra::OpTpl *only = nullptr;
+        size_t only_at = 0;
         if (templ != nullptr) {
+            size_t at = 0;
             for (const ghidra::OpTpl *operation : templ->getOpvec()) {
-                if (operation == nullptr || is_bookkeeping(operation->getOpcode()))
-                    continue;
-                form.does.push_back(operation->getOpcode());
-                only = operation;
+                if (operation != nullptr && !is_bookkeeping(operation->getOpcode())) {
+                    form.does.push_back(operation->getOpcode());
+                    only = operation;
+                    only_at = at;
+                }
+                ++at;
             }
         }
 
@@ -435,6 +536,29 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
             }
             for (int input = 0; input < only->numInput(); ++input)
                 form.reads.push_back(read_piece(only->getIn(input)));
+        } else if (form.does.size() > 1 && only != nullptr && templ != nullptr &&
+                   form.does.back() == ghidra::CPUI_RETURN && only->numInput() > 0) {
+            // A form whose last operation goes back is that return, however
+            // long the way there was.
+            //
+            // Going back is several operations on most processors, and none of
+            // them is optional: a MIPS function cannot return without the mask
+            // that clears the instruction-set bit, and an AARCH64 one cannot
+            // without the copy into the program counter. Refusing every form
+            // that does more than one thing refused every real return on both,
+            // and left only the ones that return from an exception - which are
+            // one operation each, are the same length, and fault.
+            //
+            // So the extra operations here are how this processor performs a
+            // return rather than something else it does as well, and the form
+            // is taken as reading whatever the return goes back through.
+            std::vector<Form::Piece> sources;
+            sources_of(templ->getOpvec(), only_at, only->getIn(0), sources);
+            if (!sources.empty()) {
+                form.does.assign(1, ghidra::CPUI_RETURN);
+                form.writes = false;
+                form.reads = std::move(sources);
+            }
         }
 
         auto pattern = patterns.find(made);

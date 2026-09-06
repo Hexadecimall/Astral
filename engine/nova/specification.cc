@@ -147,5 +147,59 @@ std::string reads_as(const std::string &target, const std::vector<uint8_t> &byte
     return written.text;
 }
 
+std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
+                              std::string &error)
+{
+    static std::mutex lock;
+    static uint64_t next = 0x40000;
+
+    std::vector<Meaning> meant;
+    ghidra::SleighArchitecture *held = specification_for(target, error);
+    if (held == nullptr || bytes.empty())
+        return meant;
+
+    class Collected : public ghidra::PcodeEmit {
+    public:
+        std::vector<Meaning> *into = nullptr;
+        void dump(const ghidra::Address &, ghidra::OpCode opcode, ghidra::VarnodeData *out,
+                  ghidra::VarnodeData *in, ghidra::int4 count) override
+        {
+            Meaning one;
+            one.opcode = opcode;
+            if (out != nullptr) {
+                one.writes = true;
+                one.output = *out;
+            }
+            for (ghidra::int4 i = 0; i < count; ++i)
+                one.inputs.push_back(in[i]);
+            into->push_back(std::move(one));
+        }
+    };
+
+    std::lock_guard<std::mutex> holding(lock);
+    DescribingArchitecture *described = static_cast<DescribingArchitecture *>(held);
+    NoImage *image = described->image();
+    if (image == nullptr) {
+        error = "this processor has nowhere to put the bytes being read";
+        return meant;
+    }
+
+    next += 0x100;
+    image->serving_at = next;
+    image->serving = bytes;
+
+    Collected collected;
+    collected.into = &meant;
+    try {
+        held->translate->oneInstruction(collected,
+                                        ghidra::Address(held->getDefaultCodeSpace(), next));
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        meant.clear();
+    }
+    image->serving.clear();
+    return meant;
+}
+
 } // namespace nova
 } // namespace astral_internal

@@ -3,6 +3,7 @@
 #include "specification.hh"
 
 #include <map>
+#include <set>
 #include <sstream>
 
 namespace astral_internal {
@@ -34,6 +35,46 @@ std::vector<std::string> names_at(const ir::Target &target, uint64_t offset, int
     }
     exact.insert(exact.end(), elsewhere.begin(), elsewhere.end());
     return exact;
+}
+
+// Whether a value the decoded instruction went through came from a particular
+// register.
+//
+// The same walk the catalogue does over a form's template, done here over what
+// bytes actually decoded to. A return goes through the program counter on every
+// processor that loads it first, so what the return reads says nothing; what
+// put the value there does. MIPS masks the low bit off the link register on the
+// way, so the trail is two operations long and neither of them is a copy.
+bool reaches(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
+             uint64_t register_offset)
+{
+    std::vector<ghidra::VarnodeData> waiting;
+    waiting.push_back(from);
+    std::set<std::pair<const ghidra::AddrSpace *, uint64_t>> seen;
+
+    for (int steps = 0; !waiting.empty() && steps < 128; ++steps) {
+        const ghidra::VarnodeData value = waiting.back();
+        waiting.pop_back();
+        if (value.space == nullptr)
+            continue;
+        if (!seen.insert({value.space, value.offset}).second)
+            continue;
+        if (value.space->getType() == ghidra::IPTR_PROCESSOR && value.offset == register_offset)
+            return true;
+
+        // Whatever the instruction last put there, before it went.
+        const Meaning *wrote = nullptr;
+        for (const Meaning &one : meant) {
+            if (one.writes && one.output.space == value.space &&
+                one.output.offset == value.offset)
+                wrote = &one;
+        }
+        if (wrote == nullptr)
+            continue;
+        for (const ghidra::VarnodeData &input : wrote->inputs)
+            waiting.push_back(input);
+    }
+    return false;
 }
 
 std::string where_it_is(const pcode::Varnode &node)
@@ -141,11 +182,15 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // than leaving the question to the reading-back below.
             std::vector<const catalogue::Form *> going_back;
             const std::vector<const catalogue::Form *> *choose_from = &forms;
+            bool must_mean_a_return = false;
+            uint64_t back_through = 0;
             if (operation.opcode == ghidra::CPUI_RETURN) {
                 std::string address_name;
                 ir::Target::RegisterPlace address;
                 std::string missing;
                 if (target.return_address(address_name, address, missing)) {
+                    must_mean_a_return = true;
+                    back_through = address.offset;
                     for (const catalogue::Form *form : forms) {
                         bool reads_it = false;
                         for (const catalogue::Form::Piece &piece : form->reads)
@@ -250,6 +295,42 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 if (!mentions_all) {
                     last_refusal = "the bytes it would write read back as: " + reads;
                     continue;
+                }
+
+                // An instruction that names no register is checked by what it
+                // means instead.
+                //
+                // Reading bytes back as text settles whether the right
+                // registers went in the right fields, and for most instructions
+                // that is the whole question. For a return it settles nothing:
+                // there are no registers in it to check, so any two bytes that
+                // decode at all pass, and the shortest wins - which on MIPS is
+                // a coprocessor store. So the bytes are decoded to what they do
+                // rather than to how they are written, and they have to come
+                // back as a return going through the register a return goes
+                // through.
+                if (must_mean_a_return) {
+                    std::string unreadable;
+                    const std::vector<Meaning> meant = means_as(
+                        target.compiler.empty() ? target.language_id
+                                                : target.language_id + ":" + target.compiler,
+                        bytes, unreadable);
+                    bool goes_back = false;
+                    for (const Meaning &one : meant) {
+                        if (one.opcode != ghidra::CPUI_RETURN)
+                            continue;
+                        // Where it goes back through, followed through whatever
+                        // the instruction did to the address on the way.
+                        goes_back = goes_back || reaches(meant, one.inputs.empty()
+                                                                    ? ghidra::VarnodeData()
+                                                                    : one.inputs.front(),
+                                                         back_through);
+                    }
+                    if (!goes_back) {
+                        last_refusal = "the bytes it would write do not mean a return: " +
+                                       (reads.empty() ? unreadable : reads);
+                        continue;
+                    }
                 }
 
                 best = form;

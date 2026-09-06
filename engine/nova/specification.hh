@@ -38,6 +38,32 @@ ghidra::SleighArchitecture *specification_for(const std::string &target, std::st
 std::string reads_as(const std::string &target, const std::vector<uint8_t> &bytes,
                      std::string &error);
 
+// One operation of what bytes mean, as the processor works it out.
+struct Meaning {
+    ghidra::OpCode opcode = ghidra::CPUI_COPY;
+    bool writes = false;
+    ghidra::VarnodeData output;
+    std::vector<ghidra::VarnodeData> inputs;
+};
+
+// What bytes mean, rather than how they are written out.
+//
+// Reading an instruction back as text settles whether the right registers went
+// in the right fields, and for most instructions that is the whole question.
+// For the ones that name no register it settles nothing: every two bytes that
+// decode to something are as good as every other, and the shortest wins - which
+// on MIPS chose a coprocessor store in place of a return, because both decode
+// and neither mentions anything to check against.
+//
+// So this asks the deeper question. The specification says what every
+// instruction does in p-code, and that is what a proposal has to match: bytes
+// that mean a return are a return whatever they are spelled.
+//
+// Empty when the bytes are not an instruction. Asked at an address of its own,
+// for the same reason as above.
+std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
+                              std::string &error);
+
 } // namespace nova
 } // namespace astral_internal
 
