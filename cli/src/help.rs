@@ -56,6 +56,7 @@ pub fn usage(stream: Stream) -> i32 {
         // "│  ├─     --input <text>     what the program reads\n",
         // "│  └─     --steps <n>        how many instructions to allow\n",
         "├─ debug <binary>  Watch it run, an instruction at a time\n",
+        "├─ open [binary]   Open the window\n",
         "│  ├─ -f, --function <name>  start there rather than at the entry point\n",
         "│  ├─ -a, --address <hex>    start at an address\n",
         "│  ├─     --arg <text>       an argument to hand it (repeatable)\n",

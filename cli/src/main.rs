@@ -13,6 +13,7 @@ mod debug;
 mod help;
 mod knowledge;
 mod learn;
+mod open;
 mod options;
 mod out;
 mod patch;
@@ -54,6 +55,7 @@ fn dispatch(arguments: &[String]) -> i32 {
         }
         "update" => update::run_command(rest),
         "sleigh" => sleigh::run(rest),
+        "open" => open::run(rest),
         "crap-ya-dont-need" => crap::run(rest),
         "debug" => debug::run(rest),
         "knowledge" => knowledge::run(rest),
@@ -92,6 +94,7 @@ fn topic(wanted: &str) -> i32 {
         "contribute" | "ctb" => contribute::usage(Stream::Out),
         "update" => update::usage(Stream::Out),
         "sleigh" => sleigh::usage(Stream::Out),
+        "open" => open::usage(Stream::Out),
         "crap-ya-dont-need" => crap::usage(Stream::Out),
         _ => {
             error(&format!("no such command '{wanted}'\n"));
