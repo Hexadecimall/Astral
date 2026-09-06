@@ -113,6 +113,18 @@ public:
   int4 getBitStart(void) const { return bitstart; }	///< Lowest bit of the field
   int4 getBitEnd(void) const { return bitend; }		///< Highest bit of the field
   bool isSigned(void) const { return signbit; }		///< Whether the top bit of the field is a sign
+
+  /// \brief How the field is taken out of the instruction's bytes
+  ///
+  /// Reading one takes these bytes in the order they are written, assembles
+  /// them the way this token is assembled, and shifts. Writing one is that
+  /// run backwards, and needs the same three things - which the bit numbers
+  /// above cannot give, since they count within the token rather than across
+  /// the bytes as they are written.
+  int4 getByteStart(void) const { return bytestart; }	///< First byte the field is in
+  int4 getByteEnd(void) const { return byteend; }	///< Last byte the field is in
+  int4 getShift(void) const { return shift; }		///< Shift within those bytes
+  bool isBigEndian(void) const { return bigendian; }	///< How those bytes assemble
 };
 
 class ContextField : public PatternValue {

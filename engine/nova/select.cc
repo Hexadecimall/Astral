@@ -106,6 +106,26 @@ bool reaches(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
 // through whatever the instruction did on the way.
 bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operation &wanted)
 {
+    // An instruction that might not do it is not the instruction.
+    //
+    // Some instructions decide for themselves. AARCH64's csneg copies one
+    // register or the negation of another depending on a flag, and its meaning
+    // contains a copy - so a candidate for a copy was accepted, and what it
+    // wrote depended on a condition nobody had set. A branch inside an
+    // instruction means the operation found may not be the one that runs.
+    const bool asked_to_go = wanted.opcode == ghidra::CPUI_BRANCH ||
+                             wanted.opcode == ghidra::CPUI_CBRANCH ||
+                             wanted.opcode == ghidra::CPUI_BRANCHIND ||
+                             wanted.opcode == ghidra::CPUI_RETURN ||
+                             wanted.opcode == ghidra::CPUI_CALL;
+    if (!asked_to_go) {
+        for (const Meaning &one : meant) {
+            if (one.opcode == ghidra::CPUI_CBRANCH || one.opcode == ghidra::CPUI_BRANCH ||
+                one.opcode == ghidra::CPUI_BRANCHIND)
+                return false;
+        }
+    }
+
     for (const Meaning &doing : meant) {
         if (doing.opcode != wanted.opcode)
             continue;
@@ -159,6 +179,131 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
             }
         }
     }
+    return false;
+}
+
+// The numbers an instruction holds, as the processor reads them out.
+std::vector<uint64_t> numbers_in(const std::vector<Meaning> &meant)
+{
+    std::vector<uint64_t> found;
+    for (const Meaning &one : meant) {
+        for (const ghidra::VarnodeData &input : one.inputs) {
+            if (input.space != nullptr && input.space->getType() == ghidra::IPTR_CONSTANT)
+                found.push_back(input.offset);
+        }
+    }
+    return found;
+}
+
+// Writes a form, working out what to put in any field that takes a number.
+//
+// Where every place is a register this is just writing them. Where one is a
+// number, what goes in the field is not the number: the operand may be a table
+// that shifts or extends what it holds. Rather than read the specification to
+// find out what the table does, the instruction is written twice with the field
+// set to nought and to one, and the processor is asked what number it sees each
+// time. That gives where the field starts and what a step of it is worth, and
+// the rest is arithmetic - checked by writing the answer and asking again.
+bool solve(const catalogue::Form &form,
+           const std::vector<catalogue::Catalogue::Wanted> &places,
+           const std::vector<int> &roles, const ir::Target &target,
+           std::vector<uint8_t> &bytes, std::vector<std::string> &used, std::string &refused)
+{
+    // Which of the places is a number, if any. More than one is not solved
+    // here: two unknowns need two equations and this asks for one.
+    size_t which = places.size();
+    for (size_t at = 0; at < places.size(); ++at) {
+        if (!places[at].is_number)
+            continue;
+        if (which != places.size()) {
+            refused = "this instruction takes more than one number, which is not worked out here";
+            return false;
+        }
+        which = at;
+    }
+
+    if (which == places.size())
+        return catalogue::Catalogue::write_mixed(form, places, bytes, used, refused, roles);
+
+    const std::string spoken = target.compiler.empty()
+                                   ? target.language_id
+                                   : target.language_id + ":" + target.compiler;
+    const size_t slot = which < roles.size() && roles[which] >= 0
+                            ? static_cast<size_t>(roles[which])
+                            : form.slots.size();
+    const size_t ways =
+        slot < form.slots.size() ? form.slots[slot].numbers.size() : size_t(1);
+
+    for (size_t way = 0; way < ways && way < 8; ++way) {
+        std::vector<catalogue::Catalogue::Wanted> asking = places;
+        asking[which].is_raw_field = true;
+        asking[which].way = static_cast<int>(way);
+
+        // What the field is worth, asked twice.
+        uint64_t reading[2] = {0, 0};
+        bool answered = true;
+        for (int step = 0; step < 2 && answered; ++step) {
+            asking[which].number = static_cast<uint64_t>(step);
+            std::vector<uint8_t> probe;
+            std::vector<std::string> spent;
+            std::string trouble;
+            if (!catalogue::Catalogue::write_mixed(form, asking, probe, spent, trouble, roles)) {
+                refused = trouble;
+                answered = false;
+                break;
+            }
+            std::string unreadable;
+            const std::vector<uint64_t> held = numbers_in(means_as(spoken, probe, unreadable));
+            if (held.empty()) {
+                answered = false;
+                break;
+            }
+            // The number the instruction is about is the one that moved, and on
+            // the first pass there is nothing to compare with, so the largest
+            // is taken and checked against the second.
+            reading[step] = held.front();
+            for (uint64_t one : held) {
+                if (one > reading[step])
+                    reading[step] = one;
+            }
+        }
+        if (!answered)
+            continue;
+
+        const uint64_t step_is_worth = reading[1] - reading[0];
+        if (step_is_worth == 0)
+            continue;
+
+        const uint64_t wanted = places[which].number;
+        const uint64_t away = wanted - reading[0];
+        if (away % step_is_worth != 0)
+            continue;
+
+        asking[which].number = away / step_is_worth;
+        std::vector<uint8_t> candidate;
+        std::vector<std::string> spent;
+        std::string trouble;
+        if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble, roles)) {
+            refused = trouble;
+            continue;
+        }
+
+        // And the processor holds the number wanted, which is what all of this
+        // was for.
+        std::string unreadable;
+        bool holds_it = false;
+        for (uint64_t one : numbers_in(means_as(spoken, candidate, unreadable)))
+            holds_it = holds_it || one == wanted;
+        if (!holds_it)
+            continue;
+
+        bytes = std::move(candidate);
+        used = std::move(spent);
+        return true;
+    }
+
+    if (refused.empty())
+        refused = "no field in this instruction can be made to hold that number";
     return false;
 }
 
@@ -350,12 +495,47 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 std::vector<std::string> used;
                 bool made = false;
                 const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
+
+                // Which slot each place belongs in, taken from the form. The
+                // answer goes where the form writes and each value goes where
+                // the form reads it, in the order the operation named them.
+                std::vector<int> roles;
+                if (operation.writes)
+                    roles.push_back(form->writes_to.is_slot ? form->writes_to.slot : -1);
+                for (const catalogue::Form::Piece &piece : form->reads)
+                    roles.push_back(piece.is_slot ? piece.slot : -1);
+
+                const std::vector<int> none;
                 for (const std::vector<catalogue::Catalogue::Wanted> &way : ways) {
-                    if (catalogue::Catalogue::write_mixed(*form, way, bytes, used, refused)) {
-                        made = true;
-                        taken = &way;
-                        break;
+                    const std::vector<int> &fitting =
+                        way.size() == roles.size() ? roles : none;
+
+                    // A number is not always what goes in the field.
+                    //
+                    // An operand that takes one is usually a table rather than
+                    // a field: AARCH64 spells a constant with movz, whose
+                    // operand is a sixteen-bit field shifted by an amount the
+                    // instruction also names, and RISC-V's immI is a field
+                    // sign-extended to sixty-four bits. What goes in is not
+                    // what comes out, and reading the specification to find out
+                    // what the table does means writing an interpreter for a
+                    // language of expressions.
+                    //
+                    // There is an easier question with the same answer. Write a
+                    // nought in the field and ask the processor what number the
+                    // instruction has; write a one and ask again. The
+                    // difference is what one step of the field is worth, and
+                    // the first answer is where it starts - so the bits that
+                    // give the number wanted are arithmetic, and are then
+                    // written and checked by asking a third time. A table whose
+                    // answers do not step evenly says so by disagreeing, and is
+                    // refused rather than guessed at.
+                    if (!solve(*form, way, fitting, target, bytes, used, refused)) {
+                        continue;
                     }
+                    made = true;
+                    taken = &way;
+                    break;
                 }
                 if (!made) {
                     last_refusal = refused;

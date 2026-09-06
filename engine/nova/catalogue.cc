@@ -69,6 +69,58 @@ Form::Piece read_piece(const ghidra::VarnodeTpl *value)
     return piece;
 }
 
+// A field taken as the processor takes it.
+Form::Slot::Field field_of(const ghidra::TokenField *field)
+{
+    Form::Slot::Field out;
+    if (field == nullptr)
+        return out;
+    out.first_byte = field->getByteStart();
+    out.last_byte = field->getByteEnd();
+    out.shift = field->getShift();
+    out.width = field->getBitEnd() - field->getBitStart() + 1;
+    out.big_endian = field->isBigEndian();
+    return out;
+}
+
+// Where a value put in that field lands, in the instruction's bytes as written.
+//
+// Reading a field takes its bytes in the order they are written, assembles them
+// the way its token assembles, and shifts right. Writing one is that backwards:
+// the value is shifted left, and its bytes are put back where they came from.
+//
+// The two orders are the same on a processor that writes its instructions
+// biggest byte first and are a byte-swap apart on one that does not, which is
+// why this is done a byte at a time rather than as a shift. Treating a field as
+// a range of bits put every AARCH64 register one swap away from where it goes.
+bool place_in_field(const Form::Slot::Field &field, int length, uint64_t value, uint64_t &mask,
+                    uint64_t &bits)
+{
+    mask = 0;
+    bits = 0;
+    if (!field.is_placed() || field.width >= 64 || field.last_byte < field.first_byte ||
+        field.last_byte >= length || length <= 0 || length > 8)
+        return false;
+
+    const uint64_t room = (static_cast<uint64_t>(1) << field.width) - 1;
+    if ((value & room) != value)
+        return false;  // too big for the field: not this instruction's number
+
+    const uint64_t assembled_mask = room << static_cast<unsigned>(field.shift);
+    const uint64_t assembled_bits = value << static_cast<unsigned>(field.shift);
+
+    const int count = field.last_byte - field.first_byte + 1;
+    for (int i = 0; i < count; ++i) {
+        // Byte i of the assembled value, least significant first, goes back to
+        // whichever written byte it was read from.
+        const int written = field.big_endian ? field.last_byte - i : field.first_byte + i;
+        const unsigned at = static_cast<unsigned>((length - 1 - written) * 8);
+        mask |= ((assembled_mask >> static_cast<unsigned>(8 * i)) & 0xff) << at;
+        bits |= ((assembled_bits >> static_cast<unsigned>(8 * i)) & 0xff) << at;
+    }
+    return true;
+}
+
 // One place a template names, when it names one outright.
 struct PlaceKey {
     const ghidra::AddrSpace *space = nullptr;
@@ -361,6 +413,67 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
                        const std::map<uint64_t, std::string> &by_offset, uint64_t sofar_mask,
                        uint64_t sofar_bits, int depth, Form::Slot &into);
 
+// The fields a number can be written into, behind whatever stands for them.
+//
+// An operand that takes a number is usually a table rather than a field.
+// AARCH64 spells a constant with movz, whose operand is a table of sixteen-bit
+// fields shifted by different amounts; RISC-V's immI is a table of one field
+// sign-extended. Each of those is a real field in real bits reached by real
+// bits, and this finds them - one entry per way, because they are alternatives
+// and merging them would describe an encoding that does not exist.
+//
+// What the table does to the field on the way out is not worked out here. That
+// is a question with an easier answer than reading the template: write the
+// field and ask the processor what number came out.
+void resolve_numbers(const ghidra::TripleSymbol *symbol, int length, uint64_t sofar_mask,
+                     uint64_t sofar_bits, int depth, Form::Slot &into)
+{
+    if (symbol == nullptr || depth > 4)
+        return;
+
+    if (const ghidra::ValueSymbol *value = dynamic_cast<const ghidra::ValueSymbol *>(symbol)) {
+        if (const ghidra::TokenField *field =
+                dynamic_cast<const ghidra::TokenField *>(value->getPatternValue())) {
+            Form::Slot::Way way;
+            way.field = field_of(field);
+            way.along_mask = sofar_mask;
+            way.along_bits = sofar_bits;
+            if (way.field.is_placed())
+                into.numbers.push_back(way);
+        }
+        return;
+    }
+
+    const ghidra::SubtableSymbol *table = dynamic_cast<const ghidra::SubtableSymbol *>(symbol);
+    if (table == nullptr)
+        return;
+
+    std::map<const ghidra::Constructor *, Constraint> within;
+    walk(table->getDecisionTree(), Constraint(), within);
+    for (const auto &one : within) {
+        uint64_t mask = 0;
+        uint64_t bits = 0;
+        settle(one.second, length, mask, bits);
+        for (int slot = 0; slot < one.first->getNumOperands(); ++slot) {
+            const ghidra::OperandSymbol *inner = one.first->getOperand(slot);
+            if (inner == nullptr)
+                continue;
+            if (const ghidra::TokenField *field =
+                    dynamic_cast<const ghidra::TokenField *>(inner->getDefiningExpression())) {
+                Form::Slot::Way way;
+                way.field = field_of(field);
+                way.along_mask = sofar_mask | mask;
+                way.along_bits = sofar_bits | bits;
+                if (way.field.is_placed())
+                    into.numbers.push_back(way);
+                continue;
+            }
+            resolve_numbers(inner->getDefiningSymbol(), length, sofar_mask | mask,
+                            sofar_bits | bits, depth + 1, into);
+        }
+    }
+}
+
 // A constructor's export, when it is an actual place rather than a forwarding.
 // A place is a space and an offset, and the offset is what a register is.
 bool exported_register(const ghidra::Constructor *made,
@@ -413,25 +526,21 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
                              : dynamic_cast<const ghidra::TokenField *>(value->getPatternValue());
         if (field == nullptr || length <= 0)
             return;
-        const int width = length * 8;
-        if (field->getBitEnd() >= width)
-            return;
-        const int size = field->getBitEnd() - field->getBitStart() + 1;
-        const int shift = field->getBitStart();
-        if (size <= 0 || size >= 64)
-            return;
-        const uint64_t mask = ((static_cast<uint64_t>(1) << size) - 1)
-                              << static_cast<unsigned>(shift);
+        const Form::Slot::Field where = field_of(field);
         for (int i = 0; i < list->numVarnodes(); ++i) {
             const ghidra::VarnodeSymbol *named = list->getVarnode(i);
             if (named == nullptr)
                 continue;
-            into.registers.emplace(named->getName(),
-                                   (static_cast<uint64_t>(i) << static_cast<unsigned>(shift)) &
-                                       mask);
+            uint64_t mask = 0;
+            uint64_t bits = 0;
+            if (!place_in_field(where, length, static_cast<uint64_t>(i), mask, bits))
+                continue;
+            Form::Slot::Choice choice;
+            choice.bits = bits;
+            choice.along_mask = sofar_mask | mask;
+            choice.along_bits = sofar_bits | bits;
+            into.registers.emplace(named->getName(), choice);
         }
-        into.along_the_way_mask |= sofar_mask;
-        into.along_the_way_bits |= sofar_bits;
         return;
     }
 
@@ -452,10 +561,14 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
             // The bits that pick this register, and separately the bits the way
             // here insisted on. Mixing them makes a register's encoding look
             // like it includes the opcode, and then writing one erases the
-            // instruction.
-            into.registers.emplace(named, bits);
-            into.along_the_way_mask |= sofar_mask;
-            into.along_the_way_bits |= sofar_bits;
+            // instruction. Each register keeps its own way, because two
+            // branches of the same table put the register in different bits
+            // and demand different things to get there.
+            Form::Slot::Choice choice;
+            choice.bits = bits;
+            choice.along_mask = sofar_mask | mask;
+            choice.along_bits = sofar_bits | bits;
+            into.registers.emplace(named, choice);
             continue;
         }
         // It stands for whatever one of its own operands stands for, so the
@@ -490,15 +603,12 @@ Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
     }
 
     if (const ghidra::TokenField *field = dynamic_cast<const ghidra::TokenField *>(expression)) {
-        // The field says which bits of its token, counted from the least
-        // significant. The bits above are counted from the top of the
-        // instruction, so this is turned round to match rather than left in two
-        // different countings that would silently disagree.
-        const int width = length * 8;
-        if (length > 0 && field->getBitEnd() < width) {
-            slot.first_bit = width - 1 - field->getBitEnd();
-            slot.last_bit = width - 1 - field->getBitStart();
-        }
+        Form::Slot::Way way;
+        way.field = field_of(field);
+        if (way.field.is_placed())
+            slot.numbers.push_back(way);
+    } else if (expression == nullptr) {
+        resolve_numbers(symbol, length, 0, 0, 0, slot);
     }
 
     resolve_registers(symbol, length, by_offset, 0, 0, 0, slot);
@@ -515,10 +625,23 @@ Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
     // What varies between the choices is what chooses, so that is the mask: the
     // bits where the answers differ from one another.
     if (!slot.registers.empty()) {
-        uint64_t either = 0;
-        for (const auto &one : slot.registers)
-            either |= one.second;
-        slot.register_mask = either;
+        uint64_t any_set = 0;
+        uint64_t all_set = ~static_cast<uint64_t>(0);
+        uint64_t any_mask = 0;
+        uint64_t all_mask = ~static_cast<uint64_t>(0);
+        for (const auto &one : slot.registers) {
+            const uint64_t value =
+                one.second.bits | (one.second.along_bits & one.second.along_mask);
+            any_set |= value;
+            all_set &= value;
+            any_mask |= one.second.bits | one.second.along_mask;
+            all_mask &= one.second.bits | one.second.along_mask;
+        }
+        // A bit chooses when the choices disagree about it, either in what they
+        // set it to or in whether they speak of it at all.
+        slot.register_mask = (any_set & ~all_set) | (any_mask & ~all_mask);
+        slot.always_mask = all_mask & ~slot.register_mask;
+        slot.always_bits = all_set & slot.always_mask;
     }
     return slot;
 }
@@ -729,12 +852,15 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
             form.fixed_mask &= ~slot.register_mask;
             if (slot.is_register() || !slot.is_placed())
                 continue;
-            const int width = slot.last_bit - slot.first_bit + 1;
-            const int shift = form.shortest * 8 - 1 - slot.last_bit;
-            if (width <= 0 || width >= 64 || shift < 0)
-                continue;
-            form.fixed_mask &= ~(((static_cast<uint64_t>(1) << width) - 1)
-                                 << static_cast<unsigned>(shift));
+            for (const Form::Slot::Way &way : slot.numbers) {
+                uint64_t room = 0;
+                uint64_t unused_bits = 0;
+                const uint64_t every =
+                    way.field.width >= 64 ? ~static_cast<uint64_t>(0)
+                                          : (static_cast<uint64_t>(1) << way.field.width) - 1;
+                if (place_in_field(way.field, form.shortest, every, room, unused_bits))
+                    form.fixed_mask &= ~room;
+            }
         }
         form.fixed_bits &= form.fixed_mask;
 
@@ -824,7 +950,7 @@ bool Catalogue::write_any(const Form &form,
 
 bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
                             std::vector<uint8_t> &bytes, std::vector<std::string> &used,
-                            std::string &error)
+                            std::string &error, const std::vector<int> &roles)
 {
     used.clear();
     bytes.clear();
@@ -853,28 +979,41 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
     for (size_t next = 0; next < places.size(); ++next) {
         bool placed = false;
 
+        // Where this place belongs, when the caller knows. A form says which
+        // slot it writes to and which it reads from, so an answer and its
+        // operands go where they mean rather than wherever they fit.
+        size_t only = form.slots.size();
+        if (next < roles.size() && roles[next] >= 0 &&
+            static_cast<size_t>(roles[next]) < form.slots.size())
+            only = static_cast<size_t>(roles[next]);
+
         for (size_t which = 0; which < form.slots.size() && !placed; ++which) {
+            if (only < form.slots.size() && which != only)
+                continue;
             if (filled[which])
                 continue;
             const Form::Slot &slot = form.slots[which];
 
             if (places[next].is_number) {
-                // A number goes in a field the form left open for one.
+                // A number goes in a field the form left open for one, put back
+                // the way the processor would take it out. A number too big for
+                // the field is not this instruction's.
                 if (slot.is_register() || !slot.is_placed())
                     continue;
-                const int width = slot.last_bit - slot.first_bit + 1;
-                const int shift = form.shortest * 8 - 1 - slot.last_bit;
-                if (width <= 0 || width >= 64 || shift < 0)
-                    continue;
-                const uint64_t room = ((static_cast<uint64_t>(1) << width) - 1)
-                                      << static_cast<unsigned>(shift);
-                const uint64_t sitting =
-                    (places[next].number << static_cast<unsigned>(shift)) & room;
-                // A number too big for the field is not this instruction's.
-                if ((sitting >> static_cast<unsigned>(shift)) != places[next].number)
+                const size_t which_way =
+                    places[next].way >= 0 &&
+                            static_cast<size_t>(places[next].way) < slot.numbers.size()
+                        ? static_cast<size_t>(places[next].way)
+                        : 0;
+                const Form::Slot::Way &way = slot.numbers[which_way];
+                uint64_t room = 0;
+                uint64_t sitting = 0;
+                if (!place_in_field(way.field, form.shortest, places[next].number, room, sitting))
                     continue;
 
                 word = (word & ~(room & may_touch)) | (sitting & may_touch);
+                word = (word & ~(way.along_mask & may_touch)) |
+                       (way.along_bits & way.along_mask & may_touch);
                 word = (word & ~form.fixed_mask) | form.fixed_bits;
                 used.push_back(std::to_string(places[next].number));
                 filled[which] = true;
@@ -901,8 +1040,15 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
             // The form's own bits win: a slot may only touch what the form did
             // not insist on, because what it insisted on is what makes the
             // instruction that instruction.
-            word = (word & ~(slot.register_mask & may_touch)) | (found->second & may_touch);
-            word |= slot.along_the_way_bits & may_touch;
+            //
+            // The bits that choose are cleared and this register's own set;
+            // what every choice agrees on is set whichever register it is.
+            const Form::Slot::Choice &choice = found->second;
+            const uint64_t value =
+                choice.bits | (choice.along_bits & choice.along_mask);
+            word &= ~(slot.register_mask & may_touch);
+            word |= value & slot.register_mask & may_touch;
+            word = (word & ~slot.always_mask) | (slot.always_bits & slot.always_mask);
             word = (word & ~form.fixed_mask) | form.fixed_bits;
             used.push_back(name_used);
             filled[which] = true;

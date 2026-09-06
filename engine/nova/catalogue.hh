@@ -92,35 +92,83 @@ struct Form {
 
     // One of the places a form leaves open, and what can go in it.
     struct Slot {
-        // Where in the instruction it is written, counted the way the bits
-        // above are: from the top, over the bytes in the order they are
-        // written. Both are -1 when it could not be worked out, which happens
-        // for an operand built out of several pieces or one that stands for
-        // another table.
-        int first_bit = -1;
-        int last_bit = -1;
+        // Where in the instruction a number written here goes.
+        //
+        // Not a range of bits. A field is read by taking some of the
+        // instruction's bytes in the order they are written, assembling them
+        // the way its token assembles, and shifting - and on a processor whose
+        // instructions are written least significant byte first those bytes are
+        // not in the order the bits are. Describing it as a bit range assumed
+        // they were, which put every AARCH64 register field one byte-swap away
+        // from where it belongs: writing x1 into the destination set the bits
+        // of the opcode instead.
+        //
+        // Unplaced when it could not be worked out, which happens for an
+        // operand built out of several fields or one standing for another
+        // table.
+        struct Field {
+            int first_byte = -1;      // the bytes it is in, as written
+            int last_byte = -1;
+            int shift = 0;            // where in them the value sits
+            int width = 0;            // how many bits of value
+            bool big_endian = false;  // how those bytes assemble
 
-        // The registers this slot can name, against the bits that name them.
+            bool is_placed() const { return first_byte >= 0 && width > 0; }
+        };
+
+        // One way of putting a number here, with what the way to it demands.
+        //
+        // An operand that takes a number is often a table rather than a field:
+        // AARCH64 spells a constant with movz, whose operand is a table of
+        // sixteen-bit fields shifted by different amounts, and RISC-V's immI is
+        // a table of one. Each of those is a different field in different bits,
+        // reached by different bits, so they are kept as alternatives rather
+        // than merged.
+        struct Way {
+            Field field;
+            uint64_t along_mask = 0;
+            uint64_t along_bits = 0;
+        };
+        std::vector<Way> numbers;
+
+        // One way of naming a register in this slot.
         //
         // A slot holding a register is not a number written into a field: the
         // field picks one register out of a set, and which number picks which
         // register is the processor's business. So what is kept is the answer -
         // to use this register, put these bits in.
         //
-        // Empty when the slot holds a number rather than a register.
-        std::map<std::string, uint64_t> registers;
-        // The bits those choices occupy, so writing one can clear them first.
+        // The way to it is kept with it rather than pooled. A slot is often a
+        // table of tables, and different branches of it put the register in
+        // different bits: reaching one branch demands bits that reaching
+        // another forbids. Pooling those demands mixes two encodings that
+        // cannot both hold, and writing a register then set bits belonging to
+        // the path it did not take.
+        struct Choice {
+            uint64_t bits = 0;        // what picks this register
+            uint64_t along_mask = 0;  // what the way to it insisted on
+            uint64_t along_bits = 0;
+        };
+
+        // The registers this slot can name. Empty when it holds a number.
+        std::map<std::string, Choice> registers;
+
+        // The bits that choose, which are the bits the choices disagree in.
+        //
+        // That is what choosing means and it needs no other definition: a bit
+        // every choice sets the same way is not choosing anything, it is part
+        // of what the instruction is. Taking every bit a choice mentions
+        // instead released the opcode along with the field and left the form
+        // insisting on nothing at all.
         uint64_t register_mask = 0;
 
-        // What the way to those registers insisted on, which belongs to the
-        // instruction rather than to any one register. Kept apart from the
-        // choices above: mixed in, a register's encoding looks like it includes
-        // the opcode, and writing one then erases the instruction.
-        uint64_t along_the_way_mask = 0;
-        uint64_t along_the_way_bits = 0;
+        // And what they all agree on, which the instruction has to have
+        // whichever register goes in.
+        uint64_t always_mask = 0;
+        uint64_t always_bits = 0;
 
         bool is_register() const { return !registers.empty(); }
-        bool is_placed() const { return first_bit >= 0 && last_bit >= first_bit; }
+        bool is_placed() const { return !numbers.empty(); }
     };
 
     // Every place the form leaves open, in the order it names them - which is
@@ -252,12 +300,28 @@ public:
         std::vector<std::string> names;  // a register, under any of these
         bool is_number = false;
         uint64_t number = 0;
+
+        // Whether that number is the value wanted or the bits to put in the
+        // field. They are the same only when the operand is the field; where
+        // one stands for a table that shifts or extends what it holds, what
+        // goes in is not what comes out, and the caller works out which bits
+        // give the value by asking the processor.
+        bool is_raw_field = false;
+        int way = 0;  // which of the slot's ways to use, when there are several
     };
 
     // Writes an instruction whose places may be registers or numbers.
+    //
+    // `roles`, when given, says which of the form's slots each place belongs in
+    // - the form knows which slot it writes to and which it reads from, so an
+    // answer and its operands need not be guessed at by trying slots until one
+    // fits. Guessing gave `add x2, x1, x0` for an add of x1 and x2 into x0:
+    // every register went somewhere it could go, and none went where it meant.
+    // Empty leaves the pairing to be worked out, which is right for a caller
+    // that only has registers and no roles for them.
     static bool write_mixed(const Form &form, const std::vector<Wanted> &places,
                             std::vector<uint8_t> &bytes, std::vector<std::string> &used,
-                            std::string &error);
+                            std::string &error, const std::vector<int> &roles = {});
 
 private:
     std::vector<Form> forms_;
