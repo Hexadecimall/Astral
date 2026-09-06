@@ -125,12 +125,12 @@ const char *kCounter =
     "}\n"
     "\n"
     "func main(): i32 {\n"
-    "    var c: Counter;\n"
-    "    c.total = 0;\n"
-    "    c.step = 7;\n"
-    "    Counter::bump(&c);\n"
-    "    Counter::bump(&c);\n"
-    "    return Counter::value(&c);\n"
+    "    var cnter: Counter;\n"
+    "    cnter.total = 0;\n"
+    "    cnter.step = 7;\n"
+    "    Counter::bump(&cnter);\n"
+    "    Counter::bump(&cnter);\n"
+    "    return Counter::value(&cnter);\n"
     "}\n";
 
 // `self` with no type is the class it is written in, which is the only reason
@@ -143,9 +143,9 @@ const char *kImplicitSelf =
     "    }\n"
     "}\n"
     "func main(): i32 {\n"
-    "    var b: Box;\n"
-    "    b.held = 9;\n"
-    "    return Box::get(&b);\n"
+    "    var boxed: Box;\n"
+    "    boxed.held = 9;\n"
+    "    return Box::get(&boxed);\n"
     "}\n";
 
 // Lays the named functions out one after another in the arena and runs the
