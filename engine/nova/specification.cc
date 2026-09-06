@@ -1,6 +1,10 @@
 #include "specification.hh"
 
 #include "loadimage.hh"
+#include "sleigh.hh"
+
+#include <cstdint>
+#include <vector>
 
 #include <map>
 #include <memory>
@@ -22,10 +26,22 @@ namespace {
 class NoImage : public ghidra::LoadImage {
 public:
     NoImage() : ghidra::LoadImage("<nothing>") {}
-    void loadFill(ghidra::uint1 *ptr, ghidra::int4 size, const ghidra::Address &) override
+
+    // Bytes to serve, when something is being read back rather than described.
+    // Everywhere else is zero, which is what a question about a processor
+    // rather than about a program wants.
+    std::vector<uint8_t> serving;
+    uint64_t serving_at = 0;
+
+    void loadFill(ghidra::uint1 *ptr, ghidra::int4 size, const ghidra::Address &at) override
     {
-        for (ghidra::int4 i = 0; i < size; ++i)
-            ptr[i] = 0;
+        for (ghidra::int4 i = 0; i < size; ++i) {
+            const uint64_t where = at.getOffset() + static_cast<uint64_t>(i);
+            const uint64_t into = where - serving_at;
+            ptr[i] = (where >= serving_at && into < serving.size())
+                         ? serving[static_cast<size_t>(into)]
+                         : 0;
+        }
     }
     std::string getArchType(void) const override { return "astral"; }
     void adjustVma(long) override {}
@@ -39,6 +55,8 @@ public:
         : ghidra::SleighArchitecture("<nothing>", language_id, errors)
     {
     }
+
+    NoImage *image() { return static_cast<NoImage *>(loader); }
 
 protected:
     void buildLoader(ghidra::DocumentStorage &) override
@@ -82,6 +100,51 @@ ghidra::SleighArchitecture *specification_for(const std::string &target, std::st
         error = failure.explain;
         return nullptr;
     }
+}
+
+std::string reads_as(const std::string &target, const std::vector<uint8_t> &bytes,
+                     std::string &error)
+{
+    static std::mutex lock;
+    static uint64_t next = 0x1000;
+
+    ghidra::SleighArchitecture *held = specification_for(target, error);
+    if (held == nullptr || bytes.empty())
+        return std::string();
+
+    class Written : public ghidra::AssemblyEmit {
+    public:
+        std::string text;
+        void dump(const ghidra::Address &, const std::string &what,
+                  const std::string &with) override
+        {
+            text = with.empty() ? what : what + " " + with;
+        }
+    };
+
+    std::lock_guard<std::mutex> holding(lock);
+    DescribingArchitecture *described = static_cast<DescribingArchitecture *>(held);
+    NoImage *image = described->image();
+    if (image == nullptr) {
+        error = "this processor has nowhere to put the bytes being read";
+        return std::string();
+    }
+
+    // A fresh address every time, because a reading is kept once made.
+    next += 0x100;
+    image->serving_at = next;
+    image->serving = bytes;
+
+    Written written;
+    try {
+        held->translate->printAssembly(written,
+                                       ghidra::Address(held->getDefaultCodeSpace(), next));
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return std::string();
+    }
+    image->serving.clear();
+    return written.text;
 }
 
 } // namespace nova

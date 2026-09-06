@@ -134,6 +134,20 @@ struct Form {
     uint64_t fixed_mask = 0;
     uint64_t fixed_bits = 0;
 
+    // Whether reaching this form depended on something the processor already
+    // knew rather than on the bits of the instruction.
+    //
+    // This is how a processor with more than one way of encoding instructions
+    // says which one it is in. A form reached only under some such setting is a
+    // real instruction, but only while the processor is in that mode: written
+    // into a stream that is not, the same bytes mean something else entirely.
+    // On MIPS the shortest way to add is two bytes rather than four, and those
+    // two bytes in an ordinary MIPS program are a floating-point store.
+    //
+    // So a form that needs context is not simply shorter, and choosing it for
+    // being shorter is choosing a different instruction.
+    bool needs_context = false;
+
     // Where in the specification it was written, so a form that behaves oddly
     // can be looked at rather than guessed about.
     int line = 0;
@@ -152,7 +166,12 @@ public:
     // The forms that do this one operation with every value a slot - the
     // plainest shape there is, and the one a selection reaches for first: two
     // things in, one thing out, nothing about it fixed.
-    std::vector<const Form *> plainly_doing(ghidra::OpCode opcode, int inputs) const;
+    //
+    // Forms that only exist under some setting of the processor are left out
+    // unless asked for, because they are not interchangeable with the ones that
+    // always apply.
+    std::vector<const Form *> plainly_doing(ghidra::OpCode opcode, int inputs,
+                                            bool including_context = false) const;
 
     // The forms whose whole meaning is this one operation. These are the ones
     // worth choosing between: a form that does one thing can be selected for

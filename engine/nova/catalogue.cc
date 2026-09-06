@@ -89,6 +89,8 @@ struct Constraint {
     std::vector<Decided> decisions;  // from the root down
     uint64_t leaf_mask = 0;          // and whatever the pattern at the bottom still said
     uint64_t leaf_bits = 0;
+    // Whether getting here depended on something the processor already knew.
+    bool from_context = false;
 };
 
 void walk(const ghidra::DecisionNode *node, Constraint sofar,
@@ -113,8 +115,14 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
     // knew rather than on what is written, so it adds nothing to the bits an
     // instruction has to have.
     if (node->isContextDecision()) {
+        // Which way this goes is not written in the instruction, so it adds no
+        // bits - but it does mean everything below it is only reached under
+        // some setting, and that has to travel down or a form that exists only
+        // in one mode looks like one that exists always.
+        Constraint below = sofar;
+        below.from_context = true;
         for (int i = 0; i < node->numChildren(); ++i)
-            walk(node->getChild(i), sofar, found);
+            walk(node->getChild(i), below, found);
         return;
     }
 
@@ -390,8 +398,10 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         }
 
         auto pattern = patterns.find(made);
-        if (pattern != patterns.end())
+        if (pattern != patterns.end()) {
             settle(pattern->second, form.shortest, form.fixed_mask, form.fixed_bits);
+            form.needs_context = pattern->second.from_context;
+        }
 
         for (int slot = 0; slot < made->getNumOperands(); ++slot)
             form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
@@ -408,10 +418,13 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
     return true;
 }
 
-std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int inputs) const
+std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int inputs,
+                                                  bool including_context) const
 {
     std::vector<const Form *> plain;
     for (const Form *form : doing(opcode)) {
+        if (form->needs_context && !including_context)
+            continue;
         if (!form->writes || !form->writes_to.is_slot)
             continue;
         if (static_cast<int>(form->reads.size()) != inputs)
