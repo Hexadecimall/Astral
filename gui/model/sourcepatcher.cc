@@ -4,6 +4,7 @@
 
 #include "assembler/assembler.hh"
 #include "compiler/compiler.hh"
+#include "nova/nova.hh"
 
 #include <QStringList>
 #include <cstdint>
@@ -83,7 +84,8 @@ QString SourcePatcher::architectureName(const QString &languageId)
 }
 
 SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &after,
-                                        const QString &functionName, quint64 address, quint64 span)
+                                        const QString &functionName, quint64 address, quint64 span,
+                                        Language language)
 {
     SourcePatchOutcome outcome;
     const QString languageId = document_->languageId();
@@ -157,8 +159,13 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
         engine::compiler::Environment environment;
         const engine::compiler::Options options = buildOptions(space, environment);
         engine::compiler::Update update;
-        const engine::compiler::Result result = engine::compiler::compile_update(
-            target, sourceBefore, sourceAfter, address, environment, update, options);
+        // Nova and C reach the same generator; only the reader differs.
+        const engine::compiler::Result result =
+            language == Language::Nova
+                ? engine::nova::compile_update(target, sourceBefore, sourceAfter, address,
+                                               environment, update, options)
+                : engine::compiler::compile_update(target, sourceBefore, sourceAfter, address,
+                                                   environment, update, options);
         if (result.ok) {
             for (const std::string &name : update.recompiled)
                 outcome.recompiled << QString::fromStdString(name);
@@ -250,7 +257,9 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
     engine::compiler::Environment environment;
     const engine::compiler::Options options = buildOptions(space, environment);
     const engine::compiler::Result result =
-        engine::compiler::compile(target, sourceAfter, address, environment, options);
+        language == Language::Nova
+            ? engine::nova::compile(target, sourceAfter, address, environment, options)
+            : engine::compiler::compile(target, sourceAfter, address, environment, options);
     if (!result.ok) {
         outcome.diagnostics = diagnosticText(result.diagnostics);
         outcome.errors = errorCount(result.diagnostics);

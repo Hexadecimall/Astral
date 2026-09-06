@@ -4,6 +4,8 @@
 #include "views/decompilerview.hh"
 #include "views/hexpane.hh"
 #include "views/hexview.hh"
+#include "views/listingpane.hh"
+#include "views/listingview.hh"
 #include "model/patchbuilder.hh"
 #include "model/settings.hh"
 #include "model/sourcepatcher.hh"
@@ -22,8 +24,9 @@ namespace astral::gui {
 ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *parent)
     : QWidget(parent), document_(std::move(document)),
       functions_(new FunctionListModel(this)), decompiler_(new DecompilerView),
-      pseudo_(new DecompilerView), hex_(new HexView), hexPane_(new HexPane(hex_)),
-      views_(new QStackedWidget)
+      pseudo_(new DecompilerView), centreListingView_(new ListingView),
+      centreListing_(new ListingPane(centreListingView_)), hex_(new HexView),
+      hexPane_(new HexPane(hex_)), views_(new QStackedWidget)
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -45,17 +48,23 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
         label->setObjectName(QStringLiteral("muted"));
         return label;
     };
-    views_->addWidget(decompiler_);
+    // The order here is the order of the View enum, save for Nova and Pseudo-C
+    // which are one widget saying the same function two ways.
     views_->addWidget(pseudo_);
-    views_->addWidget(placeholder(tr("Control-flow graph arrives in a later step.")));
+    views_->addWidget(decompiler_);
+    views_->addWidget(centreListing_);
     views_->addWidget(hexPane_);
+    views_->addWidget(placeholder(tr("Control-flow graph arrives in a later step.")));
+    connect(centreListing_, &ListingPane::logMessage, this, &ProgramTab::logMessage);
+    connect(centreListing_, &ListingPane::patchApplied, this, &ProgramTab::patchApplied);
+    connect(centreListingView_, &ListingView::navigateRequested, this, &ProgramTab::showAddress);
     hexPane_->setDocument(document_.get());
     connect(hexPane_, &HexPane::logMessage, this, &ProgramTab::logMessage);
     connect(hexPane_, &HexPane::patchApplied, this, &ProgramTab::patchApplied);
-    connect(views_, &QStackedWidget::currentChanged, this, [this](int index) {
-        if (index == Hex)
+    connect(views_, &QStackedWidget::currentChanged, this, [this](int) {
+        if (view_ == Hex)
             refreshHex();
-        Q_EMIT viewChanged(index);
+        Q_EMIT viewChanged(static_cast<int>(view_));
     });
     layout->addWidget(views_, 1);
 
@@ -83,8 +92,12 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
         // The symbol table's size is often zero for a stripped binary; the
         // decompiler's measured span is the better listing bound.
         listing_ = document_->disassemble(f.address, f.size);
+        if (view_ == Assembly) {
+            centreListing_->setListing(listing_);
+            centreListing_->setProgram(document_.get(), current_);
+        }
         Q_EMIT listingChanged(listing_);
-        if (views_->currentIndex() == Hex)
+        if (view_ == Hex)
             refreshHex();
     });
     connect(document_.get(), &ProgramDocument::functionFailed, this,
@@ -102,15 +115,15 @@ void ProgramTab::showAddress(quint64 address)
 {
     if (document_->functionAt(address)) {
         showFunction(address);
-        if (views_->currentIndex() == Hex)
-            views_->setCurrentIndex(Code);
+        if (view_ == Hex)
+            setView(Nova);
         return;
     }
     hexAddress_ = address;
-    if (views_->currentIndex() == Hex)
+    if (view_ == Hex)
         refreshHex();
     else
-        views_->setCurrentIndex(Hex);
+        setView(Hex);
 }
 
 void ProgramTab::refreshHex()
@@ -137,9 +150,63 @@ void ProgramTab::refreshHex()
     hex_->showBytes(start, document_->read(start, end - start), focus, size);
 }
 
+QString ProgramTab::viewName(View view)
+{
+    switch (view) {
+    case Nova: return QCoreApplication::translate("ProgramTab", "Nova");
+    case Code: return QCoreApplication::translate("ProgramTab", "C");
+    case Assembly: return QCoreApplication::translate("ProgramTab", "Assembly");
+    case PseudoC: return QCoreApplication::translate("ProgramTab", "Pseudo-C");
+    case Hex: return QCoreApplication::translate("ProgramTab", "Hex");
+    case Graph: return QCoreApplication::translate("ProgramTab", "Graph");
+    }
+    return QString();
+}
+
 void ProgramTab::setView(View view)
 {
-    views_->setCurrentIndex(static_cast<int>(view));
+    const View was = view_;
+    view_ = view;
+
+    // Nova and Pseudo-C are the same listing written two ways, and which one
+    // the engine writes is a setting. Changing it means the text already in
+    // hand is in the other language, so the function is read again.
+    if (view == Nova || view == PseudoC) {
+        const QString wanted = view == Nova ? QStringLiteral("nova") : QStringLiteral("pseudo-c");
+        if (document_->setting(QStringLiteral("readableLanguage")) != wanted) {
+            QString error;
+            document_->setSetting(QStringLiteral("readableLanguage"), wanted, error);
+            if (current_ != 0) {
+                document_->invalidate(current_);
+                refreshCurrent();
+            }
+        }
+    }
+
+    switch (view) {
+    case Nova:
+    case PseudoC:
+        views_->setCurrentWidget(pseudo_);
+        break;
+    case Code:
+        views_->setCurrentWidget(decompiler_);
+        break;
+    case Assembly:
+        views_->setCurrentWidget(centreListing_);
+        centreListing_->setListing(listing_);
+        centreListing_->setProgram(document_.get(), current_);
+        break;
+    case Hex:
+        views_->setCurrentWidget(hexPane_);
+        break;
+    case Graph:
+        views_->setCurrentIndex(views_->count() - 1);
+        break;
+    }
+    if (view == Hex)
+        refreshHex();
+    if (view != was)
+        Q_EMIT viewChanged(static_cast<int>(view));
 }
 
 void ProgramTab::reportPatchWritten()
@@ -154,11 +221,14 @@ void ProgramTab::reportPatchFailed(const QString &reason)
 
 QString ProgramTab::currentWord() const
 {
-    switch (views_->currentIndex()) {
+    switch (view_) {
     case Code:
         return decompiler_->codeView()->wordUnderCursor();
+    case Nova:
     case PseudoC:
         return pseudo_->codeView()->wordUnderCursor();
+    case Assembly:
+        return centreListingView_->wordUnderCursor();
     default:
         return QString();
     }
@@ -176,7 +246,7 @@ void ProgramTab::refreshCurrent()
     pseudo_->showPending(name, current_);
     listing_ = document_->disassemble(current_, entry ? entry->size : 0);
     Q_EMIT listingChanged(listing_);
-    if (views_->currentIndex() == Hex)
+    if (view_ == Hex)
         refreshHex();
     document_->decompile(current_);
 }
@@ -189,7 +259,7 @@ void ProgramTab::replaceCodeText(const QString &text)
 void ProgramTab::compileCurrent(DecompilerView *view)
 {
     if (view == nullptr)
-        view = views_->currentIndex() == PseudoC ? pseudo_ : decompiler_;
+        view = (view_ == Nova || view_ == PseudoC) ? pseudo_ : decompiler_;
     const auto entry = document_->functionAt(current_);
     const auto cachedFunction = document_->cached(current_);
     QString name = cachedFunction ? cachedFunction->name : entry ? entry->name : QString();
@@ -250,10 +320,23 @@ void ProgramTab::compileCurrent(DecompilerView *view)
     QString before;
     if (cachedFunction)
         before = view == pseudo_ ? cachedFunction->pseudoCode : cachedFunction->code;
+    // Nova is read by Nova's own front end. Pseudo-C is not a language anything
+    // compiles, so an edit there is refused before it reaches a compiler.
+    const SourcePatcher::Language language =
+        (view == pseudo_ && view_ == Nova) ? SourcePatcher::Language::Nova
+                                           : SourcePatcher::Language::C;
+    if (view == pseudo_ && view_ == PseudoC) {
+        Q_EMIT logMessage(tr("patch refused: Pseudo-C is a reading of the code, not a language "
+                             "Astral compiles. Switch the source tab to Nova and edit there; "
+                             "Nova says the same thing and compiles back into the program."));
+        view->showRefused(tr("Pseudo-C does not compile; edit in Nova"));
+        return;
+    }
 
     view->showPatching();
     SourcePatcher patcher(document_.get(), this);
-    const SourcePatchOutcome outcome = patcher.patch(before, view->text(), name, current_, span);
+    const SourcePatchOutcome outcome =
+        patcher.patch(before, view->text(), name, current_, span, language);
     if (outcome.ok && !outcome.changed) {
         Q_EMIT logMessage(tr("patch: %1").arg(outcome.report));
         view->showNothingToChange(outcome.report);
@@ -276,7 +359,7 @@ void ProgramTab::compileCurrent(DecompilerView *view)
 
 ProgramTab::View ProgramTab::view() const
 {
-    return static_cast<View>(views_->currentIndex());
+    return view_;
 }
 
 void ProgramTab::showFunction(quint64 address)

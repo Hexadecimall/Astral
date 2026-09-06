@@ -18,6 +18,8 @@ class DecompilerView;
 class HexView;
 class HexPane;
 class FunctionListModel;
+class ListingPane;
+class ListingView;
 
 class ProgramTab : public QWidget {
     Q_OBJECT
@@ -30,9 +32,16 @@ public:
     quint64 currentAddress() const { return current_; }
     QString listing() const { return listing_; }
 
-    enum View { Code, PseudoC, Graph, Hex };
+    // What the centre pane is showing. The first five are the same program
+    // said five ways and share one tab; Graph is a picture of it and keeps a
+    // tab of its own.
+    enum View { Nova, Code, Assembly, PseudoC, Hex, Graph };
     void setView(View view);
     View view() const;
+    // Whether a view is one of the readings that share the source tab.
+    static bool isSource(View view) { return view != Graph; }
+    // What to call a view in a menu or on a tab.
+    static QString viewName(View view);
 
     void showFunction(quint64 address);
     // A function address opens in Code; anything else opens in Hex.
@@ -67,6 +76,11 @@ private:
     FunctionListModel *functions_;
     DecompilerView *decompiler_;
     DecompilerView *pseudo_;
+    // The disassembly, shown in the centre when the source tab is on
+    // Assembly. The dock on the right keeps its own. The view is declared
+    // first because the pane is built around it.
+    ListingView *centreListingView_;
+    ListingPane *centreListing_;
     HexView *hex_;
     HexPane *hexPane_;
     QStackedWidget *views_;
@@ -74,6 +88,9 @@ private:
     quint64 hexAddress_ = 0;
     bool refreshPending_ = false;
     QString listing_;
+    // Which reading is showing. Nova and Pseudo-C are the same widget told to
+    // say it differently, so the stack's index cannot answer this.
+    View view_ = Nova;
 };
 
 } // namespace astral::gui

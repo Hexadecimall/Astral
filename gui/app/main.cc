@@ -30,7 +30,7 @@ int main(int argc, char **argv)
                                   QStringLiteral("Save a picture of the window after it settles, then quit"),
                                   QStringLiteral("png"));
     parser.addOption(shotOption);
-    QCommandLineOption viewOption(QStringLiteral("view"), QStringLiteral("View tab to show: code, pseudo, graph, hex"),
+    QCommandLineOption viewOption(QStringLiteral("view"), QStringLiteral("What to show: nova, c, assembly, pseudo-c, hex, graph"),
                                   QStringLiteral("name"));
     parser.addOption(viewOption);
     parser.addPositionalArgument(QStringLiteral("file"), QStringLiteral("Binary or project to open"));

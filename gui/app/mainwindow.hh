@@ -135,6 +135,13 @@ private:
     ProgramTab *tabForPath(const QString &path) const;
     void showProjectTreeMenu(const QPoint &at);
     void bindCurrentTab();
+    // The source tab drops down to the readings of the same program. Which
+    // one is showing is the tab's label, so the bar says what you are looking
+    // at without a second row of tabs saying it again.
+    void showSourceMenu();
+    // The dock on the right shows the disassembly, unless the centre already
+    // is, in which case it shows Nova instead of the same thing twice.
+    void refreshListingDock();
     ProgramTab *currentTab() const;
     void goToTarget();
     void closeProgram(int index);
@@ -218,6 +225,9 @@ private:
     QWidget *workspace_ = nullptr;
     QTabBar *programBar_ = nullptr;
     QTabBar *viewBar_ = nullptr;
+    // Set while the bar is being put in step with the tab, so echoing back a
+    // selection does not look like the user choosing it.
+    bool updatingViewBar_ = false;
     QStackedWidget *programStack_ = nullptr;
     QList<QDockWidget *> panes_;
     FunctionsPane *functionsPane_ = nullptr;

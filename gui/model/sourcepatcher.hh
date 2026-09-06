@@ -36,6 +36,12 @@ struct SourcePatchOutcome {
 class SourcePatcher : public QObject {
     Q_OBJECT
 public:
+    // Which language the edited text is in. Both go to the same back end and
+    // both get the same three tiers of update; they differ only in what reads
+    // the text, so the view a person edited in decides this and nothing else
+    // has to know.
+    enum class Language { C, Nova };
+
     explicit SourcePatcher(ProgramDocument *document, QObject *parent = nullptr);
 
     // Whether the engine's compiler can write code for this program at all.
@@ -49,7 +55,8 @@ public:
     // empty `before` means no trustworthy starting point, and the whole
     // function is compiled instead.
     SourcePatchOutcome patch(const QString &before, const QString &after,
-                             const QString &functionName, quint64 address, quint64 span);
+                             const QString &functionName, quint64 address, quint64 span,
+                             Language language = Language::C);
 
 private:
     ProgramDocument *document_;

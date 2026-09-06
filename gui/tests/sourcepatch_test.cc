@@ -21,6 +21,7 @@ class SourcePatchTest : public QObject {
 private Q_SLOTS:
     void initTestCase();
     void changingALiteralWritesOneSmallRegion();
+    void novaIsPatchedByNovasOwnCompiler();
     void renamingALocalWritesNothing();
     void namesAnArchitectureItCannotWrite();
 
@@ -30,6 +31,8 @@ private:
     std::unique_ptr<ProgramDocument> openSubject(const QString &architecture, QString &why);
     // Astral's own C for `check`, and where it sits.
     bool recover(ProgramDocument *document, QString &code, quint64 &address, quint64 &size);
+    // The same, in Nova, which is what the readable listing holds.
+    bool recoverNova(ProgramDocument *document, QString &code, quint64 &address, quint64 &size);
 
     QTemporaryDir dir_;
     QString subject_;
@@ -141,6 +144,64 @@ bool SourcePatchTest::recover(ProgramDocument *document, QString &code, quint64 
     address = recovered->address;
     size = recovered->size;
     return true;
+}
+
+bool SourcePatchTest::recoverNova(ProgramDocument *document, QString &code, quint64 &address,
+                                  quint64 &size)
+{
+    const auto entry = document->functionNamed(QStringLiteral("check"));
+    if (!entry)
+        return false;
+    QEventLoop loop;
+    connect(document, &ProgramDocument::functionReady, &loop, &QEventLoop::quit);
+    connect(document, &ProgramDocument::functionFailed, &loop, &QEventLoop::quit);
+    document->decompile(entry->address);
+    loop.exec();
+    const auto recovered = document->cached(entry->address);
+    if (!recovered)
+        return false;
+    code = recovered->pseudoCode;
+    address = recovered->address;
+    size = recovered->size;
+    return true;
+}
+
+// The listing a person reads is Nova, and editing it patches the program
+// through Nova's own front end. This is the whole point of the language having
+// one spelling for both ends, so it is held to it here: the text the
+// decompiler wrote, edited, goes back in as bytes.
+void SourcePatchTest::novaIsPatchedByNovasOwnCompiler()
+{
+    QString why;
+    auto document = openSubject(QStringLiteral("arm64"), why);
+    QVERIFY2(document, qPrintable(QStringLiteral("the subject did not open: ") + why));
+    QVERIFY(SourcePatcher::supports(document->languageId()));
+
+    // Whatever the settings hold, this test is about Nova.
+    QString error;
+    document->setSetting(QStringLiteral("readableLanguage"), QStringLiteral("nova"), error);
+
+    QString before;
+    quint64 address = 0, size = 0;
+    QVERIFY2(recoverNova(document.get(), before, address, size), "check did not decompile");
+    QVERIFY2(before.contains(QStringLiteral("func ")), qPrintable(before));
+    QVERIFY2(before.contains(QStringLiteral("\"astral\"")), qPrintable(before));
+
+    QString after = before;
+    after.replace(QStringLiteral("\"astral\""), QStringLiteral("\"banana\""));
+
+    SourcePatcher patcher(document.get());
+    const SourcePatchOutcome outcome =
+        patcher.patch(before, after, QStringLiteral("check"), address, size,
+                      SourcePatcher::Language::Nova);
+    QVERIFY2(outcome.ok, qPrintable(outcome.report + QLatin1Char('\n') + outcome.diagnostics));
+    QVERIFY(outcome.changed);
+    // A changed literal is its own bytes, whichever language said so.
+    QCOMPARE(outcome.regions, 1);
+    QVERIFY2(outcome.bytes <= 8, qPrintable(QString::number(outcome.bytes)));
+    QVERIFY2(outcome.recompiled.isEmpty(), qPrintable(outcome.recompiled.join(QLatin1Char(','))));
+    QCOMPARE(outcome.retouchedText, QStringList{QStringLiteral("banana")});
+    QCOMPARE(document->patchCount(), 1);
 }
 
 void SourcePatchTest::changingALiteralWritesOneSmallRegion()

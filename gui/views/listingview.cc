@@ -8,7 +8,7 @@ namespace astral::gui {
 
 ListingView::ListingView(QWidget *parent) : CodeView(parent)
 {
-    new AsmHighlighter(document());
+    highlighter_ = new AsmHighlighter(document());
 }
 
 void ListingView::contextMenuEvent(QContextMenuEvent *event)
@@ -37,6 +37,17 @@ void ListingView::mouseDoubleClickEvent(QMouseEvent *event)
         }
     }
     CodeView::mouseDoubleClickEvent(event);
+}
+
+
+void ListingView::setShowingSource(bool source)
+{
+    if (source == showingSource_ && highlighter_ != nullptr)
+        return;
+    showingSource_ = source;
+    delete highlighter_;
+    highlighter_ = source ? static_cast<QSyntaxHighlighter *>(new NovaHighlighter(document()))
+                          : static_cast<QSyntaxHighlighter *>(new AsmHighlighter(document()));
 }
 
 } // namespace astral::gui

@@ -22,7 +22,9 @@
 #include <memory>
 #include <QFile>
 #include <QThread>
+#include <QMap>
 #include <QTimer>
+#include <array>
 #include <QInputDialog>
 #include <QTreeWidgetItem>
 #include <QKeyEvent>
@@ -158,8 +160,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     viewBar_->setObjectName(QStringLiteral("viewTabs"));
     viewBar_->setDrawBase(false);
     viewBar_->setExpanding(false);
-    for (const QString &name : {tr("Code"), tr("Pseudo-C"), tr("Graph"), tr("Hex")})
-        viewBar_->addTab(name);
+    // One tab for the program itself, which drops down to the ways of reading
+    // it, and one for the picture of it.
+    viewBar_->addTab(ProgramTab::viewName(ProgramTab::Nova));
+    viewBar_->addTab(tr("Graph"));
     auto *divider = new QFrame;
     divider->setObjectName(QStringLiteral("tabDivider"));
     divider->setFixedWidth(1);
@@ -183,9 +187,25 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         programStack_->insertWidget(to, moved);
         programStack_->setCurrentIndex(programBar_->currentIndex());
     });
+    connect(viewBar_, &QTabBar::tabBarClicked, this, [this](int index) {
+        // Clicking the source tab asks which reading, every time: it is the
+        // only way to reach the four that are not currently showing.
+        if (index == 0 && currentTab() != nullptr)
+            showSourceMenu();
+    });
     connect(viewBar_, &QTabBar::currentChanged, this, [this](int index) {
-        if (ProgramTab *tab = currentTab())
-            tab->setView(static_cast<ProgramTab::View>(index));
+        if (updatingViewBar_)
+            return;
+        ProgramTab *tab = currentTab();
+        if (tab == nullptr)
+            return;
+        if (index == 1) {
+            tab->setView(ProgramTab::Graph);
+            return;
+        }
+        // Coming back to the source tab restores whatever reading it was on.
+        if (tab->view() == ProgramTab::Graph)
+            tab->setView(ProgramTab::Nova);
     });
 
     welcome_ = new WelcomePage;
@@ -326,12 +346,22 @@ void MainWindow::openPath(const QString &path)
             rememberLocation(address);
             updateReferences(address);
         });
-        connect(tab, &ProgramTab::listingChanged, this, [this, tab](const QString &listing) {
+        connect(tab, &ProgramTab::listingChanged, this, [this, tab](const QString &) {
             QTimer::singleShot(0, this, &MainWindow::refreshBreakpointMarks);
             if (tab != currentTab())
                 return;
-            listingPane_->setListing(listing);
-            listingPane_->setProgram(tab->document(), tab->currentAddress());
+            refreshListingDock();
+        });
+        connect(tab, &ProgramTab::viewChanged, this, [this, tab](int) {
+            if (tab != currentTab())
+                return;
+            updatingViewBar_ = true;
+            const ProgramTab::View view = tab->view();
+            if (ProgramTab::isSource(view))
+                viewBar_->setTabText(0, ProgramTab::viewName(view));
+            viewBar_->setCurrentIndex(view == ProgramTab::Graph ? 1 : 0);
+            updatingViewBar_ = false;
+            refreshListingDock();
         });
         programStack_->addWidget(tab);
         const int index = programBar_->addTab(QFileInfo(path).fileName());
@@ -664,10 +694,26 @@ void MainWindow::typeInSearch(const QString &text)
 
 void MainWindow::selectView(const QString &name)
 {
-    const QStringList names = {QStringLiteral("code"), QStringLiteral("pseudo"), QStringLiteral("graph"), QStringLiteral("hex")};
-    const int index = names.indexOf(name.toLower());
-    if (index >= 0) {
-        viewBar_->setCurrentIndex(index);
+    // The readings of the program, by the names a script is likely to use.
+    // `pseudo` means the readable listing, which is Nova; the notation it
+    // replaced answers to `pseudo-c`.
+    static const QMap<QString, ProgramTab::View> named = {
+        {QStringLiteral("nova"), ProgramTab::Nova},
+        {QStringLiteral("pseudo"), ProgramTab::Nova},
+        {QStringLiteral("code"), ProgramTab::Code},
+        {QStringLiteral("c"), ProgramTab::Code},
+        {QStringLiteral("assembly"), ProgramTab::Assembly},
+        {QStringLiteral("asm"), ProgramTab::Assembly},
+        {QStringLiteral("listing"), ProgramTab::Assembly},
+        {QStringLiteral("pseudo-c"), ProgramTab::PseudoC},
+        {QStringLiteral("pseudoc"), ProgramTab::PseudoC},
+        {QStringLiteral("hex"), ProgramTab::Hex},
+        {QStringLiteral("graph"), ProgramTab::Graph},
+    };
+    const auto found = named.constFind(name.toLower());
+    if (found != named.constEnd()) {
+        if (ProgramTab *tab = currentTab())
+            tab->setView(found.value());
         return;
     }
     // Otherwise a pane: raise the dock whose object name starts with it.
@@ -695,12 +741,70 @@ void MainWindow::closeProgram(int index)
         showWelcome();
 }
 
+// The readings of the program, offered where the tab that shows them sits.
+void MainWindow::showSourceMenu()
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr)
+        return;
+
+    QMenu menu(this);
+    auto *group = new QActionGroup(&menu);
+    group->setExclusive(true);
+    const ProgramTab::View here = tab->view();
+    for (ProgramTab::View view : {ProgramTab::Nova, ProgramTab::Code, ProgramTab::Assembly,
+                                  ProgramTab::PseudoC, ProgramTab::Hex}) {
+        QAction *action = menu.addAction(ProgramTab::viewName(view));
+        action->setCheckable(true);
+        action->setChecked(view == here);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, view] {
+            if (ProgramTab *here = currentTab())
+                here->setView(view);
+        });
+    }
+    // Under the tab it belongs to, so it reads as that tab opening.
+    const QRect rect = viewBar_->tabRect(0);
+    menu.exec(viewBar_->mapToGlobal(rect.bottomLeft()));
+}
+
+// The dock on the right normally holds the disassembly. When the centre pane
+// is already showing that, it holds Nova instead: two panes saying the same
+// thing is one pane wasted.
+void MainWindow::refreshListingDock()
+{
+    ProgramTab *tab = currentTab();
+    if (tab == nullptr) {
+        listingPane_->setListing(QString());
+        listingPane_->setProgram(nullptr, 0);
+        return;
+    }
+    if (tab->view() == ProgramTab::Assembly) {
+        const auto function = tab->document()->cached(tab->currentAddress());
+        listingPane_->view()->setShowingSource(true);
+        listingPane_->setListing(function ? function->pseudoCode : QString());
+        // Nothing in the dock assembles while it holds source, so it is not
+        // given a program to write to.
+        listingPane_->setProgram(nullptr, 0);
+        return;
+    }
+    listingPane_->view()->setShowingSource(false);
+    listingPane_->setListing(tab->listing());
+    listingPane_->setProgram(tab->document(), tab->currentAddress());
+}
+
 void MainWindow::bindCurrentTab()
 {
     ProgramTab *tab = currentTab();
     viewBar_->setEnabled(tab != nullptr);
-    if (tab)
-        viewBar_->setCurrentIndex(static_cast<int>(tab->view()));
+    if (tab) {
+        updatingViewBar_ = true;
+        const ProgramTab::View view = tab->view();
+        if (ProgramTab::isSource(view))
+            viewBar_->setTabText(0, ProgramTab::viewName(view));
+        viewBar_->setCurrentIndex(view == ProgramTab::Graph ? 1 : 0);
+        updatingViewBar_ = false;
+    }
     if (!tab) {
         functionsPane_->setSourceModel(nullptr);
         listingPane_->setListing(QString());
@@ -711,8 +815,7 @@ void MainWindow::bindCurrentTab()
     }
     ProgramDocument *document = tab->document();
     functionsPane_->setSourceModel(tab->functionModel());
-    listingPane_->setListing(tab->listing());
-    listingPane_->setProgram(document, tab->currentAddress());
+    refreshListingDock();
     statusArch_->setText(QStringLiteral("%1 · %2 · %3 functions")
                              .arg(document->languageId(), document->formatName())
                              .arg(document->functions().size()));
@@ -2263,14 +2366,21 @@ void MainWindow::buildMenus()
     });
     navigate->addSeparator();
     // The views of the current program, in the order the tabs sit in.
-    const QStringList viewNames = {tr("Code"), tr("Pseudo-C"), tr("Graph"), tr("Hex")};
-    for (int i = 0; i < viewNames.size(); ++i)
-        navigate->addAction(viewNames[i], QKeySequence(Qt::CTRL | (Qt::Key_1 + i)), this,
-                            [this, i] { viewBar_->setCurrentIndex(i); });
-    navigate->addAction(tr("Toggle Code / Graph"), QKeySequence(Qt::CTRL | Qt::Key_E), this, [this] {
-        if (currentTab() != nullptr)
-            viewBar_->setCurrentIndex(viewBar_->currentIndex() == ProgramTab::Graph ? ProgramTab::Code
-                                                                                    : ProgramTab::Graph);
+    const std::array<ProgramTab::View, 6> views = {ProgramTab::Nova,     ProgramTab::Code,
+                                                   ProgramTab::Assembly, ProgramTab::PseudoC,
+                                                   ProgramTab::Hex,      ProgramTab::Graph};
+    for (size_t i = 0; i < views.size(); ++i) {
+        const ProgramTab::View view = views[i];
+        navigate->addAction(ProgramTab::viewName(view),
+                            QKeySequence(Qt::CTRL | (Qt::Key_1 + static_cast<int>(i))), this,
+                            [this, view] {
+                                if (ProgramTab *tab = currentTab())
+                                    tab->setView(view);
+                            });
+    }
+    navigate->addAction(tr("Toggle Source / Graph"), QKeySequence(Qt::CTRL | Qt::Key_E), this, [this] {
+        if (ProgramTab *tab = currentTab())
+            tab->setView(tab->view() == ProgramTab::Graph ? ProgramTab::Nova : ProgramTab::Graph);
     });
 
     QMenu *analysis = titleBar_->menuBar()->addMenu(tr("&Analysis"));
