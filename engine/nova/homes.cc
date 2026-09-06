@@ -66,11 +66,24 @@ std::vector<std::string> free_registers(const ir::Target &target, int size,
         }
     }
 
+    // A register the value fits in, which is not the same as one the same size.
+    //
+    // A processor's registers come in the sizes it has, and those are not the
+    // sizes a program uses. RISC-V on sixty-four bits has no four-byte register
+    // at all, so a four-byte value housed only in registers of its own width
+    // had nowhere to go and every function using one was refused. What it has
+    // is eight-byte registers, and four bytes of one of those is where a
+    // four-byte value lives - which is what the processor's own instructions
+    // for four-byte arithmetic operate on.
+    //
+    // Registers of exactly the right size still come first, because where one
+    // exists it is the one meant.
     std::vector<std::string> free;
+    std::vector<std::string> roomier;
     std::set<uint64_t> already;
     for (const std::string &name : ordinary) {
         const ir::Target::RegisterPlace *place = target.register_place(name);
-        if (place == nullptr || place->width != size)
+        if (place == nullptr || place->width < size)
             continue;
         if (taken.count(place->offset) != 0)
             continue;
@@ -78,8 +91,11 @@ std::vector<std::string> free_registers(const ir::Target &target, int size,
             continue;
         if (!already.insert(place->offset).second)
             continue;
-        free.push_back(name);
+        (place->width == size ? free : roomier).push_back(name);
     }
+
+    // Taken from the back, so what is asked for first is what is preferred.
+    free.insert(free.begin(), roomier.begin(), roomier.end());
     return free;
 }
 
@@ -235,7 +251,16 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
                     return;
                 node.where = pcode::Where::Register;
                 node.offset = place->offset;
-                node.size = place->width;
+
+                // A value narrower than the register it is in keeps its own
+                // width, because that is the width the operation works in, and
+                // it sits at whichever end of the register a smaller value
+                // sits at on this processor. On a machine that writes its
+                // biggest byte first that is the far end.
+                if (place->width > node.size && target.data_big_endian)
+                    node.offset += static_cast<uint64_t>(place->width - node.size);
+                if (place->width < node.size)
+                    node.size = place->width;
             };
             if (operation.writes)
                 house(operation.output);

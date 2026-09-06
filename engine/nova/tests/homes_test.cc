@@ -230,6 +230,47 @@ void check_nothing_to_do()
            problems.empty() ? "" : problems.front());
 }
 
+// A value goes in a register it fits in, which is not the same as one its own
+// size.
+//
+// A processor's registers come in the sizes it has, and those are not the sizes
+// a program uses. RISC-V on sixty-four bits has no four-byte register at all, so
+// a four-byte value housed only in registers of exactly its width had nowhere to
+// go, and every function using one was refused for wanting more registers than
+// the processor has - on a processor with thirty-two of them.
+void check_a_value_fits_in_a_bigger_register()
+{
+    ir::Target target;
+    if (!target_for("RISCV:LE:64:RV64GC", target))
+        return;
+
+    // Four-byte values on a processor whose registers are eight.
+    report(target.register_place("a0") != nullptr && target.register_place("a0")->width == 8,
+           "this processor's registers are wider than a four-byte value",
+           "they were not eight bytes");
+
+    pcode::Sequence sequence = adding();
+    std::vector<std::string> problems;
+    const bool housed = homes::give(sequence, target, problems);
+    report(housed, "and a four-byte value is still given somewhere to live",
+           problems.empty() ? "" : problems.front());
+    if (!housed)
+        return;
+
+    // It keeps its own width, because that is the width the operation works in,
+    // and the processor has instructions for four-byte arithmetic that say so.
+    bool kept_its_width = true;
+    for (const pcode::Block &block : sequence.blocks) {
+        for (const pcode::Operation &operation : block.operations) {
+            if (operation.writes)
+                kept_its_width = kept_its_width && operation.output.size == 4;
+            for (const pcode::Varnode &input : operation.inputs)
+                kept_its_width = kept_its_width && input.size == 4;
+        }
+    }
+    report(kept_its_width, "and keeps the width the operation works in", "it was widened");
+}
+
 } // namespace
 
 int main()
@@ -243,6 +284,7 @@ int main()
     check_only_ordinary_registers_are_used();
     check_a_pinned_value_is_left_alone();
     check_nothing_to_do();
+    check_a_value_fits_in_a_bigger_register();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
