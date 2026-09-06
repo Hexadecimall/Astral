@@ -314,9 +314,8 @@ void check_refuses_rather_than_drops()
     // failure nothing downstream can catch.
     std::string why;
     const std::string text = lowered_text(
-        "func counts(): i32 {\n"
-        "    for (step in 0..10) { }\n"
-        "    return 0;\n"
+        "func sized(): i32 {\n"
+        "    return sizeof(i32);\n"
         "}\n",
         "AARCH64:LE:64:AppleSilicon", why);
     report(text.empty() && why.find("not lowered yet") != std::string::npos,

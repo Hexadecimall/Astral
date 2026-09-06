@@ -506,6 +506,62 @@ void check_choosing_and_going()
     }
 }
 
+
+// Counting over a range, where the two spellings differ by exactly one turn and
+// `continue` has to still advance the count.
+void check_counting()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+    const char *summing =
+        "func f(): i32 {\n"
+        "  var total: i32 = 0;\n"
+        "  for (step in RANGE) {\n"
+        "    total = total + step;\n"
+        "  }\n"
+        "  return total;\n"
+        "}\n";
+
+    auto with = [&](const std::string &range) {
+        std::string source(summing);
+        const size_t at = source.find("RANGE");
+        source.replace(at, 5, range);
+        return source;
+    };
+
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(with("0..5"), arm, {}, value, why);
+        report(ran && value == 10, "a range stops before its end: nought to four is ten",
+               ran ? "got " + std::to_string(value) : why);
+    }
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(with("0..=5"), arm, {}, value, why);
+        report(ran && value == 15, "and includes it when written with ..=: nought to five is fifteen",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A continue that skipped the step would be a loop that never ends, so this
+    // finishing at all is the thing being checked.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "func f(): i32 {\n"
+            "  var total: i32 = 0;\n"
+            "  for (step in 0..5) {\n"
+            "    continue;\n"
+            "  }\n"
+            "  return total;\n"
+            "}\n",
+            arm, {}, value, why);
+        report(ran && value == 0, "continuing still advances the count, so the loop finishes",
+               ran ? "got " + std::to_string(value) : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -522,6 +578,7 @@ int main()
     check_raw_is_refused();
     check_it_computes_what_the_source_said();
     check_choosing_and_going();
+    check_counting();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

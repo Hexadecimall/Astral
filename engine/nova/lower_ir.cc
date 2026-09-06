@@ -114,6 +114,7 @@ private:
     bool do_while_statement(const Statement &statement);
     bool loop_statement(const Statement &statement);
     bool leave_loop(const Statement &statement, bool to_the_end);
+    bool for_in_statement(const Statement &statement);
     bool match_statement(const Statement &statement);
     bool label_statement(const Statement &statement);
     bool goto_statement(const Statement &statement);
@@ -663,6 +664,81 @@ bool Lowerer::goto_statement(const Statement &statement)
 // Written out this way rather than as a table because a table is an
 // optimisation and this is a lowering: what it has to be is right, and a
 // comparison per value is right on every processor.
+// for (name in first..last) { body }
+//
+// The bound name is a local like any other, so it is a frame slot, and the loop
+// is the one a while would have made: test at the top, step at the bottom, and
+// the step is where `continue` goes so that continuing still advances. A
+// continue that skipped the step would be a loop that never ends, which is the
+// mistake this shape exists to make impossible.
+bool Lowerer::for_in_statement(const Statement &statement)
+{
+    if (!statement.subject || statement.subject->kind != Expression::Kind::Range) {
+        complain(statement.where,
+                 "only a for over a range is lowered yet, as in for (step in 0..10)");
+        return false;
+    }
+    const Expression &range = *statement.subject;
+    if (!range.left || !range.right) {
+        complain(range.where, "a range with no end to it");
+        return false;
+    }
+
+    // The bound name holds where the count has got to.
+    Slot &counting = declare(statement.name, range.left->type, statement.where);
+    const ir::Value first = expression(*range.left);
+    if (!first.is_valid())
+        return false;
+    builder_->store(address_of_slot(counting), first, counting.width, ir::Space::Frame);
+
+    const uint32_t before = builder_->current();
+    const uint32_t testing = builder_->block();
+    const uint32_t body = builder_->block();
+    const uint32_t stepping = builder_->block();
+    const uint32_t after = builder_->block();
+
+    builder_->resume(before);
+    builder_->jump(testing);
+
+    // The end is worked out on every turn rather than once, because this is a
+    // lowering and hoisting it is an optimisation.
+    builder_->resume(testing);
+    const ir::Value last = expression(*range.right);
+    if (!last.is_valid())
+        return false;
+    const ir::Value now =
+        builder_->load(address_of_slot(counting), counting.width, ir::Space::Frame, counting.type);
+    // `..` stops before its end and `..=` includes it, which is the only
+    // difference between the two spellings.
+    const ir::Value more = builder_->binary(
+        range.inclusive ? ir::Operation::LessOrEqual : ir::Operation::Less, now, last,
+        counting.width, type_is_signed(counting.type));
+    builder_->branch(more, body, after);
+
+    // Continuing goes to the step, not to the test, so that a continue still
+    // advances the count.
+    loops_.push_back({stepping, after});
+    builder_->resume(body);
+    const bool walked = statement.then_branch ? this->statement(*statement.then_branch) : true;
+    loops_.pop_back();
+    if (!walked)
+        return false;
+    if (builder_->block_is_open())
+        builder_->jump(stepping);
+
+    builder_->resume(stepping);
+    const ir::Value held =
+        builder_->load(address_of_slot(counting), counting.width, ir::Space::Frame, counting.type);
+    const ir::Value one = builder_->constant(1, counting.width, counting.type);
+    const ir::Value next = builder_->binary(ir::Operation::Add, held, one, counting.width,
+                                            type_is_signed(counting.type));
+    builder_->store(address_of_slot(counting), next, counting.width, ir::Space::Frame);
+    builder_->jump(testing);
+
+    builder_->resume(after);
+    return true;
+}
+
 bool Lowerer::match_statement(const Statement &statement)
 {
     if (!statement.value) {
@@ -780,6 +856,8 @@ bool Lowerer::statement(const Statement &statement)
         return leave_loop(statement, true);
     case Statement::Kind::Continue:
         return leave_loop(statement, false);
+    case Statement::Kind::ForIn:
+        return for_in_statement(statement);
     case Statement::Kind::Match:
         return match_statement(statement);
     case Statement::Kind::Label:
