@@ -37,6 +37,7 @@ class ListingPane;
 class TablePane;
 class SearchResults;
 class ProgramTab;
+class TerminalView;
 class ProgramDocument;
 class ProjectController;
 class TitleBar;
@@ -51,6 +52,7 @@ public:
     // Selects a view tab by name: code, pseudo, graph, hex.
     void selectView(const QString &name);
     void typeInSearch(const QString &text);
+    void pressEnterInSearch();
     void dumpListing();
     void runAssembleHook(const QString &edit, const QString &outPath);
     // Developer hooks used by the automated run: edit, patch, write, quit.
@@ -139,6 +141,12 @@ private:
     // one is showing is the tab's label, so the bar says what you are looking
     // at without a second row of tabs saying it again.
     void showSourceMenu();
+    // Starts the shell the terminal pane shows, the first time it is seen.
+    void startTerminal();
+public:
+    // Raises the terminal and types a command into it, for a scripted run.
+    void runTerminalHook(const QString &command);
+private:
     // The dock on the right shows the disassembly, unless the centre already
     // is, in which case it shows Nova instead of the same thing twice.
     void refreshListingDock();
@@ -224,6 +232,9 @@ private:
     WelcomePage *welcome_ = nullptr;
     QWidget *workspace_ = nullptr;
     QTabBar *programBar_ = nullptr;
+    // The terminal in the bottom row of panes, and the shell on the far end
+    // of it, which is only started once someone looks at it.
+    TerminalView *terminal_ = nullptr;
     QTabBar *viewBar_ = nullptr;
     // Set while the bar is being put in step with the tab, so echoing back a
     // selection does not look like the user choosing it.

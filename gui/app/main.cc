@@ -85,6 +85,11 @@ int main(int argc, char **argv)
     const QString asmOut = qEnvironmentVariable("ASTRAL_GUI_ASM_OUT");
     if (!asmEdit.isEmpty() && !asmOut.isEmpty())
         QTimer::singleShot(1500, &window, [&window, asmEdit, asmOut] { window.runAssembleHook(asmEdit, asmOut); });
+    const QString terminalCommand = qEnvironmentVariable("ASTRAL_GUI_TERMINAL");
+    if (!terminalCommand.isEmpty())
+        QTimer::singleShot(3500, &window, [&window, terminalCommand] {
+            window.runTerminalHook(terminalCommand);
+        });
     if (qEnvironmentVariableIsSet("ASTRAL_GUI_DUMP_LISTING"))
         QTimer::singleShot(1500, &window, &astral::gui::MainWindow::dumpListing);
     const QString debugAt = qEnvironmentVariable("ASTRAL_GUI_DEBUG");
@@ -108,6 +113,15 @@ int main(int argc, char **argv)
     const QString probe = qEnvironmentVariable("ASTRAL_GUI_SEARCH");
     if (!probe.isEmpty())
         QTimer::singleShot(1800, &window, [&window, probe] { window.typeInSearch(probe); });
+    // The same, then Enter, which is a different path: typing shows matches
+    // and Enter decides among them or goes where the text says.
+    const QString entered = qEnvironmentVariable("ASTRAL_GUI_SEARCH_ENTER");
+    if (!entered.isEmpty())
+        QTimer::singleShot(1800, &window, [&window, entered] {
+            window.typeInSearch(entered);
+            QTimer::singleShot(600, &window, [&window] { window.pressEnterInSearch(); });
+            QTimer::singleShot(2500, [] { QCoreApplication::quit(); });
+        });
     if (parser.isSet(shotOption)) {
         const QString target = parser.value(shotOption);
         const int delay = qEnvironmentVariableIntValue("ASTRAL_GUI_SHOT_DELAY") > 0

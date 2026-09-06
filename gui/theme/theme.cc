@@ -10,7 +10,7 @@ namespace astral::gui {
 namespace {
 
 // The order here is the order a theme file is expected to read in.
-constexpr std::array<std::pair<const char *, const char *>, 31> kDefaults = {{
+constexpr std::array<std::pair<const char *, const char *>, 47> kDefaults = {{
     // Surfaces, darkest to lightest.
     {"background", "#1b1c1f"},
     {"panel", "#222428"},
@@ -19,6 +19,17 @@ constexpr std::array<std::pair<const char *, const char *>, 31> kDefaults = {{
     {"editorBackground", "#1e1f23"},
     {"editorLine", "#26282d"},
     {"selection", "#2d4a7a"},
+    // The sixteen a terminal names by number. Kept in the theme so a terminal
+    // in this window looks like the window rather than like a different
+    // application that happens to be embedded in it.
+    {"term.black", "#3b4252"},         {"term.red", "#e06c75"},
+    {"term.green", "#98c379"},         {"term.yellow", "#e5c07b"},
+    {"term.blue", "#61afef"},          {"term.magenta", "#c678dd"},
+    {"term.cyan", "#56b6c2"},          {"term.white", "#c8ccd4"},
+    {"term.brightBlack", "#5c6370"},   {"term.brightRed", "#ff7b86"},
+    {"term.brightGreen", "#b5e890"},   {"term.brightYellow", "#ffd68a"},
+    {"term.brightBlue", "#7cc4ff"},    {"term.brightMagenta", "#dd92f0"},
+    {"term.brightCyan", "#6fd3e0"},    {"term.brightWhite", "#ffffff"},
     {"selectionInactive", "#2a3140"},
     {"hover", "#2f333a"},
     // Text.

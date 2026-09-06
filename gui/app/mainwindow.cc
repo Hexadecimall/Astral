@@ -13,6 +13,7 @@
 #include "views/listingpane.hh"
 #include "views/debuggerpane.hh"
 #include "views/listingview.hh"
+#include "views/terminalview.hh"
 #include "views/optionsdialog.hh"
 #include "model/decompilersettings.hh"
 
@@ -28,6 +29,8 @@
 #include <QInputDialog>
 #include <QTreeWidgetItem>
 #include <QKeyEvent>
+
+#include <cctype>
 #include <QTextEdit>
 #include "platform/window.hh"
 
@@ -684,6 +687,12 @@ void MainWindow::dumpListing()
     }
     std::fprintf(stderr, "%s\n", qPrintable(tab->listing()));
     QTimer::singleShot(100, qApp, &QCoreApplication::quit);
+}
+
+void MainWindow::pressEnterInSearch()
+{
+    QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QCoreApplication::sendEvent(searchBox_, &press);
 }
 
 void MainWindow::typeInSearch(const QString &text)
@@ -2227,15 +2236,61 @@ void MainWindow::runSearch(const QString &needle)
     }
     ProgramDocument *doc = tab->document();
     std::vector<SearchResults::Match> matches;
-    // An address typed straight in is a destination, and leads.
-    if (const auto address = doc->resolveName(needle))
-        matches.push_back({tr("address"), QStringLiteral("0x%1").arg(*address, 0, 16), *address});
+
+    // Anything that reads as hex is an address being typed, and is answered as
+    // one from the first few digits rather than only once it is complete. What
+    // it says is where that address lands: the function holding it, or that
+    // the image does not map it, so a mistyped digit is visible before Enter
+    // rather than after.
+    QString hex = needle;
+    if (hex.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        hex = hex.mid(2);
+    bool isHex = !hex.isEmpty() && hex.size() <= 16;
+    for (const QChar c : hex)
+        isHex = isHex && std::isxdigit(static_cast<unsigned char>(c.toLatin1()));
+    if (isHex) {
+        bool ok = false;
+        const quint64 address = hex.toULongLong(&ok, 16);
+        if (ok) {
+            const QString spelt = QStringLiteral("0x%1").arg(address, 0, 16);
+            if (const auto holding = doc->functionAt(address)) {
+                matches.push_back({tr("address"),
+                                   holding->address == address
+                                       ? holding->name
+                                       : QStringLiteral("%1 + 0x%2")
+                                             .arg(holding->name)
+                                             .arg(address - holding->address, 0, 16),
+                                   address});
+            } else if (doc->resolveName(spelt)) {
+                matches.push_back({tr("address"), spelt, address});
+            } else {
+                // Offered anyway, and said to be unmapped. Refusing to show it
+                // leaves the box looking broken while a long address is typed.
+                matches.push_back({tr("unmapped"), spelt, address});
+            }
+        }
+    }
+
+    // Names, nearest first: what is called this, then what starts with it,
+    // then what merely contains it. A list that puts `main` under
+    // `domainOfDiscourse` is a list nobody reads to the end of.
+    std::vector<SearchResults::Match> exact, starting, containing;
+    auto place = [&](const QString &kind, const QString &name, quint64 address) {
+        if (name.compare(needle, Qt::CaseInsensitive) == 0)
+            exact.push_back({kind, name, address});
+        else if (name.startsWith(needle, Qt::CaseInsensitive))
+            starting.push_back({kind, name, address});
+        else if (name.contains(needle, Qt::CaseInsensitive))
+            containing.push_back({kind, name, address});
+    };
     for (const FunctionEntry &fn : doc->functions())
-        if (fn.name.contains(needle, Qt::CaseInsensitive))
-            matches.push_back({fn.isImport ? tr("import") : tr("function"), fn.name, fn.address});
+        place(fn.isImport ? tr("import") : tr("function"), fn.name, fn.address);
     for (const SymbolEntry &sym : doc->symbols())
-        if (!sym.isFunction && sym.name.contains(needle, Qt::CaseInsensitive))
-            matches.push_back({tr("symbol"), sym.name, sym.address});
+        if (!sym.isFunction)
+            place(tr("symbol"), sym.name, sym.address);
+    for (auto *group : {&exact, &starting, &containing})
+        matches.insert(matches.end(), group->begin(), group->end());
+
     for (const StringEntry &str : doc->strings())
         if (str.text.contains(needle, Qt::CaseInsensitive))
             matches.push_back({tr("string"), str.text.simplified(), str.address});
@@ -2522,8 +2577,12 @@ void MainWindow::buildToolBar()
     searchResults_ = new SearchResults(searchBox_, this);
     connect(searchResults_, &SearchResults::chosen, this, [this](quint64 address) {
         searchBox_->clear();
-        if (ProgramTab *tab = currentTab())
-            tab->showAddress(address);
+        ProgramTab *tab = currentTab();
+        if (tab == nullptr)
+            return;
+        if (!tab->showAddress(address))
+            statusBar()->showMessage(
+                tr("0x%1 is not mapped by this image").arg(address, 0, 16), 4000);
     });
 
     // Analysis acts on the whole program rather than on what is typed, so it
@@ -2546,6 +2605,71 @@ void MainWindow::buildToolBar()
     // The strip is the toolbar's only item, so it has to be allowed to grow
     // with it or the stretch inside it has nothing to spend.
     strip->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+}
+
+// Starts the shell the terminal shows, once. It begins beside whatever
+// program is open, and Astral's own command is put in front of PATH so that
+// typing `astral` there means this build rather than whatever is installed.
+void MainWindow::startTerminal()
+{
+    if (terminal_ == nullptr || terminal_->running())
+        return;
+    QString directory;
+    if (ProgramTab *tab = currentTab())
+        directory = QFileInfo(tab->document()->path()).absolutePath();
+    if (directory.isEmpty())
+        directory = QDir::homePath();
+
+    // `astral` typed in here should mean this build, not whichever older one
+    // happens to be installed. Where the command sits relative to the window
+    // differs between a bundle, a single binary and an installed copy, so it
+    // is looked for rather than assumed.
+    // The directory is read rather than the file asked about: this filesystem
+    // does not tell capitals apart, so asking whether `astral` is there says
+    // yes to the window's own `Astral` and would put the application on PATH
+    // under the command's name.
+    QStringList ahead;
+    QDir up(QCoreApplication::applicationDirPath());
+    for (int i = 0; i < 5; ++i) {
+        if (up.entryList(QDir::Files | QDir::Executable).contains(QStringLiteral("astral"))) {
+            ahead << up.absolutePath();
+            break;
+        }
+        if (!up.cdUp())
+            break;
+    }
+    const QString path = ahead.join(QLatin1Char(':'));
+    terminal_->startSession(directory, path);
+
+    // An interactive shell reads the user's own start-up files, and those
+    // usually put their own directories at the front of PATH, which undoes
+    // what was handed in. Saying it again once the shell is running is the
+    // only place it wins. The screen is cleared afterwards so the pane opens
+    // on a prompt rather than on plumbing.
+    // A shell works out where a command lives once and remembers, so being
+    // told about a new directory is not enough on its own: it has to be told
+    // to look again. `hash -r` is how most say it and `rehash` is how zsh
+    // does, and asking for both is how this works in either.
+    if (terminal_->running() && !ahead.isEmpty())
+        terminal_->sendWhenReady(
+            QStringLiteral("export PATH=\"%1:$PATH\"; hash -r 2>/dev/null || rehash 2>/dev/null; clear")
+                .arg(path));
+}
+
+void MainWindow::runTerminalHook(const QString &command)
+{
+    for (QDockWidget *pane : panes_) {
+        if (pane->objectName() != QStringLiteral("terminalPane"))
+            continue;
+        pane->show();
+        pane->raise();
+        break;
+    }
+    startTerminal();
+    if (terminal_ != nullptr) {
+        terminal_->setFocus();
+        terminal_->send(command);
+    }
 }
 
 QDockWidget *MainWindow::addPane(const QString &title, const QString &objectName, QWidget *body,
@@ -2709,11 +2833,29 @@ void MainWindow::buildDocks()
         addPane(tr("Strings"), QStringLiteral("stringsPane"), stringsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Segments"), QStringLiteral("segmentsPane"), segmentsPane_, Qt::BottomDockWidgetArea),
         addPane(tr("Imports"), QStringLiteral("importsPane"), importsPane_, Qt::BottomDockWidgetArea),
-        addPane(tr("Console"), QStringLiteral("consolePane"), placeholderText(tr("Astral console")),
+        addPane(tr("Terminal"), QStringLiteral("terminalPane"), terminal_ = new TerminalView,
                 Qt::BottomDockWidgetArea),
         addPane(tr("Log"), QStringLiteral("logPane"), logView_ = qobject_cast<QPlainTextEdit *>(placeholderText(tr("Analysis log"))),
                 Qt::BottomDockWidgetArea),
     };
+
+    // The shell is not started until someone actually looks at the terminal:
+    // opening a binary should not also start a process nobody asked for. Once
+    // it is going it stays, so the pane keeps whatever was on it.
+    if (terminal_ != nullptr) {
+        for (QDockWidget *pane : panes_) {
+            if (pane->objectName() != QStringLiteral("terminalPane"))
+                continue;
+            connect(pane, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+                if (visible)
+                    startTerminal();
+            });
+            break;
+        }
+        connect(terminal_, &TerminalView::sessionEnded, this, [this] {
+            appendLog(tr("terminal: the shell ended"));
+        });
+    }
     for (int i = 1; i < bottom.size(); ++i)
         tabifyDockWidget(bottom[i - 1], bottom[i]);
     for (QDockWidget *pane : bottom) {

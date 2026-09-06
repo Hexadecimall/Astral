@@ -61,6 +61,7 @@ set(GUI_SOURCES
     model/literalspace.cc
     model/sourcepatcher.cc
     model/assembler.cc
+    model/pty.cc
     views/codeview.cc
     views/decompilerview.cc
     views/listingview.cc
@@ -70,6 +71,7 @@ set(GUI_SOURCES
     views/optionsdialog.cc
     views/hexpane.cc
     views/listingpane.cc
+    views/terminalview.cc
     theme/theme.cc
     resources.qrc)
 list(APPEND GUI_SOURCES platform/window.cc)
@@ -225,6 +227,29 @@ target_link_libraries(astral_gui_theme_test PRIVATE Qt6::Widgets Qt6::Test)
 add_test(NAME gui_theme COMMAND astral_gui_theme_test -platform offscreen)
 set_tests_properties(gui_theme PROPERTIES
     ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
+
+# The editing help in the code view: brackets, indentation and the words on
+# offer. Nothing but the view and Qt, so it runs anywhere the rest of the
+# tests do.
+add_executable(astral_gui_editing_test tests/editing_test.cc views/codeview.cc theme/theme.cc)
+set_target_properties(astral_gui_editing_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(astral_gui_editing_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_editing_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_editing_test PRIVATE Qt6::Widgets Qt6::Test)
+add_test(NAME gui_editing COMMAND astral_gui_editing_test -platform offscreen)
+set_tests_properties(gui_editing PROPERTIES
+    ENVIRONMENT "ASTRAL_LEARNED=${CMAKE_BINARY_DIR}/test-learned.astral")
+
+# The search box's popup: what Enter takes, and that the row is read before the
+# list holding it is put away.
+add_executable(astral_gui_search_test tests/search_test.cc app/searchresults.cc)
+set_target_properties(astral_gui_search_test PROPERTIES
+    CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF AUTOMOC ON)
+target_include_directories(astral_gui_search_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(astral_gui_search_test PRIVATE QT_NO_KEYWORDS)
+target_link_libraries(astral_gui_search_test PRIVATE Qt6::Widgets Qt6::Test)
+add_test(NAME gui_search COMMAND astral_gui_search_test -platform offscreen)
 
 # The document is the window's whole view of the engine, so it is checked
 # against a real program rather than a stub. Any small system binary will do.
