@@ -57,19 +57,38 @@ struct Form {
         bool fixed_is_register = false;
     };
 
-    // What the one operation writes to and reads from, when the form does
-    // exactly one thing. This is the shape a selection has to match: an
-    // addition whose two inputs are slots is a register-register add, and one
-    // whose second input is fixed is an add of a particular amount.
+    // What the form writes to and reads from. This is the shape a selection has
+    // to match: an addition whose two inputs are slots is a register-register
+    // add, and one whose second input is fixed is an add of a particular
+    // amount.
     Piece writes_to;
     bool writes = false;
     std::vector<Piece> reads;
 
-    // What it does, as the sequence of p-code operations its template holds.
-    // One operation is the common case and the useful one; a form whose
-    // template is longer does several things at once and is harder to choose
-    // for, which is a reason to know how many there are.
+    // What it does.
+    //
+    // Almost no real instruction is one p-code operation. An AARCH64 add is
+    // seven: two that move values into place, the addition itself, and four
+    // that set the condition flags. A MIPS return is seven, six of which are
+    // the instruction-set bit it clears on the way. Holding out for forms whose
+    // whole template is one operation found the handful of clean ones on each
+    // processor and missed most of what a processor can do.
+    //
+    // So this is what the form does in the sense that matters: the one
+    // operation whose result reaches what the form writes, with the moves
+    // either side of it followed through. What the rest of the template did is
+    // below, in `also_writes`.
     std::vector<ghidra::OpCode> does;
+
+    // The registers the form disturbs besides what it writes to.
+    //
+    // These are the flags, mostly. An instruction that adds also says whether
+    // the answer was zero or negative or carried, and that is not optional -
+    // it is what the instruction is. Choosing one is fine as long as nothing
+    // being relied on lives in those registers, which is a question about the
+    // function being written rather than about the form, so the answer is
+    // recorded here and asked there.
+    std::vector<uint64_t> also_writes;
 
     // One of the places a form leaves open, and what can go in it.
     struct Slot {

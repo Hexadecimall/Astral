@@ -45,24 +45,24 @@ std::vector<std::string> names_at(const ir::Target &target, uint64_t offset, int
 // processor that loads it first, so what the return reads says nothing; what
 // put the value there does. MIPS masks the low bit off the link register on the
 // way, so the trail is two operations long and neither of them is a copy.
-bool reaches(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
-             uint64_t register_offset)
+using Place = std::pair<const ghidra::AddrSpace *, uint64_t>;
+
+// Every place a value came from, following what the instruction did backwards.
+std::set<Place> came_from(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from)
 {
     std::vector<ghidra::VarnodeData> waiting;
     waiting.push_back(from);
-    std::set<std::pair<const ghidra::AddrSpace *, uint64_t>> seen;
+    std::set<Place> seen;
 
-    for (int steps = 0; !waiting.empty() && steps < 128; ++steps) {
+    for (int steps = 0; !waiting.empty() && steps < 256; ++steps) {
         const ghidra::VarnodeData value = waiting.back();
         waiting.pop_back();
         if (value.space == nullptr)
             continue;
         if (!seen.insert({value.space, value.offset}).second)
             continue;
-        if (value.space->getType() == ghidra::IPTR_PROCESSOR && value.offset == register_offset)
-            return true;
 
-        // Whatever the instruction last put there, before it went.
+        // Whatever the instruction last put there, before it was read.
         const Meaning *wrote = nullptr;
         for (const Meaning &one : meant) {
             if (one.writes && one.output.space == value.space &&
@@ -73,6 +73,91 @@ bool reaches(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
             continue;
         for (const ghidra::VarnodeData &input : wrote->inputs)
             waiting.push_back(input);
+    }
+    return seen;
+}
+
+bool reaches(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
+             uint64_t register_offset)
+{
+    for (const Place &one : came_from(meant, from)) {
+        if (one.first != nullptr && one.first->getType() == ghidra::IPTR_PROCESSOR &&
+            one.second == register_offset)
+            return true;
+    }
+    return false;
+}
+
+// Whether bytes that decoded to `meant` do what `wanted` said, over the places
+// `wanted` named.
+//
+// This is the check that matters and the only one that can be trusted. Reading
+// bytes back as text settles nothing on its own: a candidate for a copy on
+// RISC-V came back as `csrrc a6,0x0,s6`, which is not a copy, and passed
+// because the registers it was asked about happened to be named somewhere in
+// it. Bytes mean what the processor says they mean, and that is a sequence of
+// operations rather than a sentence.
+//
+// A real instruction's operations are not the one operation asked for. An
+// AARCH64 add is seven: it moves the second operand into scratch, adds, sets
+// four flags, and moves the answer out. So what is checked is that the
+// operation asked for is in there, that what it read came from the places
+// wanted, and that what it wrote reaches the place wanted - each followed
+// through whatever the instruction did on the way.
+bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operation &wanted)
+{
+    for (const Meaning &doing : meant) {
+        if (doing.opcode != wanted.opcode)
+            continue;
+
+        // Everywhere its inputs came from, taken together, because an
+        // instruction is free to name its operands in whatever order it likes.
+        std::set<Place> sources;
+        for (const ghidra::VarnodeData &input : doing.inputs) {
+            const std::set<Place> from = came_from(meant, input);
+            sources.insert(from.begin(), from.end());
+        }
+
+        bool reads_them_all = true;
+        for (const pcode::Varnode &node : wanted.inputs) {
+            bool found = false;
+            for (const Place &one : sources) {
+                if (one.first == nullptr)
+                    continue;
+                const bool is_register = one.first->getType() == ghidra::IPTR_PROCESSOR;
+                const bool is_number = one.first->getType() == ghidra::IPTR_CONSTANT;
+                if (node.is_constant())
+                    found = found || (is_number && one.second == node.offset);
+                else
+                    found = found || (is_register && one.second == node.offset);
+            }
+            reads_them_all = reads_them_all && found;
+        }
+        if (!reads_them_all)
+            continue;
+
+        if (!wanted.writes)
+            return true;
+
+        // And the answer gets to where it was asked to go, whether the
+        // operation wrote it there or something after it moved it.
+        if (doing.writes && doing.output.space != nullptr &&
+            doing.output.space->getType() == ghidra::IPTR_PROCESSOR &&
+            doing.output.offset == wanted.output.offset)
+            return true;
+        for (const Meaning &after : meant) {
+            if (!after.writes || after.output.space == nullptr ||
+                after.output.space->getType() != ghidra::IPTR_PROCESSOR ||
+                after.output.offset != wanted.output.offset)
+                continue;
+            for (const ghidra::VarnodeData &input : after.inputs) {
+                for (const Place &one : came_from(meant, input)) {
+                    if (doing.writes && one.first == doing.output.space &&
+                        one.second == doing.output.offset)
+                        return true;
+                }
+            }
+        }
     }
     return false;
 }
@@ -97,6 +182,25 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
            std::vector<std::string> &problems)
 {
     const size_t before = problems.size();
+
+    // The registers this function keeps things in.
+    //
+    // A real instruction touches more than the one place asked for - an add
+    // sets four condition flags - and that is what the instruction is rather
+    // than a fault in it. It only matters when something being kept lives in
+    // one of those places, so what is kept is worked out once and asked about
+    // per form.
+    std::set<uint64_t> in_use;
+    for (const pcode::Block &block : sequence.blocks) {
+        for (const pcode::Operation &operation : block.operations) {
+            if (operation.writes && operation.output.where == pcode::Where::Register)
+                in_use.insert(operation.output.offset);
+            for (const pcode::Varnode &input : operation.inputs) {
+                if (input.where == pcode::Where::Register)
+                    in_use.insert(input.offset);
+            }
+        }
+    }
 
     for (const pcode::Block &block : sequence.blocks) {
         for (const pcode::Operation &operation : block.operations) {
@@ -269,68 +373,62 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                                                    : trouble;
                     continue;
                 }
-                // Every register asked for has to be named in what comes back,
-                // or the bytes are some other instruction that happens to be
-                // readable.
-                // Every register asked for has to be named in what comes back,
-                // or the bytes are some other instruction that happens to be
-                // readable. Any of the names it goes by will do, since a
-                // disassembler writes whichever it prefers.
+                // And what the bytes mean is what was asked for.
                 //
-                // Numbers are not looked for. A field was given an exact value
-                // and that is a stronger check than reading it back, which
-                // would fail on spelling alone: twenty written into an
-                // instruction comes back as 0x14.
-                bool mentions_all = true;
-                if (taken != nullptr) {
-                    for (const catalogue::Catalogue::Wanted &place : *taken) {
-                        if (place.is_number)
-                            continue;
-                        bool any = false;
-                        for (const std::string &name : place.names)
-                            any = any || reads.find(name) != std::string::npos;
-                        mentions_all = mentions_all && any;
-                    }
-                }
-                if (!mentions_all) {
-                    last_refusal = "the bytes it would write read back as: " + reads;
+                // This is the whole check, and reading them back as text is not
+                // part of it. Text settles nothing on its own: a candidate for
+                // a copy on RISC-V came back as `csrrc a6,0x0,s6`, which is not
+                // a copy, and passed a check for whether the right registers
+                // were named because both of them happened to appear in it.
+                // Bytes mean what the processor says they mean, and that is a
+                // sequence of operations rather than a sentence.
+                (void)taken;
+                std::string unreadable;
+                const std::vector<Meaning> meant = means_as(
+                    target.compiler.empty() ? target.language_id
+                                            : target.language_id + ":" + target.compiler,
+                    bytes, unreadable);
+                if (!does_what_was_asked(meant, operation)) {
+                    last_refusal = std::string("the bytes it would write do not mean a ") + called +
+                                   " over those places: " + (reads.empty() ? unreadable : reads);
                     continue;
                 }
 
-                // An instruction that names no register is checked by what it
-                // means instead.
-                //
-                // Reading bytes back as text settles whether the right
-                // registers went in the right fields, and for most instructions
-                // that is the whole question. For a return it settles nothing:
-                // there are no registers in it to check, so any two bytes that
-                // decode at all pass, and the shortest wins - which on MIPS is
-                // a coprocessor store. So the bytes are decoded to what they do
-                // rather than to how they are written, and they have to come
-                // back as a return going through the register a return goes
-                // through.
+                // A return also has to go back where the caller came from,
+                // which no amount of looking at what it reads can tell: every
+                // kind of return goes through the program counter, and what
+                // separates a function's from an exception's is where the
+                // address in it came from.
                 if (must_mean_a_return) {
-                    std::string unreadable;
-                    const std::vector<Meaning> meant = means_as(
-                        target.compiler.empty() ? target.language_id
-                                                : target.language_id + ":" + target.compiler,
-                        bytes, unreadable);
                     bool goes_back = false;
                     for (const Meaning &one : meant) {
-                        if (one.opcode != ghidra::CPUI_RETURN)
+                        if (one.opcode != ghidra::CPUI_RETURN || one.inputs.empty())
                             continue;
-                        // Where it goes back through, followed through whatever
-                        // the instruction did to the address on the way.
-                        goes_back = goes_back || reaches(meant, one.inputs.empty()
-                                                                    ? ghidra::VarnodeData()
-                                                                    : one.inputs.front(),
-                                                         back_through);
+                        goes_back = goes_back || reaches(meant, one.inputs.front(), back_through);
                     }
                     if (!goes_back) {
-                        last_refusal = "the bytes it would write do not mean a return: " +
+                        last_refusal = "the bytes it would write go back somewhere else: " +
                                        (reads.empty() ? unreadable : reads);
                         continue;
                     }
+                }
+
+                // And it does not disturb anything this function is relying on.
+                //
+                // A real instruction has effects beyond the one wanted: an add
+                // sets the condition flags, and that is what an add is rather
+                // than something to avoid. What matters is whether anything
+                // being kept lives in one of the registers it touches, which is
+                // a question about this function and not about the form.
+                bool clobbers = false;
+                for (uint64_t disturbed : form->also_writes)
+                    clobbers = clobbers || (in_use.count(disturbed) != 0 &&
+                                            !(operation.writes &&
+                                              disturbed == operation.output.offset));
+                if (clobbers) {
+                    last_refusal = "it would write over a register this function is keeping "
+                                   "something in";
+                    continue;
                 }
 
                 best = form;

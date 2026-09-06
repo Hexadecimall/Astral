@@ -166,6 +166,56 @@ void sources_of(const std::vector<ghidra::OpTpl *> &operations, size_t before,
     }
 }
 
+// The last thing before `before` to write where `value` is, or nothing.
+const ghidra::OpTpl *writer_of(const std::vector<ghidra::OpTpl *> &operations, size_t before,
+                               const ghidra::VarnodeTpl *value, size_t &at)
+{
+    PlaceKey wanted;
+    if (!key_of(value, wanted))
+        return nullptr;
+    const ghidra::OpTpl *wrote = nullptr;
+    for (size_t i = 0; i < before && i < operations.size(); ++i) {
+        const ghidra::OpTpl *operation = operations[i];
+        if (operation == nullptr || is_bookkeeping(operation->getOpcode()))
+            continue;
+        PlaceKey where;
+        if (operation->getOut() != nullptr && key_of(operation->getOut(), where) &&
+            where == wanted) {
+            wrote = operation;
+            at = i;
+        }
+    }
+    return wrote;
+}
+
+// A value with the moves that carried it followed through.
+//
+// A template moves values into scratch before working on them and out of
+// scratch afterwards, and those moves are not part of what the instruction
+// does - they are how a specification is written. Following them gives the
+// place the value really came from, which is a slot to fill or something the
+// form names outright. A value that some other kind of operation computed is
+// neither, and comes back as nothing.
+Form::Piece through_moves(const std::vector<ghidra::OpTpl *> &operations, size_t before,
+                          const ghidra::VarnodeTpl *value)
+{
+    for (int steps = 0; steps < 8; ++steps) {
+        if (value == nullptr)
+            return Form::Piece();
+        if (value->getOffset().getType() == ghidra::ConstTpl::handle)
+            return read_piece(value);
+        size_t at = 0;
+        const ghidra::OpTpl *wrote = writer_of(operations, before, value, at);
+        if (wrote == nullptr)
+            return read_piece(value);  // it was there before the instruction ran
+        if (wrote->getOpcode() != ghidra::CPUI_COPY || wrote->numInput() < 1)
+            return Form::Piece();      // computed on the way: not a place
+        value = wrote->getIn(0);
+        before = at;
+    }
+    return Form::Piece();
+}
+
 // The bits a form always has, and how they are found.
 //
 // A form is chosen from a stream of bits by a tree: each node looks at a few
@@ -550,6 +600,89 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
             }
             for (int input = 0; input < only->numInput(); ++input)
                 form.reads.push_back(read_piece(only->getIn(input)));
+        } else if (form.does.size() > 1 && templ != nullptr && only != nullptr &&
+                   form.does.back() != ghidra::CPUI_RETURN) {
+            // What the form does, when its template is a real instruction.
+            //
+            // Almost no instruction on a real processor is one p-code
+            // operation. An AARCH64 add is seven: one that moves the second
+            // operand into scratch, the addition, four that set the condition
+            // flags, and one that moves the answer out. Holding out for
+            // templates of length one found the handful of clean instructions
+            // on each processor and missed the rest - on AARCH64 it left
+            // exactly one form that adds, and that one adds a number.
+            //
+            // The operation that matters is the one whose result reaches what
+            // the form writes. So the last thing to write one of the form's own
+            // slots is found, what it wrote is followed back through the moves
+            // that carried it, and whatever computed it is what the form does.
+            // Its inputs are followed back the same way.
+            //
+            // Everything else is the instruction's own business - its flags,
+            // its scratch - and is recorded rather than dropped, because
+            // choosing this form disturbs those registers and something has to
+            // know that.
+            const std::vector<ghidra::OpTpl *> &operations = templ->getOpvec();
+            const ghidra::OpTpl *ends_at = nullptr;
+            size_t ends_at_index = 0;
+            for (size_t at = 0; at < operations.size(); ++at) {
+                const ghidra::OpTpl *operation = operations[at];
+                if (operation == nullptr || is_bookkeeping(operation->getOpcode()) ||
+                    operation->getOut() == nullptr)
+                    continue;
+                if (operation->getOut()->getOffset().getType() == ghidra::ConstTpl::handle) {
+                    ends_at = operation;
+                    ends_at_index = at;
+                }
+            }
+
+            if (ends_at != nullptr && ends_at->numInput() > 0) {
+                // What produced the answer, with the moves followed through.
+                const ghidra::OpTpl *doing = ends_at;
+                size_t doing_at = ends_at_index;
+                for (int steps = 0; steps < 8 && doing->getOpcode() == ghidra::CPUI_COPY &&
+                                    doing->numInput() > 0;
+                     ++steps) {
+                    size_t at = 0;
+                    const ghidra::OpTpl *earlier =
+                        writer_of(operations, doing_at, doing->getIn(0), at);
+                    if (earlier == nullptr)
+                        break;
+                    doing = earlier;
+                    doing_at = at;
+                }
+
+                bool nameable = doing != ends_at || doing->getOpcode() != ghidra::CPUI_COPY;
+                std::vector<Form::Piece> reads;
+                for (int input = 0; input < doing->numInput(); ++input) {
+                    const Form::Piece piece =
+                        through_moves(operations, doing_at, doing->getIn(input));
+                    if (!piece.is_slot && !piece.is_fixed)
+                        nameable = false;
+                    reads.push_back(piece);
+                }
+
+                if (nameable) {
+                    // The registers the rest of the template disturbs, so that
+                    // choosing this form is a decision somebody can make.
+                    std::vector<uint64_t> disturbed;
+                    for (size_t at = 0; at < operations.size(); ++at) {
+                        const ghidra::OpTpl *operation = operations[at];
+                        if (operation == nullptr || operation == doing ||
+                            operation == ends_at || is_bookkeeping(operation->getOpcode()))
+                            continue;
+                        const Form::Piece wrote = read_piece(operation->getOut());
+                        if (wrote.is_fixed && wrote.fixed_is_register)
+                            disturbed.push_back(wrote.fixed);
+                    }
+
+                    form.does.assign(1, doing->getOpcode());
+                    form.writes = true;
+                    form.writes_to = read_piece(ends_at->getOut());
+                    form.reads = std::move(reads);
+                    form.also_writes = std::move(disturbed);
+                }
+            }
         } else if (form.does.size() > 1 && only != nullptr && templ != nullptr &&
                    form.does.back() == ghidra::CPUI_RETURN && only->numInput() > 0) {
             // A form whose last operation goes back is that return, however
