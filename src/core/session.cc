@@ -1520,6 +1520,118 @@ std::string Session::readable_language() const
     return descriptor->fallback == "pseudo-c" ? "astral-c" : descriptor->fallback;
 }
 
+// The Nova a function is, with the things it mentions declared above it.
+//
+// A recovered function refers to globals it did not declare and to constants
+// the knowledge base gave names to, and the C emitter states both - externs for
+// the globals, values for the constants - because C that mentions an undeclared
+// name is not C. Nova is the same and was not doing it, so what came out read
+// perfectly and would not compile: every reference to a named global or a named
+// constant was a name nothing had introduced.
+//
+// What is stated is only what the text actually mentions. Everything else about
+// the program is the program's business.
+std::string Session::nova_with_declarations(const std::string &body) const
+{
+    // What the body already introduces: anything declared in it, and the
+    // function's own name and parameters.
+    std::set<std::string> bound;
+    {
+        std::istringstream lines(body);
+        std::string line;
+        while (std::getline(lines, line)) {
+            for (const char *keyword : {"var ", "val ", "func ", "stack "}) {
+                const std::string::size_type at = line.find(keyword);
+                if (at == std::string::npos)
+                    continue;
+                std::string::size_type start = at + std::strlen(keyword);
+                while (start < line.size() && std::isspace(static_cast<unsigned char>(line[start])))
+                    ++start;
+                std::string::size_type end = start;
+                while (end < line.size() &&
+                       (std::isalnum(static_cast<unsigned char>(line[end])) || line[end] == '_'))
+                    ++end;
+                if (end > start)
+                    bound.insert(line.substr(start, end - start));
+            }
+            // A parameter is written `name: type` inside the signature.
+            if (line.find("func ") != std::string::npos) {
+                const std::string::size_type open = line.find('(');
+                const std::string::size_type close = line.rfind(')');
+                if (open != std::string::npos && close != std::string::npos && close > open) {
+                    const std::string inside = line.substr(open + 1, close - open - 1);
+                    std::string word;
+                    for (char letter : inside + ",") {
+                        if (std::isalnum(static_cast<unsigned char>(letter)) || letter == '_') {
+                            word += letter;
+                            continue;
+                        }
+                        if (letter == ':' && !word.empty())
+                            bound.insert(word);
+                        word.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    const std::map<std::string, GlobalSymbol> &known = globals();
+    std::string constants;
+    std::string globals_text;
+    std::set<std::string> stated;
+
+    for (const Identifier &identifier : scan_identifiers(body)) {
+        const std::string &name = identifier.name;
+        if (bound.count(name) != 0 || stated.count(name) != 0)
+            continue;
+
+        // A named constant is a number the knowledge base gave a name to, and
+        // saying what number is the whole of what a reader or a compiler needs.
+        uint64_t value = 0;
+        if (Knowledge::instance().constant_value(name, value)) {
+            std::ostringstream said;
+            said << "val " << name << ": i64 = 0x" << std::hex << value << std::dec << ";\n";
+            constants += said.str();
+            stated.insert(name);
+            continue;
+        }
+
+        if (identifier.called)
+            continue;
+
+        // A global is somewhere in the image, which in Nova is part of what it
+        // is rather than a remark about it.
+        uint64_t address = 0;
+        auto entry = known.find(name);
+        if (entry != known.end() && !entry->second.is_function) {
+            address = entry->second.address;
+        } else if (name.size() > 1 && name[0] == 'g' &&
+                   name.find_first_not_of("0123456789abcdefABCDEF", 1) == std::string::npos) {
+            // A global nobody named is printed after where it is, shortened to
+            // its offset into the image because that is what tells two of them
+            // apart. So the text says gNNNN while the symbol table knows it by
+            // the name the engine gave it, and the two are matched back up
+            // through the address rather than through the spelling.
+            try {
+                address = image_.image_base + std::stoull(name.substr(1), nullptr, 16);
+            } catch (...) {
+                continue;
+            }
+        } else {
+            continue;
+        }
+
+        std::ostringstream said;
+        said << "var " << name << ": i64 @ 0x" << std::hex << address << std::dec << ";\n";
+        globals_text += said.str();
+        stated.insert(name);
+    }
+
+    if (constants.empty() && globals_text.empty())
+        return body;
+    return constants + globals_text + "\n" + body;
+}
+
 // Prints one function twice: once with the c-language printer, which is what
 // the compilable path is built from, and once with the readable one. Both come
 // from the same decompiled form, so the two never disagree about the code.
@@ -1553,6 +1665,8 @@ void Session::print_function(void *funcdata, std::string &listing, std::string &
         // where the value is first given. Both are true of Nova as well, and
         // Nova declarations are the ones it was taught to recognise.
         readable = readable_listing(pretty.str(), language == "nova");
+        if (language == "nova")
+            readable = nova_with_declarations(readable);
     } catch (ghidra::LowlevelError &) {
         // Nothing readable came out, so the plain listing stands. The listing
         // the rest of the library uses was already taken.

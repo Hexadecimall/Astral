@@ -1180,6 +1180,10 @@ ExpressionPtr Parser::parse_unary()
         UnaryOp op;
     };
     static const Prefix prefixes[] = {
+        // The stepping pair come first. To anything that looks at `+` before
+        // `++`, stepping is a plus applied to a plus, which is the value
+        // unchanged - so it read, it lowered, and it stepped nothing.
+        {"++", UnaryOp::PreIncrement}, {"--", UnaryOp::PreDecrement},
         {"!", UnaryOp::Not},        {"~", UnaryOp::BitNot},      {"-", UnaryOp::Minus},
         {"+", UnaryOp::Plus},       {"*", UnaryOp::Dereference}, {"&", UnaryOp::AddressOf},
     };
@@ -1266,6 +1270,17 @@ ExpressionPtr Parser::parse_postfix()
             member->through_pointer = through_pointer;
             member->left = std::move(value);
             value = std::move(member);
+            continue;
+        }
+        // `index++`, which is the step written after the thing stepped: the
+        // same step, answering with the value before it rather than after.
+        if (token.is_punctuation("++") || token.is_punctuation("--")) {
+            const bool upwards = token.is_punctuation("++");
+            Where where = take().where;
+            ExpressionPtr stepped = make(Expression::Kind::Unary, where);
+            stepped->unary_op = upwards ? UnaryOp::PostIncrement : UnaryOp::PostDecrement;
+            stepped->left = std::move(value);
+            value = std::move(stepped);
             continue;
         }
         // w22@entry: the register's value on entry.

@@ -134,6 +134,7 @@ private:
     ir::Value assign(const Expression &expression);
     ir::Value call(const Expression &expression);
     ir::Value name(const Expression &expression);
+    const Variable *global_named(const std::string &name) const;
     ir::Value cast(const Expression &expression);
     ir::Value conditional(const Expression &expression);
     ir::Value member(const Expression &expression);
@@ -245,6 +246,17 @@ ir::Value Lowerer::address_of_slot(const Slot &slot)
 
 // ------------------------------------------------------------- expressions
 
+// A name the whole file declares rather than the function: a global somewhere in
+// the image, or a value that is only a number.
+const Variable *Lowerer::global_named(const std::string &name) const
+{
+    for (const Variable &global : unit_.globals) {
+        if (global.name == name)
+            return &global;
+    }
+    return nullptr;
+}
+
 ir::Value Lowerer::name(const Expression &expression)
 {
     // A parameter that was pinned is the value itself: at level 1 the register
@@ -255,12 +267,41 @@ ir::Value Lowerer::name(const Expression &expression)
         return parameter->second;
 
     const Slot *slot = look_up(expression.name);
-    if (slot == nullptr) {
-        complain(expression.where, "nothing here is called " + expression.name);
-        return ir::Value();
+    if (slot != nullptr) {
+        const ir::Value address = address_of_slot(*slot);
+        return builder_->load(address, slot->width, ir::Space::Frame, slot->type);
     }
-    const ir::Value address = address_of_slot(*slot);
-    return builder_->load(address, slot->width, ir::Space::Frame, slot->type);
+
+    // Something the file declares rather than the function. A recovered
+    // function refers to globals it did not declare and to constants the
+    // knowledge base named, and both are stated at the top of the file - so
+    // both have to be found there rather than only among the locals.
+    if (const Variable *global = global_named(expression.name)) {
+        const int width = width_of_type(global->type, target_);
+
+        // A value that is only a number is the number.
+        if (global->is_constant && global->initialiser &&
+            global->initialiser->kind == Expression::Kind::IntegerLiteral)
+            return builder_->constant(global->initialiser->integer_value, width, global->type);
+
+        if (global->storage.kind == Storage::Kind::Address) {
+            ir::Instruction where;
+            where.operation = ir::Operation::GlobalAddress;
+            where.immediate = global->storage.address;
+            where.width = target_.pointer_bytes > 0 ? target_.pointer_bytes : 8;
+            where.where = expression.where;
+            where.result = builder_->value(nullptr);
+            const ir::Value address = builder_->emit(std::move(where));
+            if (!address.is_valid())
+                return ir::Value();
+            return builder_->load(address, width, ir::Space::Data, global->type);
+        }
+        if (global->initialiser)
+            return this->expression(*global->initialiser);
+    }
+
+    complain(expression.where, "nothing here is called " + expression.name);
+    return ir::Value();
 }
 
 // `value as u32`, which reinterprets a view over storage. The bits do not move
@@ -639,12 +680,27 @@ ir::Value Lowerer::unary(const Expression &expression)
         // Where it goes back, which is wherever it came from.
         if (expression.left->kind == Expression::Kind::Name) {
             const Slot *slot = look_up(expression.left->name);
-            if (slot == nullptr) {
-                complain(expression.left->where,
-                         "nothing here is called " + expression.left->name);
-                return ir::Value();
+            if (slot != nullptr) {
+                builder_->store(address_of_slot(*slot), stepped, slot->width, ir::Space::Frame);
+            } else {
+                auto parameter = pinned_.find(expression.left->name);
+                if (parameter == pinned_.end()) {
+                    complain(expression.left->where,
+                             "nothing here is called " + expression.left->name);
+                    return ir::Value();
+                }
+                ir::Instruction put;
+                put.operation = ir::Operation::Copy;
+                put.width = stepping;
+                put.where = expression.where;
+                put.arguments.push_back(stepped);
+                put.result =
+                    builder_->value(parameter->second.type, parameter->second.storage);
+                const ir::Value now = builder_->emit(std::move(put));
+                if (!now.is_valid())
+                    return ir::Value();
+                parameter->second = now;
             }
-            builder_->store(address_of_slot(*slot), stepped, slot->width, ir::Space::Frame);
         } else if (expression.left->kind == Expression::Kind::Unary &&
                    expression.left->unary_op == compiler::UnaryOp::Dereference &&
                    expression.left->left) {
@@ -697,13 +753,33 @@ ir::Value Lowerer::assign(const Expression &expression)
 
     if (expression.left->kind == Expression::Kind::Name) {
         const Slot *slot = look_up(expression.left->name);
-        if (slot == nullptr) {
-            complain(expression.left->where, "nothing here is called " + expression.left->name);
-            return ir::Value();
+        if (slot != nullptr) {
+            const ir::Value address = address_of_slot(*slot);
+            builder_->store(address, held, slot->width, ir::Space::Frame);
+            return held;
         }
-        const ir::Value address = address_of_slot(*slot);
-        builder_->store(address, held, slot->width, ir::Space::Frame);
-        return held;
+
+        // Writing to a parameter, which recovered code does constantly - a
+        // pointer walked along a string is the argument itself, stepped. It is
+        // not a frame slot and never was, so what happens is that its place
+        // holds a new value from here on.
+        auto parameter = pinned_.find(expression.left->name);
+        if (parameter != pinned_.end()) {
+            ir::Instruction put;
+            put.operation = ir::Operation::Copy;
+            put.width = width_of_value(parameter->second.type, parameter->second.storage, target_);
+            put.where = expression.where;
+            put.arguments.push_back(held);
+            put.result = builder_->value(parameter->second.type, parameter->second.storage);
+            const ir::Value now = builder_->emit(std::move(put));
+            if (!now.is_valid())
+                return ir::Value();
+            parameter->second = now;
+            return now;
+        }
+
+        complain(expression.left->where, "nothing here is called " + expression.left->name);
+        return ir::Value();
     }
 
     if (expression.left->kind == Expression::Kind::Unary &&

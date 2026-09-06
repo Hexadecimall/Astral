@@ -31,9 +31,14 @@ bool is_name_part(char c)
 }
 
 // The punctuators, longest first, so `..=` wins over `..` and `<<` over `<`.
-const std::array<const char *, 40> kPunctuation = {
+//
+// `++` and `--` are here for that reason and not for tidiness. Read one
+// character at a time, `++index` is a plus applied to a plus, which is the
+// value unchanged - so it parsed, it lowered, and it stepped nothing.
+const std::array<const char *, 42> kPunctuation = {
     "..=", "<<=", ">>=",
     "->",  "==",  "!=",  "<=",  ">=",  "&&",  "||",  "<<",  ">>",  "..",
+    "++",  "--",
     "+=",  "-=",  "*=",  "/=",  "%=",  "&=",  "|=",  "^=",  "::",
     "@",   ":",   ";",   ",",   ".",   "(",   ")",   "{",   "}",   "[",   "]",
     "=",   "<",   ">",   "+",   "-",   "*",   "/",

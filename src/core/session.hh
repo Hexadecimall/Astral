@@ -244,6 +244,10 @@ private:
     const std::map<std::string, GlobalSymbol> &globals() const;
     std::string apply_naming(void *funcdata, FunctionResult &out);
     void print_function(void *funcdata, std::string &listing, std::string &readable);
+    // The Nova a function is, with the globals and named constants it mentions
+    // declared above it. Nova that mentions a name nothing introduced reads
+    // perfectly and does not compile, which the C side already knew.
+    std::string nova_with_declarations(const std::string &body) const;
     // Whether the readable listing is worth producing. Emitting compilable C
     // walks the whole reachable call graph and never looks at the readable
     // form, so producing it there is work nobody asked for.
