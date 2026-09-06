@@ -123,6 +123,19 @@ void check_targets()
         expect_equal(target.pointer_bytes, 4,
                      "a MIPS addressing thirty-two bits has four-byte pointers");
 
+    // What a description cannot answer, it does not pretend to. Whether an
+    // address counts one byte or two, and whether code and data are separate
+    // memories, are properties of the address spaces in the compiled
+    // specification; nineteen of these languages are word-addressed and
+    // twenty-three are Harvard, so a confident default would be wrong about
+    // forty-two of them.
+    if (target_for("avr8:LE:16:default", target)) {
+        expect(!target.spaces_read,
+               "a target read from a description says its spaces were not read");
+        expect_equal(target.address_unit_bytes, 0,
+                     "an unread address unit is nothing, not a claim that it is one");
+    }
+
     // A language id with a compiler on the end names the same language.
     {
         ir::Target with_compiler;

@@ -70,14 +70,32 @@ enum class Space {
 struct Target {
     std::string language_id;  // "AARCH64:LE:64:AppleSilicon", entire and exact
 
-    int address_bits = 0;        // 16 on a z80, 24 on a PIC-24, 32, 64
-    int pointer_bytes = 0;       // four on a sixty-four bit machine, under ilp32
-    int word_bytes = 0;          // the width arithmetic is natural in
-    int address_unit_bytes = 1;  // how many bytes one address counts
+    int address_bits = 0;   // 16 on a z80, 24 on a PIC-24, 32, 64
+    int pointer_bytes = 0;  // four on a sixty-four bit machine, under ilp32
+
+    // The width arithmetic is natural in. Taken from the address bus, which is
+    // the same answer on most processors and the wrong one on an eight-bit
+    // machine that addresses sixteen bits: an 8051 adds a byte at a time. The
+    // registers say which it is, and the registers are in the compiled
+    // specification rather than in the description read here.
+    int word_bytes = 0;
 
     bool data_big_endian = false;
     bool instruction_big_endian = false;  // not always the same answer
-    bool harvard = false;                 // Code and Data are separate memories
+
+    // How many bytes one address counts, and whether code and data are separate
+    // memories. Both are properties of the address spaces, which live in the
+    // compiled specification and not in the description, so neither is answered
+    // by reading a language id alone.
+    //
+    // `spaces_read` says whether they were answered at all. A zero unit and a
+    // false Harvard are what an unread target looks like, not claims about the
+    // processor: nineteen of the languages here are word-addressed and
+    // twenty-three are Harvard, and saying otherwise would be confidently
+    // wrong about all of them rather than honestly silent.
+    bool spaces_read = false;
+    int address_unit_bytes = 0;
+    bool harvard = false;
 
     compiler::Abi abi = compiler::Abi::SystemV;
 
