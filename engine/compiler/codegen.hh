@@ -157,6 +157,8 @@ protected:
 
 // The architectures that have a Machine written for them.
 std::unique_ptr<Machine> machine_for(assembler::Target target);
+// The x86 family, which lives in its own file.
+std::unique_ptr<Machine> machine_for_x86(assembler::Target target);
 
 // Generates one function's body into `out`.
 //

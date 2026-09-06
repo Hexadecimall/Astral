@@ -1533,7 +1533,7 @@ std::unique_ptr<Machine> machine_for(assembler::Target target)
 {
     if (target == assembler::Target::Arm64)
         return std::unique_ptr<Machine>(new Arm64());
-    return nullptr;
+    return machine_for_x86(target);
 }
 
 } // namespace compiler

@@ -723,12 +723,25 @@ void an_unsupported_target_is_refused_clearly()
 {
     std::printf("an architecture with no back end is refused by name\n");
     compiler::Environment environment;
-    const compiler::Result result = compiler::compile(assembler::Target::X86_64,
+    // arm32 has an encoder but no code generator yet, which is the case this
+    // is about: the refusal has to say which architecture rather than fail
+    // somewhere further in.
+    const compiler::Result result = compiler::compile(assembler::Target::Arm32,
                                                       "int f(void) { return 1; }", 0x1000,
                                                       environment, compiler::Options());
     expect(!result.ok, "it refused");
-    expect(result.error.find("x86-64") != std::string::npos,
+    expect(result.error.find(assembler::target_name(assembler::Target::Arm32)) != std::string::npos,
            "and said which architecture it cannot do", "said: " + result.error);
+
+    // x86-64 does have one, so the same call has to get past this point. It is
+    // checked here because this is where it used to be refused.
+    const compiler::Result wide = compiler::compile(assembler::Target::X86_64,
+                                                    "int f(void) { return 1; }", 0x1000,
+                                                    environment, compiler::Options());
+    expect(wide.ok, "and x86-64 is not refused, because it has one now",
+           "said: " + wide.error);
+    expect(!wide.bytes.empty(), "x86-64 handed back bytes",
+           std::to_string(wide.bytes.size()) + " bytes");
 }
 
 // ------------------------------------------------------------------ by hand

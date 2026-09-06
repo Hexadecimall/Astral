@@ -64,7 +64,7 @@ Result build(assembler::Target target, const std::string &source, uint64_t addre
     std::unique_ptr<Machine> machine = machine_for(target);
     if (!machine)
         return refuse(std::string("Astral cannot compile for ") + assembler::target_name(target) +
-                      " yet; it compiles for arm64");
+                      " yet; it compiles for arm64 and x86-64");
 
     TypeStore types;
     Unit unit;

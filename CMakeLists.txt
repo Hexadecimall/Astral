@@ -115,6 +115,7 @@ set(ASTRAL_LIB_SRC
     engine/compiler/asmbuffer.cc
     engine/compiler/codegen.cc
     engine/compiler/codegen_arm64.cc
+    engine/compiler/codegen_x86.cc
     engine/compiler/compiler.cc
     engine/compiler/types.cc
     engine/compiler/lexer.cc
@@ -297,6 +298,14 @@ endif()
 # Nova is checked the way the C compiler is: the front end on its own, then by
 # running what the back end wrote. The parser suite is a round trip, since a
 # formatter that is not a fixed point of its own parser is wrong somewhere.
+# The x86 encoder, against what clang produces for the same lines. The
+# expected bytes are written down rather than recomputed, so the check does not
+# need a toolchain to run and cannot quietly stop comparing.
+add_executable(astral_x86_test engine/assembler/tests/x86_test.cc)
+target_include_directories(astral_x86_test PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS})
+target_link_libraries(astral_x86_test PRIVATE astral_static)
+add_test(NAME assembler_x86 COMMAND astral_x86_test)
+
 foreach(suite lexer parser nova)
     add_executable(astral_nova_${suite}_test engine/nova/tests/${suite}_test.cc)
     # Nova's directory goes first: its headers share names with the C
@@ -356,7 +365,11 @@ if(ASTRAL_BUILD_GUI)
 endif()
 
 # ---------------------------------------------------------------- sleigh specs
-set(ASTRAL_LANGUAGES "x86;AARCH64;ARM;MIPS;PowerPC;RISCV;JVM;Sparc;68000;Z80;PIC;8051;SuperH4;Xtensa;Toy;DATA"
+# Every processor Astral has a specification for. All hundred and fifty of them
+# compile in about fifteen seconds and come to under thirty megabytes, which is
+# a poor reason to ship a decompiler that cannot read a 6502. Name a subset here
+# to build fewer.
+set(ASTRAL_LANGUAGES "ALL"
     CACHE STRING "Processor directories whose SLEIGH specs get compiled (ALL for every one)")
 
 set(SPEC_STAGE ${CMAKE_BINARY_DIR}/specs)

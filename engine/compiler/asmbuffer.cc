@@ -350,6 +350,11 @@ void AsmBuffer::tighten()
 
 void AsmBuffer::drop_dead_frame_stores(int64_t lowest)
 {
+    // The reasoning below reads arm64's spelling of a frame access. On a
+    // target whose instructions it cannot read, saying nothing is dead is the
+    // answer that is always true; a wrong answer here deletes a live store.
+    if (target_ != assembler::Target::Arm64)
+        return;
     // Nothing outside this function can reach the frame unless an address
     // inside it was put in a register. The frame pointer is the exception:
     // it is set up for whoever walks the stack and never dereferenced here.
@@ -415,6 +420,11 @@ void AsmBuffer::drop_dead_frame_stores(int64_t lowest)
 
 bool AsmBuffer::uses_frame_between(int64_t low, int64_t high) const
 {
+    // Same reading, same limit. Here the safe answer is the other one: a
+    // target this cannot read is assumed to use its frame, so the frame is
+    // kept rather than taken away from code that needs it.
+    if (target_ != assembler::Target::Arm64)
+        return true;
     for (const Line &line : lines_) {
         if (line.kind != Line::Kind::Instruction)
             continue;
