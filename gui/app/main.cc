@@ -4,6 +4,7 @@
 #include "theme/theme.hh"
 
 #include <QApplication>
+#include <QIcon>
 #include <QCommandLineParser>
 #include <QFile>
 #include <QStyleFactory>
@@ -17,6 +18,13 @@ int main(int argc, char **argv)
     QCoreApplication::setOrganizationName(QStringLiteral("Astral"));
     QCoreApplication::setOrganizationDomain(QStringLiteral("astral.invalid"));
     QCoreApplication::setApplicationName(QStringLiteral("Astral"));
+    // The bundle carries an icon for the Finder and the Dock, but a bundle is
+    // not the only way Astral runs: the single-file binary has no Resources
+    // directory to read one out of, and on every platform but this one the
+    // window and the task bar take their icon from the application rather than
+    // from anything on disk. Setting it here covers all of them from the mark
+    // already compiled into the executable.
+    app.setWindowIcon(QIcon(QStringLiteral(":/icons/logo.svg")));
     QCoreApplication::setApplicationVersion(QStringLiteral(ASTRAL_GUI_VERSION));
 
     QCommandLineParser parser;
