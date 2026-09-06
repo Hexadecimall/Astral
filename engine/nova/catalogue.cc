@@ -519,78 +519,95 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
     }
 
     uint64_t word = form.fixed_bits;
-    size_t next = 0;
-    for (const Form::Slot &slot : form.slots) {
-        if (next >= places.size())
-            break;
 
-        // A number goes in a field the form left open for one, and a register
-        // in a slot that names registers. A slot is one or the other, so the
-        // wrong kind of value skips it rather than being forced in.
-        if (places[next].is_number) {
-            if (slot.is_register() || !slot.is_placed())
+    // Each value goes in the first slot that can hold it and is not already
+    // holding something.
+    //
+    // Taking slots and values strictly in step assumes a form names its places
+    // in the same order the operation names its values, and forms do not: an
+    // instruction that copies a number into a register may name the number
+    // first or the register first, and both are the same instruction. So the
+    // pairing is made rather than assumed, and each slot is used once.
+    std::vector<bool> filled(form.slots.size(), false);
+    const uint64_t may_touch = ~form.fixed_mask;
+
+    for (size_t next = 0; next < places.size(); ++next) {
+        bool placed = false;
+
+        for (size_t which = 0; which < form.slots.size() && !placed; ++which) {
+            if (filled[which])
                 continue;
-            const int width = slot.last_bit - slot.first_bit + 1;
-            const int shift = form.shortest * 8 - 1 - slot.last_bit;
-            if (width <= 0 || width >= 64 || shift < 0)
+            const Form::Slot &slot = form.slots[which];
+
+            if (places[next].is_number) {
+                // A number goes in a field the form left open for one.
+                if (slot.is_register() || !slot.is_placed())
+                    continue;
+                const int width = slot.last_bit - slot.first_bit + 1;
+                const int shift = form.shortest * 8 - 1 - slot.last_bit;
+                if (width <= 0 || width >= 64 || shift < 0)
+                    continue;
+                const uint64_t room = ((static_cast<uint64_t>(1) << width) - 1)
+                                      << static_cast<unsigned>(shift);
+                const uint64_t sitting =
+                    (places[next].number << static_cast<unsigned>(shift)) & room;
+                // A number too big for the field is not this instruction's.
+                if ((sitting >> static_cast<unsigned>(shift)) != places[next].number)
+                    continue;
+
+                word = (word & ~(room & may_touch)) | (sitting & may_touch);
+                word = (word & ~form.fixed_mask) | form.fixed_bits;
+                used.push_back(std::to_string(places[next].number));
+                filled[which] = true;
+                placed = true;
                 continue;
-            const uint64_t room = ((static_cast<uint64_t>(1) << width) - 1)
-                                  << static_cast<unsigned>(shift);
-            const uint64_t sitting = (places[next].number << static_cast<unsigned>(shift)) & room;
-            // A number too big for the field is not this instruction's number.
-            if ((sitting >> static_cast<unsigned>(shift)) != places[next].number) {
-                error = "this instruction has no room for a number that large";
-                return false;
             }
-            const uint64_t may_touch = ~form.fixed_mask;
-            word = (word & ~(room & may_touch)) | (sitting & may_touch);
+
+            if (!slot.is_register())
+                continue;
+
+            // Whichever of this register's names the slot knows.
+            auto found = slot.registers.end();
+            std::string name_used;
+            for (const std::string &name : places[next].names) {
+                found = slot.registers.find(name);
+                if (found != slot.registers.end()) {
+                    name_used = name;
+                    break;
+                }
+            }
+            if (found == slot.registers.end())
+                continue;
+
+            // The form's own bits win: a slot may only touch what the form did
+            // not insist on, because what it insisted on is what makes the
+            // instruction that instruction.
+            word = (word & ~(slot.register_mask & may_touch)) | (found->second & may_touch);
+            word |= slot.along_the_way_bits & may_touch;
             word = (word & ~form.fixed_mask) | form.fixed_bits;
-            used.push_back(std::to_string(places[next].number));
-            ++next;
-            continue;
+            used.push_back(name_used);
+            filled[which] = true;
+            placed = true;
         }
 
-        if (!slot.is_register())
-            continue;
-
-        // Whichever of this register's names the slot knows.
-        auto found = slot.registers.end();
-        for (const std::string &name : places[next].names) {
-            found = slot.registers.find(name);
-            if (found != slot.registers.end()) {
-                used.push_back(name);
-                break;
-            }
-        }
-        if (found == slot.registers.end()) {
-            error = "this instruction cannot put " +
-                    (places[next].names.empty() ? std::string("that")
-                                                : places[next].names.front()) +
-                    " where it was asked to";
+        if (!placed) {
+            if (places[next].is_number)
+                error = "this instruction has no field for a number like that";
+            else
+                error = "this instruction cannot put " +
+                        (places[next].names.empty() ? std::string("that")
+                                                    : places[next].names.front()) +
+                        " where it was asked to";
             return false;
         }
-        // The form's own bits win.
-        //
-        // A register is reached through a table, and the way there passes
-        // decisions that belong to the instruction rather than to the register -
-        // its opcode among them. Those came back mixed into the register's bits,
-        // so writing one without care erases the opcode and writes some other
-        // instruction entirely. Which it did: a RISC-V add came out as a
-        // compressed floating-point store.
-        //
-        // So a slot may only touch bits the form did not insist on. What it
-        // insisted on is what makes the instruction that instruction.
-        const uint64_t may_touch = ~form.fixed_mask;
-        word = (word & ~(slot.register_mask & may_touch)) | (found->second & may_touch);
-        // What the way to the register insisted on is part of the instruction,
-        // so it is set rather than cleared.
-        word |= slot.along_the_way_bits & may_touch;
-        word = (word & ~form.fixed_mask) | form.fixed_bits;
-        ++next;
     }
-    if (next < places.size()) {
-        error = "this instruction has fewer places to fill than it was given";
-        return false;
+
+    {
+        const size_t next = places.size();
+        if (next < places.size()) {
+            error = "this instruction has fewer places to fill than it was given";
+            return false;
+        }
     }
 
     // The bits are the instruction's bytes in the order they are written, with
