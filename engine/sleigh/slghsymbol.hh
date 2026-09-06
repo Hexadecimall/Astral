@@ -309,6 +309,14 @@ public:
   virtual void encode(Encoder &encoder) const;
   virtual void encodeHeader(Encoder &encoder) const;
   virtual void decode(Decoder &decoder,SleighBase *trans);
+
+  /// \brief Which register each value of the field means
+  ///
+  /// An operand that is a register is a field whose value picks one out of this
+  /// list. Writing an instruction that uses a particular register means finding
+  /// where in the list it is and putting that number in the field.
+  int4 numVarnodes(void) const { return varnode_table.size(); }		///< How many the field can pick from
+  VarnodeSymbol *getVarnode(int4 i) const { return varnode_table[i]; }	///< The one the value \e i picks
 };
   
 class OperandSymbol : public SpecificSymbol {

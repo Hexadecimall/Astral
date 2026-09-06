@@ -328,6 +328,74 @@ void check_bits_against_real_instructions()
     }
 }
 
+
+// Writing an instruction, which is the whole point of reading a specification
+// rather than writing a back end.
+//
+// Nothing here knows what a MIPS add looks like. It knows what the file that
+// describes MIPS says, and the instruction that comes out is compared against
+// the one a MIPS manual gives - so this is checked against the world rather
+// than against itself.
+void check_writing_an_instruction()
+{
+    catalogue::Catalogue mips;
+    if (!catalogue_for("MIPS:BE:32:default", mips))
+        return;
+
+    const catalogue::Form *adding = nullptr;
+    for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+        if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull) {
+            adding = form;
+            break;
+        }
+    }
+    if (adding == nullptr) {
+        report(false, "the form that adds two registers is there", "it was not found");
+        return;
+    }
+
+    std::vector<uint8_t> bytes;
+    std::string error;
+    const bool wrote = catalogue::Catalogue::write(*adding, {"a0", "a1", "a2"}, bytes, error);
+    if (!wrote) {
+        report(false, "an add of three named registers can be written", error);
+        return;
+    }
+
+    // add a0, a1, a2 is 00 a6 20 20, which is what a MIPS manual says it is.
+    const std::vector<uint8_t> wanted = {0x00, 0xa6, 0x20, 0x20};
+    std::string got;
+    for (uint8_t one : bytes) {
+        char pair[4];
+        std::snprintf(pair, sizeof pair, "%02x", one);
+        got += pair;
+    }
+    report(bytes == wanted, "an add of three named registers comes out as the bytes it should",
+           got + " rather than 00a62020");
+
+    // Asking for a register the slot cannot hold is refused rather than written
+    // as something else.
+    {
+        std::vector<uint8_t> nowhere;
+        std::string why;
+        const bool allowed =
+            catalogue::Catalogue::write(*adding, {"nonesuch", "a1", "a2"}, nowhere, why);
+        report(!allowed && !why.empty(),
+               "a register the instruction cannot hold is refused rather than written as another",
+               allowed ? "it was written anyway" : why);
+    }
+
+    // And giving it more registers than it has places for.
+    {
+        std::vector<uint8_t> nowhere;
+        std::string why;
+        const bool allowed = catalogue::Catalogue::write(
+            *adding, {"a0", "a1", "a2", "a3", "t0", "t1", "t2"}, nowhere, why);
+        report(!allowed, "and more registers than it has places for is refused too",
+               allowed ? "it was written anyway" : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -344,6 +412,7 @@ int main()
     check_shapes();
     check_fixed_bits();
     check_bits_against_real_instructions();
+    check_writing_an_instruction();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

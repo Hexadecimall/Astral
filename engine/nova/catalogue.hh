@@ -65,6 +65,36 @@ struct Form {
     // for, which is a reason to know how many there are.
     std::vector<ghidra::OpCode> does;
 
+    // One of the places a form leaves open, and what can go in it.
+    struct Slot {
+        // Where in the instruction it is written, counted the way the bits
+        // above are: from the top, over the bytes in the order they are
+        // written. Both are -1 when it could not be worked out, which happens
+        // for an operand built out of several pieces or one that stands for
+        // another table.
+        int first_bit = -1;
+        int last_bit = -1;
+
+        // The registers this slot can name, against the bits that name them.
+        //
+        // A slot holding a register is not a number written into a field: the
+        // field picks one register out of a set, and which number picks which
+        // register is the processor's business. So what is kept is the answer -
+        // to use this register, put these bits in.
+        //
+        // Empty when the slot holds a number rather than a register.
+        std::map<std::string, uint64_t> registers;
+        // The bits those choices occupy, so writing one can clear them first.
+        uint64_t register_mask = 0;
+
+        bool is_register() const { return !registers.empty(); }
+        bool is_placed() const { return first_bit >= 0 && last_bit >= first_bit; }
+    };
+
+    // Every place the form leaves open, in the order it names them - which is
+    // the order the operations above refer to them by.
+    std::vector<Slot> slots;
+
     // How many pieces of it are filled in when it is written: registers,
     // immediates, and anything else the form leaves open.
     int operands = 0;
@@ -135,6 +165,18 @@ public:
     // What was read, said the way a person would want to be told: how many
     // forms there are, and how many of them do exactly one thing.
     std::string summary() const;
+
+    // Writes one instruction: the form's own bits, with the named registers put
+    // in the slots that hold registers, in the order those slots come.
+    //
+    // This is the whole point of reading a specification rather than writing a
+    // back end. Nothing here knows what a MIPS add looks like; it knows what
+    // the file that describes MIPS says, and that is enough to write one.
+    //
+    // Returns false and says why when a slot cannot hold the register asked
+    // for, which is a real answer: not every register can go in every place.
+    static bool write(const Form &form, const std::vector<std::string> &registers,
+                      std::vector<uint8_t> &bytes, std::string &error);
 
 private:
     std::vector<Form> forms_;

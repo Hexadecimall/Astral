@@ -1,6 +1,7 @@
 #include "catalogue.hh"
 
 #include "semantics.hh"
+#include "translate.hh"
 #include "sleighbase.hh"
 #include "slghpattern.hh"
 #include "slghpatexpress.hh"
@@ -155,6 +156,164 @@ void settle(const Constraint &constraint, int length, uint64_t &mask, uint64_t &
     bits &= mask;
 }
 
+// Where an operand is written, and what can go there.
+//
+// An operand is a field of bits somewhere in the instruction. Which bits, is on
+// the field; what the value there means, is on the symbol the operand is
+// defined by - a list of registers picks one by number, and anything else is
+// the number itself.
+// Which registers a symbol can stand for, and the bits that pick each.
+//
+// A register operand is rarely a list of registers. It is usually a table, and
+// often a table of tables: one constructor says "when these bits are so, this
+// is whatever that other table says", and only at the bottom does something
+// name an actual place. So this follows the forwarding down, carrying the bits
+// each level insisted on, and records a register when it finally reaches one.
+//
+// `depth` stops a specification that refers to itself from doing so forever.
+void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
+                       const std::map<uint64_t, std::string> &by_offset, uint64_t sofar_mask,
+                       uint64_t sofar_bits, int depth, Form::Slot &into);
+
+// A constructor's export, when it is an actual place rather than a forwarding.
+// A place is a space and an offset, and the offset is what a register is.
+bool exported_register(const ghidra::Constructor *made,
+                       const std::map<uint64_t, std::string> &by_offset, std::string &named,
+                       int &forwards_to)
+{
+    named.clear();
+    forwards_to = -1;
+    if (made == nullptr)
+        return false;
+    const ghidra::ConstructTpl *templ = made->getTempl();
+    if (templ == nullptr)
+        return false;
+    const ghidra::HandleTpl *result = templ->getResult();
+    if (result == nullptr)
+        return false;
+
+    const ghidra::ConstTpl &space = result->getSpace();
+    const ghidra::ConstTpl &offset = result->getPtrOffset();
+
+    // Whatever some other operand of this constructor says.
+    if (space.getType() == ghidra::ConstTpl::handle) {
+        forwards_to = space.getHandleIndex();
+        return false;
+    }
+    if (space.getType() != ghidra::ConstTpl::spaceid ||
+        offset.getType() != ghidra::ConstTpl::real)
+        return false;
+
+    auto found = by_offset.find(offset.getReal());
+    if (found == by_offset.end())
+        return false;
+    named = found->second;
+    return true;
+}
+
+void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
+                       const std::map<uint64_t, std::string> &by_offset, uint64_t sofar_mask,
+                       uint64_t sofar_bits, int depth, Form::Slot &into)
+{
+    if (symbol == nullptr || depth > 4)
+        return;
+
+    // A list picks a register by the field's value directly.
+    if (const ghidra::VarnodeListSymbol *list =
+            dynamic_cast<const ghidra::VarnodeListSymbol *>(symbol)) {
+        const ghidra::ValueSymbol *value = dynamic_cast<const ghidra::ValueSymbol *>(symbol);
+        const ghidra::TokenField *field =
+            value == nullptr ? nullptr
+                             : dynamic_cast<const ghidra::TokenField *>(value->getPatternValue());
+        if (field == nullptr || length <= 0)
+            return;
+        const int width = length * 8;
+        if (field->getBitEnd() >= width)
+            return;
+        const int size = field->getBitEnd() - field->getBitStart() + 1;
+        const int shift = field->getBitStart();
+        if (size <= 0 || size >= 64)
+            return;
+        const uint64_t mask = ((static_cast<uint64_t>(1) << size) - 1)
+                              << static_cast<unsigned>(shift);
+        for (int i = 0; i < list->numVarnodes(); ++i) {
+            const ghidra::VarnodeSymbol *named = list->getVarnode(i);
+            if (named == nullptr)
+                continue;
+            into.register_mask |= sofar_mask | mask;
+            into.registers.emplace(named->getName(),
+                                   sofar_bits | ((static_cast<uint64_t>(i)
+                                                  << static_cast<unsigned>(shift)) &
+                                                 mask));
+        }
+        return;
+    }
+
+    const ghidra::SubtableSymbol *table = dynamic_cast<const ghidra::SubtableSymbol *>(symbol);
+    if (table == nullptr)
+        return;
+
+    std::map<const ghidra::Constructor *, Constraint> within;
+    walk(table->getDecisionTree(), Constraint(), within);
+    for (const auto &one : within) {
+        uint64_t mask = 0;
+        uint64_t bits = 0;
+        settle(one.second, length, mask, bits);
+
+        std::string named;
+        int forwards_to = -1;
+        if (exported_register(one.first, by_offset, named, forwards_to)) {
+            into.register_mask |= sofar_mask | mask;
+            into.registers.emplace(named, sofar_bits | bits);
+            continue;
+        }
+        // It stands for whatever one of its own operands stands for, so the
+        // question is asked again one level down, carrying what this level
+        // insisted on.
+        if (forwards_to >= 0 && forwards_to < one.first->getNumOperands()) {
+            const ghidra::OperandSymbol *inner = one.first->getOperand(forwards_to);
+            if (inner != nullptr)
+                resolve_registers(inner->getDefiningSymbol(), length, by_offset,
+                                  sofar_mask | mask, sofar_bits | bits, depth + 1, into);
+        }
+    }
+}
+
+Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
+                     const std::map<uint64_t, std::string> &by_offset)
+{
+    Form::Slot slot;
+    if (operand == nullptr)
+        return slot;
+
+    // The field, whether the operand is defined by an expression of its own or
+    // by a symbol that has one.
+    const ghidra::PatternExpression *expression = operand->getDefiningExpression();
+    const ghidra::TripleSymbol *symbol = operand->getDefiningSymbol();
+    const ghidra::VarnodeListSymbol *list = nullptr;
+    if (expression == nullptr && symbol != nullptr) {
+        list = dynamic_cast<const ghidra::VarnodeListSymbol *>(symbol);
+        const ghidra::ValueSymbol *value = dynamic_cast<const ghidra::ValueSymbol *>(symbol);
+        if (value != nullptr)
+            expression = value->getPatternValue();
+    }
+
+    if (const ghidra::TokenField *field = dynamic_cast<const ghidra::TokenField *>(expression)) {
+        // The field says which bits of its token, counted from the least
+        // significant. The bits above are counted from the top of the
+        // instruction, so this is turned round to match rather than left in two
+        // different countings that would silently disagree.
+        const int width = length * 8;
+        if (length > 0 && field->getBitEnd() < width) {
+            slot.first_bit = width - 1 - field->getBitEnd();
+            slot.last_bit = width - 1 - field->getBitStart();
+        }
+    }
+
+    resolve_registers(symbol, length, by_offset, 0, 0, 0, slot);
+    return slot;
+}
+
 } // namespace
 
 bool Catalogue::read(const ir::Target &target, std::string &error)
@@ -180,6 +339,16 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
     if (root == nullptr) {
         error = std::string("this specification has no ") + kRoot + " table to read";
         return false;
+    }
+
+    // Registers by where they are, so a table that stands for one can be asked
+    // which it is: what a table exports is a place, and a name is wanted.
+    std::map<uint64_t, std::string> by_offset;
+    {
+        std::map<ghidra::VarnodeData, std::string> every;
+        architecture->translate->getAllRegisters(every);
+        for (const auto &one : every)
+            by_offset.emplace(one.first.offset, one.second);
     }
 
     // The patterns, taken off the tree that decides which constructor a stream
@@ -223,6 +392,9 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         auto pattern = patterns.find(made);
         if (pattern != patterns.end())
             settle(pattern->second, form.shortest, form.fixed_mask, form.fixed_bits);
+
+        for (int slot = 0; slot < made->getNumOperands(); ++slot)
+            form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
         forms_.push_back(std::move(form));
     }
 
@@ -258,6 +430,53 @@ const std::vector<const Form *> &Catalogue::doing(ghidra::OpCode opcode) const
     static const std::vector<const Form *> none;
     auto found = by_operation_.find(opcode);
     return found == by_operation_.end() ? none : found->second;
+}
+
+bool Catalogue::write(const Form &form, const std::vector<std::string> &registers,
+                      std::vector<uint8_t> &bytes, std::string &error)
+{
+    bytes.clear();
+    if (form.shortest <= 0 || form.shortest > 8) {
+        error = "this form is not a length an instruction can be written in";
+        return false;
+    }
+    if (form.fixed_mask == 0) {
+        error = "this form does not say which bits it insists on";
+        return false;
+    }
+
+    uint64_t word = form.fixed_bits;
+    size_t next = 0;
+    for (const Form::Slot &slot : form.slots) {
+        if (!slot.is_register())
+            continue;
+        if (next >= registers.size())
+            break;
+        auto found = slot.registers.find(registers[next]);
+        if (found == slot.registers.end()) {
+            error = "this instruction cannot put " + registers[next] + " where it was asked to";
+            return false;
+        }
+        // Clearing before setting, because a slot's bits may have been left
+        // holding whichever register the form happened to be written with.
+        word = (word & ~slot.register_mask) | found->second;
+        ++next;
+    }
+    if (next < registers.size()) {
+        error = "this instruction has fewer places for registers than it was given";
+        return false;
+    }
+
+    // The bits are the instruction's bytes in the order they are written, with
+    // the first byte most significant, so writing them out is reading them back
+    // the same way. Which end of memory those bytes go to is the processor's
+    // byte order, and it has already been accounted for.
+    bytes.resize(static_cast<size_t>(form.shortest));
+    for (int at = 0; at < form.shortest; ++at) {
+        const unsigned shift = static_cast<unsigned>((form.shortest - 1 - at) * 8);
+        bytes[static_cast<size_t>(at)] = static_cast<uint8_t>((word >> shift) & 0xff);
+    }
+    return true;
 }
 
 std::string Catalogue::summary() const

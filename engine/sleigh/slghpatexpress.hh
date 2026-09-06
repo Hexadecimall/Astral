@@ -105,6 +105,14 @@ public:
   virtual intb maxValue(void) const { intb res=0; return zero_extend(~res,bitend-bitstart); }
   virtual void encode(Encoder &encoder) const;
   virtual void decode(Decoder &decoder,Translate *trans);
+
+  /// \brief Where in the token this field sits
+  ///
+  /// Reading a field out of an instruction needs to know which bits it is, and
+  /// so does writing one in. Bit zero is the least significant.
+  int4 getBitStart(void) const { return bitstart; }	///< Lowest bit of the field
+  int4 getBitEnd(void) const { return bitend; }		///< Highest bit of the field
+  bool isSigned(void) const { return signbit; }		///< Whether the top bit of the field is a sign
 };
 
 class ContextField : public PatternValue {
