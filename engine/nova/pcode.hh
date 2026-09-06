@@ -72,6 +72,14 @@ struct Operation {
     // on a comparison is the comparison, which is what `beq` is. CPUI_COPY
     // means nothing was folded and the branch reads a value already worked out.
     ghidra::OpCode compares = ghidra::CPUI_COPY;
+
+    // Whether this operation was made while writing another one, so that the
+    // making does not happen to it again. Marking the places in a list instead
+    // was wrong the moment anything was inserted into that list: the marks
+    // pointed at whatever had moved up into those positions, and an operation
+    // that had already been taken apart was taken apart again, over and over,
+    // until the block ran out of room and everything after it went unwritten.
+    bool made_while_writing = false;
 };
 
 // A block of operations, still in the order and shape the representation had.

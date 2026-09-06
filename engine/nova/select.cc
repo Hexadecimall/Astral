@@ -546,8 +546,6 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
         // rather than being written by some other rule.
         std::vector<pcode::Operation> pending(block.operations.begin(),
                                               block.operations.end());
-        std::set<size_t> already_split;   // an operand put in a register
-        std::set<size_t> already_built;   // a number made out of smaller ones
 
         // A comparison whose answer only a branch ever reads is part of that
         // branch.
@@ -1003,7 +1001,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 if (operation.opcode == ghidra::CPUI_COPY && operation.writes &&
                     operation.inputs.size() == 1 && operation.inputs[0].is_constant() &&
                     operation.inputs[0].offset > 0xffff && !scratch.empty() &&
-                    already_built.count(step) == 0) {
+                    !operation.made_while_writing) {
                     const uint64_t whole = operation.inputs[0].offset;
                     const int width = operation.output.size > 0 ? operation.output.size : 8;
                     const uint64_t low = whole & 0xffff;
@@ -1054,13 +1052,13 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     joined.inputs.push_back(held);
                     joined.inputs.push_back(bottom);
 
-                    // Only the two that are finished are marked. The top is
-                    // built again if it is still too big, which it may be:
-                    // sixteen bits at a time takes four rounds to reach the top
-                    // of a sixty-four bit address, and each round is smaller
-                    // than the last, so it ends.
-                    already_built.insert(step + 1);
-                    already_built.insert(step + 2);
+                    // The two that are finished are marked; the top is built
+                    // again if it is still too big, which it may be. Sixteen
+                    // bits at a time takes four rounds to reach the top of a
+                    // sixty-four bit address, and each round is smaller than the
+                    // last, so it ends.
+                    shifted.made_while_writing = true;
+                    joined.made_while_writing = true;
                     pending[step] = top;
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, joined);
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, shifted);
@@ -1090,7 +1088,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     }
                 }
                 if (too_big < operation.inputs.size() && have_somewhere &&
-                    already_split.count(step) == 0) {
+                    !operation.made_while_writing) {
                     const int width = operation.inputs[too_big].size > 0
                                           ? operation.inputs[too_big].size
                                           : (target.word_bytes > 0 ? target.word_bytes : 8);
@@ -1106,8 +1104,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     pcode::Operation again = operation;
                     again.inputs[too_big] = putting.output;
 
-                    already_split.insert(step);
-                    already_split.insert(step + 1);
+                    putting.made_while_writing = true;
+                    again.made_while_writing = true;
                     pending[step] = putting;
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, again);
                     --step;  // and the copy is chosen next, like anything else
