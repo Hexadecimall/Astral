@@ -402,6 +402,17 @@ target_link_libraries(astral_gui_asmflow PRIVATE Qt6::Core astral_static)
 # cannot be opened from the Finder.
 install(TARGETS astral_gui_bin RUNTIME DESTINATION bin)
 if(APPLE)
+    # The bundle being copied in carries `specs` and `include` as links into the
+    # build tree, and the step after this one replaces both with real copies. An
+    # earlier install already left real directories there, though, and a
+    # directory is not something a link can be written over, so installing a
+    # second time would stop here. Clearing them first is what makes installing
+    # over a previous install the same as installing for the first time.
+    install(CODE "
+        set(_frameworks
+            \"\${CMAKE_INSTALL_PREFIX}/share/astral/applications/Astral.app/Contents/Frameworks\")
+        file(REMOVE_RECURSE \"\${_frameworks}/specs\" \"\${_frameworks}/include\")
+    ")
     install(TARGETS astral_gui BUNDLE DESTINATION share/astral/applications)
 
     # An installed bundle is one somebody opens, so it has to carry what it
