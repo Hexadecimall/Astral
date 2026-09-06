@@ -127,8 +127,22 @@ struct Target {
     // guessing the machine word gets one of them wrong every time.
     int register_width(const std::string &name) const;
 
+    // Where a register sits in the register file and how wide it is. p-code
+    // addresses a register by an offset into that file rather than by name, so
+    // both are kept: the name is what the source wrote, the offset is what the
+    // machine means by it, and two names can overlap the same bytes.
+    struct RegisterPlace {
+        uint64_t offset = 0;
+        int width = 0;
+    };
+
     // Register widths by name, filled in by read_specification.
     std::map<std::string, int> registers;
+    std::map<std::string, RegisterPlace> register_places;
+
+    // Where the named register sits, or nothing when the specification has no
+    // register by that name or has not been read.
+    const RegisterPlace *register_place(const std::string &name) const;
 };
 
 // ------------------------------------------------------------------- values

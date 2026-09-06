@@ -187,8 +187,14 @@ bool Target::read_specification(std::string &error)
         std::map<ghidra::VarnodeData, std::string> found;
         architecture.translate->getAllRegisters(found);
         registers.clear();
-        for (const auto &entry : found)
+        register_places.clear();
+        for (const auto &entry : found) {
             registers[entry.second] = static_cast<int>(entry.first.size);
+            RegisterPlace place;
+            place.offset = entry.first.offset;
+            place.width = static_cast<int>(entry.first.size);
+            register_places[entry.second] = place;
+        }
 
         spaces_read = true;
         return true;
@@ -199,6 +205,12 @@ bool Target::read_specification(std::string &error)
         error = failure.explain;
         return false;
     }
+}
+
+const Target::RegisterPlace *Target::register_place(const std::string &name) const
+{
+    auto found = register_places.find(name);
+    return found == register_places.end() ? nullptr : &found->second;
 }
 
 int Target::register_width(const std::string &name) const
