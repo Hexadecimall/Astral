@@ -228,7 +228,8 @@ bool Parser::parse_import()
         return false;
     }
     std::string name = take().text;
-    // Fusion writes `dev-kit`; the tokeniser sees a minus. Join it back.
+    // A name may hold a minus - `dev-kit` - which the tokeniser reads as
+    // subtraction. Join it back.
     while (accept("-")) {
         if (!peek().is(Token::Kind::Name))
             break;
@@ -412,7 +413,7 @@ bool Parser::parse_record(const std::string &documentation)
         }
         Record::Member member;
         member.where = peek().where;
-        // `var` is what Fusion writes; a bare name is allowed too.
+        // `var` is how a member is usually written; a bare name is allowed too.
         accept_word("var");
         accept_word("val");
         if (!peek().is(Token::Kind::Name)) {
@@ -1100,7 +1101,8 @@ struct Operator {
     BinaryOp op;
     int precedence;
 };
-// Highest number binds tightest. The order is C's, which Fusion keeps.
+// Highest number binds tightest. The order is C's, which Nova keeps, because
+// an expression recovered from a binary was written in C to begin with.
 const Operator kOperators[] = {
     {"||", BinaryOp::LogicalOr, 1},
     {"&&", BinaryOp::LogicalAnd, 2},
@@ -1321,7 +1323,7 @@ ExpressionPtr Parser::parse_primary()
         ExpressionPtr literal = make(Expression::Kind::StringLiteral, token.where);
         literal->text = token.bytes;
         take();
-        // Adjacent strings join, as they do in C and Fusion.
+        // Adjacent strings join, as they do in C.
         while (peek().is(Token::Kind::String))
             literal->text += take().bytes;
         return literal;

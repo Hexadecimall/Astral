@@ -1,7 +1,7 @@
 // The types Nova knows before a file says anything.
 //
-// Two things separate this from the C compiler's type table. The widths are
-// spelled the way Fusion spells them, so `u32` rather than `unsigned int`, and
+// Two things separate this from the C compiler's type table. A width is
+// spelled as a width, so `u32` rather than `unsigned int`, and
 // there is a family of types whose width is known and whose signedness is not.
 // That family is the point: recovered code is full of storage whose meaning
 // nobody has worked out yet, and a language that cannot write that down forces

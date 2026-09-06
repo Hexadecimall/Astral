@@ -1,7 +1,7 @@
 // What a piece of Nova means, once it has been read.
 //
-// Nova is the language Astral writes for recovered code. It borrows its shape
-// from Fusion and its semantics from the hardware: storage is a thing you can
+// Nova is the language Astral writes for recovered code. Its shape is a
+// modern one and its semantics come from the hardware: storage is a thing you can
 // name, a type is a view over storage rather than a promise about it, and
 // nothing is undefined. Where C forces a commitment the binary does not
 // support, Nova lets the commitment be missing and still compiles.

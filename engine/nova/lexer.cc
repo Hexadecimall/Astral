@@ -9,8 +9,9 @@ namespace astral_internal {
 namespace nova {
 namespace {
 
-// Every word Nova reserves. Fusion's vocabulary, plus the words the machine
-// needs: `stack` for a frame slot, `asm` for instructions, `call` for a call
+// Every word Nova reserves: the ordinary vocabulary of a small imperative
+// language, plus the words the machine forces on it -
+// `stack` for a frame slot, `asm` for instructions, `call` for a call
 // whose result nobody named yet.
 const std::array<const char *, 33> kKeywords = {
     "func",  "var",    "val",    "return", "if",     "else",  "while", "for",

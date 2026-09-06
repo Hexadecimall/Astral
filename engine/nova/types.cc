@@ -5,7 +5,7 @@ namespace nova {
 
 Types::Types()
 {
-    // Fusion's spellings, which are also the ones the emitter writes.
+    // Widths spelled as widths, which is also how the emitter writes them.
     define_name("i8", store_.integer(1, true));
     define_name("i16", store_.integer(2, true));
     define_name("i32", store_.integer(4, true));

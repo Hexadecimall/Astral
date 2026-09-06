@@ -3,8 +3,8 @@
 // Runs on its own and answers with a non-zero status when anything failed, so
 // it works both by hand and from a test runner. The cases are the ones the
 // emitter and a person editing recovered code actually write: hexadecimal
-// addresses, register names after `@`, documentation blocks, and the Fusion
-// number literals Nova inherits.
+// addresses, register names after `@`, documentation blocks, and the number
+// literals a person writes.
 #include "lexer.hh"
 
 #include <cstdio>
@@ -98,7 +98,7 @@ int main()
           "var terminalWidth : u32 @ 4295016656 ; "
           "stack message : [ i8 ; 64 ] @ - 112 ;");
 
-    check("Fusion number literals",
+    check("number literals",
           "0xFF 0b1010 0o755 1_000_000 'A'",
           "255 10 493 1000000 65");
 

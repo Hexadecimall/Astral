@@ -1,7 +1,7 @@
 // Turning Nova text into the pieces a parser can read.
 //
-// Nova's surface comes from Fusion, so comments begin with `#` and there is no
-// preprocessor to run before this: what the file says is what it means. The
+// Comments begin with `#` and there is no preprocessor to run before this:
+// what the file says is what it means, which is the whole surface. The
 // two additions the machine forces are `@`, which introduces storage, and the
 // register names that follow it, which are ordinary identifiers here and only
 // become registers once the parser knows where it is.
