@@ -1695,6 +1695,29 @@ void MainWindow::fillContextMenu(QMenu *menu, const ContextTarget &target)
             here->showAddress(target.address);
         });
     }
+    // The same code, read another way. This is the source tab's dropdown
+    // brought to where the cursor already is, so switching reading does not
+    // mean going to the top of the window and back.
+    if (ProgramTab *here = currentTab()) {
+        QMenu *reading = menu->addMenu(tr("Read As"));
+        const ProgramTab::View showing = here->view();
+        for (ProgramTab::View view : {ProgramTab::Nova, ProgramTab::Code, ProgramTab::Assembly,
+                                      ProgramTab::PseudoC, ProgramTab::Hex}) {
+            QAction *action = reading->addAction(ProgramTab::viewName(view));
+            action->setCheckable(true);
+            action->setChecked(view == showing);
+            const bool go = target.hasAddress;
+            const quint64 address = target.address;
+            connect(action, &QAction::triggered, this, [this, view, go, address] {
+                ProgramTab *tab = currentTab();
+                if (tab == nullptr)
+                    return;
+                tab->setView(view);
+                if (go)
+                    tab->showAddress(address);
+            });
+        }
+    }
     if (target.hasLine && !target.hasAddress) {
         menu->addAction(tr("Show 0x%1 in Hex").arg(lineAddress, 0, 16), this,
                         [this, lineAddress] {
@@ -1835,10 +1858,15 @@ void MainWindow::fillContextMenu(QMenu *menu, const ContextTarget &target)
             if (const auto body = currentTab()->document()->cached(subject))
                 copyToClipboard(body->code, tr("C"));
         });
-        menu->addAction(tr("Copy %1 as Pseudo-C").arg(subjectLabel), this, [this, subject] {
-            if (const auto body = currentTab()->document()->cached(subject))
-                copyToClipboard(body->pseudoCode, tr("pseudo-C"));
-        });
+        // The readable listing is Nova unless it was set otherwise, so the
+        // action says which one it will actually give you.
+        const bool nova = doc->setting(QStringLiteral("readableLanguage")) != QStringLiteral("pseudo-c");
+        const QString readable = nova ? tr("Nova") : tr("Pseudo-C");
+        menu->addAction(tr("Copy %1 as %2").arg(subjectLabel, readable), this,
+                        [this, subject, readable] {
+                            if (const auto body = currentTab()->document()->cached(subject))
+                                copyToClipboard(body->pseudoCode, readable);
+                        });
     }
     if (subject != 0 && doc->functionAt(subject)) {
         menu->addAction(tr("Copy Disassembly of %1").arg(subjectLabel), this, [this, subject] {
