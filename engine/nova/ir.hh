@@ -35,6 +35,7 @@
 #include "compiler/compiler.hh"
 
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -105,6 +106,29 @@ struct Target {
     // Returns false and says why when no specification describes it.
     static bool from_language_id(const std::string &language_id, Target &target,
                                  std::string &error);
+
+    // Reads what only the compiled specification knows: how wide each register
+    // is, how many bytes an address counts, and whether code and data are
+    // separate memories. This loads the processor's specification, which is a
+    // heavier thing than reading a description, so it is asked for rather than
+    // done on the way past.
+    //
+    // Sets `spaces_read` when it succeeds. Everything filled in here is read
+    // from the specification, so a processor nobody has written support for
+    // still answers correctly about itself.
+    bool read_specification(std::string &error);
+
+    // How wide the named register is, in bytes, or zero when the specification
+    // has no register by that name or has not been read.
+    //
+    // This is what a level-1 function needs. `@w0` says where a value lives and
+    // nothing about its type, and the register is the only thing that says how
+    // wide the value is: on AARCH64 `w0` is four bytes and `x0` is eight, and
+    // guessing the machine word gets one of them wrong every time.
+    int register_width(const std::string &name) const;
+
+    // Register widths by name, filled in by read_specification.
+    std::map<std::string, int> registers;
 };
 
 // ------------------------------------------------------------------- values

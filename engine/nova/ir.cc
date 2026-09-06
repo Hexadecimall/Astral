@@ -1,6 +1,9 @@
 #include "ir.hh"
 
+#include "architecture.hh"
+#include "loadimage.hh"
 #include "sleigh_arch.hh"
+#include "translate.hh"
 
 #include <map>
 #include <set>
@@ -109,6 +112,99 @@ bool Target::from_language_id(const std::string &language_id, Target &target, st
     }
 
     return true;
+}
+
+// ------------------------------------------------ reading the specification
+
+namespace {
+
+// A load image over nothing.
+//
+// Reading a specification asks about registers and address spaces, and neither
+// question touches the bytes of a program. A processor is described the same
+// way whether or not anything has been compiled for it, so this answers with
+// zeroes and exists only because an architecture insists on having one.
+class NoImage : public ghidra::LoadImage {
+public:
+    NoImage() : ghidra::LoadImage("<nothing>") {}
+    void loadFill(ghidra::uint1 *ptr, ghidra::int4 size, const ghidra::Address &) override
+    {
+        for (ghidra::int4 i = 0; i < size; ++i)
+            ptr[i] = 0;
+    }
+    std::string getArchType(void) const override { return "astral"; }
+    void adjustVma(long) override {}
+};
+
+// An architecture built to be asked questions rather than to decompile
+// anything.
+class DescribingArchitecture : public ghidra::SleighArchitecture {
+public:
+    DescribingArchitecture(const std::string &language_id, std::ostream *errors)
+        : ghidra::SleighArchitecture("<nothing>", language_id, errors)
+    {
+    }
+
+protected:
+    void buildLoader(ghidra::DocumentStorage &) override
+    {
+        collectSpecFiles(*errorstream);
+        loader = new NoImage();
+    }
+
+    void resolveArchitecture(void) override
+    {
+        archid = getTarget();
+        ghidra::SleighArchitecture::resolveArchitecture();
+    }
+};
+
+} // namespace
+
+bool Target::read_specification(std::string &error)
+{
+    std::ostringstream complaints;
+    try {
+        DescribingArchitecture architecture(language_id, &complaints);
+        ghidra::DocumentStorage storage;
+        architecture.init(storage);
+
+        // How many bytes one address counts. A word-addressed processor counts
+        // more than one, and nineteen of the specifications here do.
+        ghidra::AddrSpace *code = architecture.getDefaultCodeSpace();
+        if (code != nullptr)
+            address_unit_bytes = static_cast<int>(code->getWordSize());
+
+        // Code and data are the same memory on most processors and two on a
+        // Harvard one, which is a difference no amount of care elsewhere can
+        // paper over: an address means a different place depending on which it
+        // is in.
+        ghidra::AddrSpace *data = architecture.getDefaultDataSpace();
+        harvard = code != nullptr && data != nullptr && code != data;
+
+        // Every register the processor has, and how wide each one is. This is
+        // what a level-1 function is asking when it says `@w0`.
+        std::map<ghidra::VarnodeData, std::string> found;
+        architecture.translate->getAllRegisters(found);
+        registers.clear();
+        for (const auto &entry : found)
+            registers[entry.second] = static_cast<int>(entry.first.size);
+
+        spaces_read = true;
+        return true;
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return false;
+    } catch (ghidra::DecoderError &failure) {
+        error = failure.explain;
+        return false;
+    }
+}
+
+int Target::register_width(const std::string &name) const
+{
+    auto found = registers.find(name);
+    return found == registers.end() ? 0 : found->second;
 }
 
 // --------------------------------------------------------------- verification

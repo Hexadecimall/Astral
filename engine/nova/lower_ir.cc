@@ -45,9 +45,30 @@ int width_of_type(TypePtr type, const ir::Target &target)
     return word;
 }
 
+// How wide a value is, asking the things that know in the order they know it.
+//
+// A type says so when there is one. Below level 2 there is not, and then the
+// register says so instead: `@w0` and `@x0` are the same processor and four
+// bytes apart, so taking the machine word would be wrong about one of them
+// every time. Only when neither has an answer is the word a guess worth making.
+int width_of_value(TypePtr type, const Storage &storage, const ir::Target &target);
+
 bool type_is_signed(TypePtr type)
 {
     return type != nullptr && type->kind == compiler::Type::Kind::Integer && type->is_signed;
+}
+
+int width_of_value(TypePtr type, const Storage &storage, const ir::Target &target)
+{
+    if (type != nullptr && type->kind != compiler::Type::Kind::Void)
+        return width_of_type(type, target);
+    if (storage.kind == Storage::Kind::Register ||
+        storage.kind == Storage::Kind::EntryRegister) {
+        const int width = target.register_width(storage.register_name);
+        if (width > 0)
+            return width;
+    }
+    return width_of_type(type, target);
 }
 
 // Where a local lives while the function runs. A local is a frame slot, and the
@@ -102,6 +123,12 @@ private:
     ir::Value call(const Expression &expression);
     ir::Value name(const Expression &expression);
 
+    // The width a binary operation works in. Its own type says so when it has
+    // one; a level-1 expression has none, and then the operands do, which is
+    // how `w0 + w0` comes out four bytes wide rather than eight.
+    int width_of_operands(const Expression &expression) const;
+    int width_of(const ir::Value &value) const;
+
     Types &types_;
     const ir::Target &target_;
     std::vector<Diagnostic> &diagnostics_;
@@ -125,6 +152,30 @@ Slot &Lowerer::declare(const std::string &name, TypePtr type, const Where &where
     if (!placed.second)
         complain(where, name + " is declared twice in the same function");
     return placed.first->second;
+}
+
+int Lowerer::width_of(const ir::Value &value) const
+{
+    return width_of_value(value.type, value.storage, target_);
+}
+
+int Lowerer::width_of_operands(const Expression &expression) const
+{
+    if (expression.type != nullptr && expression.type->kind != compiler::Type::Kind::Void)
+        return width_of_type(expression.type, target_);
+    // No type of its own, so the operands answer. A pinned name is the register
+    // it was pinned to, and the register is what says how wide it is.
+    for (const Expression *side : {expression.left.get(), expression.right.get()}) {
+        if (side == nullptr || side->kind != Expression::Kind::Name)
+            continue;
+        auto parameter = pinned_.find(side->name);
+        if (parameter != pinned_.end()) {
+            const int width = width_of(parameter->second);
+            if (width > 0)
+                return width;
+        }
+    }
+    return width_of_type(expression.type, target_);
 }
 
 const Slot *Lowerer::look_up(const std::string &name) const
@@ -171,7 +222,7 @@ ir::Value Lowerer::binary(const Expression &expression)
     if (!left.is_valid() || !right.is_valid())
         return ir::Value();
 
-    const int width = width_of_type(expression.type, target_);
+    const int width = width_of_operands(expression);
     const bool is_signed = type_is_signed(expression.type) ||
                            (expression.left && type_is_signed(expression.left->type));
 
@@ -532,13 +583,29 @@ bool Lowerer::function(const Function &source, ir::Function &out)
 bool lower_to_ir(const Unit &nova, Types &types, const ir::Target &target, ir::Unit &out,
                  std::vector<Diagnostic> &diagnostics)
 {
-    out.target = target;
+    // Widths below level 2 come from the registers, and the registers are in the
+    // compiled specification rather than in a language id. Reading it here means
+    // a caller who only named a processor still gets `@w0` four bytes wide
+    // instead of whatever the machine word happens to be.
+    ir::Target read = target;
+    if (!read.spaces_read) {
+        std::string error;
+        if (!read.read_specification(error)) {
+            compiler::Diagnostic diagnostic;
+            diagnostic.message = "the specification for " + read.language_id +
+                                 " could not be read: " + error;
+            diagnostics.push_back(diagnostic);
+            return false;
+        }
+    }
+
+    out.target = read;
     bool all = true;
     for (const Function &source : nova.functions) {
         if (source.body == nullptr)
             continue;  // a declaration says a function exists, not what it does
         ir::Function lowered;
-        Lowerer lowerer(types, target, diagnostics);
+        Lowerer lowerer(types, read, diagnostics);
         if (!lowerer.function(source, lowered)) {
             all = false;
             continue;

@@ -136,6 +136,41 @@ void check_targets()
                      "an unread address unit is nothing, not a claim that it is one");
     }
 
+    // What the description cannot answer, the compiled specification can. This
+    // loads it, which is heavier than describing a target and is why it is a
+    // separate thing to ask for.
+    if (target_for("AARCH64:LE:64:AppleSilicon", target)) {
+        std::string error;
+        if (!target.read_specification(error)) {
+            report(false, "the compiled specification is read", error);
+        } else {
+            expect(target.spaces_read, "reading the specification says it was read");
+            expect_equal(target.register_width("w0"), 4, "w0 is four bytes");
+            expect_equal(target.register_width("x0"), 8, "x0 is eight bytes");
+            expect_equal(target.register_width("nonesuch"), 0,
+                         "a register the processor has not got is nothing");
+            expect_equal(target.address_unit_bytes, 1, "an AARCH64 address counts one byte");
+        }
+    }
+
+    // A word-addressed processor, where an address counts two bytes. Assuming
+    // one was wrong about nineteen of these languages.
+    if (target_for("Toy:BE:32:wordSize2", target)) {
+        std::string error;
+        if (target.read_specification(error))
+            expect_equal(target.address_unit_bytes, 2,
+                         "an address on a word-addressed processor counts two bytes");
+    }
+
+    // And a Harvard one, whose code and data are different memories.
+    if (target_for("avr8:LE:16:default", target)) {
+        std::string error;
+        if (target.read_specification(error)) {
+            expect(target.harvard, "a Harvard processor is read as one");
+            expect_equal(target.address_unit_bytes, 2, "its addresses count two bytes");
+        }
+    }
+
     // A language id with a compiler on the end names the same language.
     {
         ir::Target with_compiler;

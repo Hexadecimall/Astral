@@ -145,6 +145,22 @@ void check_pinned_parameter()
     report(contains(text, "@w0"), "a parameter pinned to a register is still pinned", text);
     report(contains(text, "level storage"),
            "a function that says storage and no types is read as level 1", text);
+
+    // Below level 2 there is no type, so the register is the only thing that
+    // says how wide the value is. `w0` and `x0` are the same processor and four
+    // bytes apart, and taking the machine word would be wrong about one of them
+    // every time.
+    report(contains(text, "add.4"), "a four-byte register makes a four-byte addition", text);
+
+    std::string wide_why;
+    const std::string wide = lowered_text(
+        "func doubled(@x0): i64 {\n"
+        "    return x0 + x0;\n"
+        "}\n",
+        "AARCH64:LE:64:AppleSilicon", wide_why);
+    report(!wide.empty() && contains(wide, "add.8"),
+           "an eight-byte register makes an eight-byte addition",
+           wide.empty() ? wide_why : wide);
 }
 
 void check_fixed_address()
