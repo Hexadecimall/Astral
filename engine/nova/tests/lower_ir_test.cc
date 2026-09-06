@@ -324,6 +324,54 @@ void check_refuses_rather_than_drops()
            text.empty() ? why : text);
 }
 
+
+// A parameter nothing was said about goes where this processor's calling
+// convention puts it. The source is the same every time; only the processor
+// differs, and nothing about the lowering is written per-processor.
+void check_unpinned_parameters_follow_the_convention()
+{
+    const char *source =
+        "func adds(first: i32, second: i32): i32 {\n"
+        "  return first + second;\n"
+        "}\n";
+
+    struct Case {
+        const char *language;
+        const char *first;
+        const char *second;
+        const char *what;
+    };
+    const Case cases[] = {
+        {"AARCH64:LE:64:AppleSilicon", "@w0", "@w1", "AARCH64 puts the first two in w0 and w1"},
+        {"RISCV:LE:64:default", "@a0", "@a1", "RISC-V puts them in a0 and a1"},
+        // Nothing in a register at all: a thirty-two bit x86 reads both off the
+        // stack, at the offsets its convention gives them.
+        {"x86:LE:32:default", "@+0x4", "@+0x8",
+         "thirty-two bit x86 reads both off the stack instead"},
+    };
+
+    for (const Case &one : cases) {
+        std::string why;
+        const std::string text = lowered_text(source, one.language, why);
+        if (text.empty()) {
+            report(false, one.what, why);
+            continue;
+        }
+        report(contains(text, one.first) && contains(text, one.second), one.what, text);
+    }
+
+    // And a parameter that was pinned keeps what the source said, rather than
+    // being moved to wherever the convention would have put it.
+    {
+        std::string why;
+        const std::string text = lowered_text("func doubled(@w5): i32 {\n  return w5 + w5;\n}\n",
+                                              "AARCH64:LE:64:AppleSilicon", why);
+        report(!text.empty() && contains(text, "@w5"),
+               "a parameter the source pinned stays where the source put it",
+               text.empty() ? why : text);
+    }
+}
+
 } // namespace
 
 int main()
@@ -340,6 +388,7 @@ int main()
     check_branch();
     check_target_changes_widths();
     check_loops();
+    check_unpinned_parameters_follow_the_convention();
     check_refuses_rather_than_drops();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);

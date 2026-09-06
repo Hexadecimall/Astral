@@ -1140,8 +1140,44 @@ bool Lowerer::function(const Function &source, ir::Function &out)
     // A parameter the caller has already put somewhere keeps where it is. That
     // is the pin the whole representation exists to carry, so it is the first
     // thing written down.
-    for (const Variable &parameter : source.parameters) {
-        const ir::Value value = builder.parameter(parameter.type, parameter.storage);
+    //
+    // A parameter nothing has said about goes where this processor's calling
+    // convention puts it, which is read from the same specification everything
+    // else here is read from. Both end up as storage; the difference is only
+    // who decided.
+    std::vector<Storage> by_convention;
+    Storage result_storage = source.result_storage;
+    {
+        bool anything_unsaid = source.result_storage.is_none() && source.result != nullptr;
+        std::vector<int> widths;
+        for (const Variable &parameter : source.parameters) {
+            widths.push_back(width_of_type(parameter.type, target_));
+            if (parameter.storage.is_none())
+                anything_unsaid = true;
+        }
+        if (anything_unsaid) {
+            std::string error;
+            // Reading the convention loads the processor's specification, so it
+            // is asked once for the whole function rather than once per
+            // parameter. Keeping the loaded specification between functions is
+            // worth doing and is not done here.
+            if (!target_.calling_convention(widths, width_of_type(source.result, target_),
+                                            by_convention, result_storage, error)) {
+                complain(source.where,
+                         "this processor's specification does not say how a call is made: " +
+                             error);
+                builder_ = nullptr;
+                return false;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < source.parameters.size(); ++i) {
+        const Variable &parameter = source.parameters[i];
+        Storage where = parameter.storage;
+        if (where.is_none() && i < by_convention.size())
+            where = by_convention[i];
+        const ir::Value value = builder.parameter(parameter.type, where);
         pinned_.emplace(parameter.name, value);
     }
 
