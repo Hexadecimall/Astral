@@ -209,18 +209,32 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
             continue;
         Constraint whole = sofar;
         if (const ghidra::DisjointPattern *pattern = node->getPattern(i)) {
-            // Both counts are in bits, and only the first few are asked for on
-            // purpose.
+            // What the pattern at the bottom still says, read the whole way
+            // across the instruction.
             //
-            // A pattern at the bottom of the tree holds what was left to
-            // distinguish once everything above it had been decided, and read
-            // in full it disagrees with instructions that exist - it pins down
-            // bits a real one does not have. What the way down decided is the
-            // part that holds up, checked against MIPS and AARCH64 encodings
-            // that are written down elsewhere, so that is what is used and this
-            // contributes only where it is certain.
-            whole.leaf_mask |= pattern->getMask(0, 4, false);
-            whole.leaf_bits |= pattern->getValue(0, 4, false);
+            // Both counts are in bits, and what comes back is pushed down to
+            // the bottom of however many were asked for. So asking for a few
+            // returns those few sitting where the last few would be, and adding
+            // that to an instruction puts the top of the pattern at the bottom
+            // of the word. Asking for exactly as many bits as the instruction
+            // is long puts them where they belong.
+            //
+            // This is where a register a form names outright is written down.
+            // A specification has one constructor for `jr` over any register
+            // and another for `jr ra` alone, and what separates them is five
+            // bits in the pattern here. Dropping them left every return coming
+            // out as a return through register zero.
+            //
+            // Only a word can be asked for at a time, so a longer instruction
+            // is read a word at a time and put back together in order.
+            const int across = made->getMinimumLength() * 8;
+            for (int at = 0; at < across && at < 64; at += 32) {
+                const int take = across - at < 32 ? across - at : 32;
+                whole.leaf_mask = (whole.leaf_mask << take) |
+                                  static_cast<uint64_t>(pattern->getMask(at, take, false));
+                whole.leaf_bits = (whole.leaf_bits << take) |
+                                  static_cast<uint64_t>(pattern->getValue(at, take, false));
+            }
         }
         found.emplace(made, whole);
     }

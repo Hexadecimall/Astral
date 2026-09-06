@@ -5,6 +5,7 @@
 // and mean something else are exactly the failure this is trying to avoid, and
 // nothing but the processor's own reading can tell the difference.
 #include "catalogue.hh"
+#include "homes.hh"
 #include "ir.hh"
 #include "pcode.hh"
 #include "select.hh"
@@ -339,6 +340,69 @@ void check_a_form_that_names_its_own_register_is_offered()
            "the form's fixed read was not recognised as a place");
 }
 
+// A whole function, from what somebody wrote to bytes the processor agrees
+// with.
+//
+// Each piece of this is checked on its own elsewhere. What is checked here is
+// that they meet: a function that answers with something takes room for nothing,
+// works out its answer, puts it where a caller will look, and goes back through
+// the link register - and every instruction of it is one this processor has.
+void check_a_whole_function()
+{
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("MIPS:BE:32:default", target, why) ||
+        !target.read_specification(why)) {
+        report(false, "the processor is read", why);
+        return;
+    }
+    catalogue::Catalogue catalogue;
+    if (!catalogue.read(target, why)) {
+        report(false, "its instructions are read", why);
+        return;
+    }
+
+    ir::Builder builder("sum");
+    builder.block();
+    builder.ret(builder.binary(ir::Operation::Add, builder.constant(20, 4),
+                               builder.constant(22, 4), 4, true));
+
+    ir::Function function;
+    std::vector<std::string> problems;
+    if (!builder.finish(function, problems)) {
+        report(false, "a function that adds and answers is built",
+               problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    pcode::Sequence sequence;
+    if (!pcode::to_pcode(function, target, sequence, problems) ||
+        !homes::give(sequence, target, problems)) {
+        report(false, "and written as p-code with every value housed",
+               problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    std::vector<select::Chosen> chosen;
+    const bool clean = select::write(sequence, target, catalogue, chosen, problems);
+    report(clean, "every operation of a whole function is written",
+           problems.empty() ? "" : problems.front());
+
+    // And the processor reads every one of them back as an instruction, the
+    // last of which goes back through the link register.
+    bool all_real = !chosen.empty();
+    std::string last;
+    for (const select::Chosen &one : chosen) {
+        std::string trouble;
+        last = reads_as("MIPS:BE:32:default", one.bytes, trouble);
+        all_real = all_real && !last.empty();
+    }
+    report(all_real, "and the processor reads each of them back as an instruction",
+           last.empty() ? "one was not an instruction" : last);
+    report(last.find("jr") != std::string::npos && last.find("ra") != std::string::npos,
+           "and the last of them goes back through the link register", last);
+}
+
 } // namespace
 
 int main()
@@ -355,6 +419,7 @@ int main()
     check_a_return_goes_back_through_the_return_address();
     check_a_form_that_names_its_own_register_is_offered();
     check_meaning_is_asked_for_and_not_only_spelling();
+    check_a_whole_function();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

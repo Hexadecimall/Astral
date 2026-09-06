@@ -346,6 +346,59 @@ void check_bits_against_real_instructions()
 }
 
 
+// The bits a constructor's own pattern insists on, read the whole way across.
+//
+// What a pattern answers with is pushed down to the bottom of however many bits
+// were asked for, so asking for a few gives those few sitting where the last few
+// would be. Adding that to an instruction puts the top of the pattern at the
+// bottom of the word, and everything the pattern said below the first few bits
+// is simply lost.
+//
+// That loss is invisible on an instruction whose operands fill the missing bits
+// and total on one whose register the form names outright. A specification has
+// one constructor for going back through any register and another for going
+// back through the link register alone, and what separates them is five bits
+// here. Without them every return on every processor came out as a return
+// through register zero, which is not a return.
+void check_a_form_holds_the_whole_instruction()
+{
+    struct Case {
+        const char *language_id;
+        uint64_t written;    // the bytes in the order they are written
+        const char *what;
+    };
+    // Each of these is what the processor's own manual gives, and each is a
+    // form that names its register rather than taking it as an operand.
+    const Case cases[] = {
+        {"MIPS:BE:32:default", 0x03e00008ull, "jr ra"},
+        {"AARCH64:LE:64:v8A", 0xc0035fd6ull, "ret"},
+        {"RISCV:LE:64:RV64GC", 0x8280ull, "ret"},
+    };
+
+    for (const Case &one : cases) {
+        catalogue::Catalogue catalogue;
+        if (!catalogue_for(one.language_id, catalogue))
+            continue;
+
+        bool exactly = false;
+        for (const catalogue::Form *form : catalogue.plainly_doing(ghidra::CPUI_RETURN, 0, true)) {
+            std::vector<uint8_t> bytes;
+            std::vector<std::string> used;
+            std::string error;
+            if (!catalogue::Catalogue::write_mixed(*form, {}, bytes, used, error))
+                continue;
+            uint64_t word = 0;
+            for (uint8_t byte : bytes)
+                word = (word << 8) | byte;
+            exactly = exactly || word == one.written;
+        }
+        report(exactly,
+               std::string("a form written out is ") + one.what +
+                   ", with the bits that say which register",
+               "no form came out as those bytes");
+    }
+}
+
 // Writing an instruction, which is the whole point of reading a specification
 // rather than writing a back end.
 //
@@ -431,6 +484,7 @@ int main()
     check_shapes();
     check_fixed_bits();
     check_bits_against_real_instructions();
+    check_a_form_holds_the_whole_instruction();
     check_writing_an_instruction();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
