@@ -3,8 +3,8 @@
 A decompiler library for C, C++ and Rust that emits **C you can read** — and,
 for a great deal of what you hand it, C that compiles.
 
-Astral is built on Ghidra's decompiler core, vendored and linked directly. There
-is no JVM, no Ghidra installation and no headless scripting. Link `-lAstral`,
+Astral is built on Ghidra's decompiler core. There
+is no JVM, no Ghidra installation. Link `-lAstral`,
 hand it a binary, get source back.
 
 ```c
@@ -46,15 +46,15 @@ evidence was, and `--raw-names` turns the whole thing off.
 The rules live in a knowledge base built into the library, in a plain text
 format you can read and extend:
 
-| Record | Means |
-|---|---|
-| `verb fopen openFile` | a function whose dominant call is `fopen` |
-| `idiom socket+connect openConnection` | one that calls both |
-| `lit password verifyPassword` | one whose text mentions it |
-| `role zero_accum sum` | a value set to zero then added to |
-| `proto printf ...` | the real prototype of a library function |
-| `note halt_baddata ...` | an explanation to attach where it appears |
-| `sig <hash> <length> <name>` | a name you chose for that exact body |
+| Record                                | Means                                     |
+| ------------------------------------- | ----------------------------------------- |
+| `verb fopen openFile`                 | a function whose dominant call is `fopen` |
+| `idiom socket+connect openConnection` | one that calls both                       |
+| `lit password verifyPassword`         | one whose text mentions it                |
+| `role zero_accum sum`                 | a value set to zero then added to         |
+| `proto printf ...`                    | the real prototype of a library function  |
+| `note halt_baddata ...`               | an explanation to attach where it appears |
+| `sig <hash> <length> <name>`          | a name you chose for that exact body      |
 
 ## Teaching it in bulk
 
@@ -75,7 +75,7 @@ and the longest match wins because it is the most specific.
 ## Teaching it from source
 
 A binary says a function exists and what its body does. The source that built it
-says what the function is *for*. Reading both is what turns a listing into
+says what the function is _for_. Reading both is what turns a listing into
 something you can compile.
 
 ```sh
@@ -161,15 +161,15 @@ from functions, and leaves everything it references undeclared.
 Astral keeps that listing available and adds a translation unit a compiler
 accepts:
 
-| Ghidra emits | What it means | What Astral emits |
-|---|---|---|
-| `int4`, `undefined8`, `unkbyte9` | sized machine types | real `stdint.h` typedefs |
-| `CONCAT44`, `SUB84`, `ZEXT48`, `CARRY4` | p-code operations | generated `static inline` definitions, per width |
-| `value._8_8_ = x` | write eight bytes at offset eight | `ASTRAL_STORE`, which copies bytes rather than converting the number |
-| `xunknown1 [16] f(void)` | value returned in two registers | a struct of that size, which C can return |
-| `func_0x1234(a, b)` | call to an unnamed target | a prototype matching the call site |
-| `iRam000100c068` | an unnamed global | an `extern` with the type its name encodes |
-| `xunknown8 main(void)` | recovered entry point | `int main(void)`, as C requires |
+| Ghidra emits                            | What it means                     | What Astral emits                                                    |
+| --------------------------------------- | --------------------------------- | -------------------------------------------------------------------- |
+| `int4`, `undefined8`, `unkbyte9`        | sized machine types               | real `stdint.h` typedefs                                             |
+| `CONCAT44`, `SUB84`, `ZEXT48`, `CARRY4` | p-code operations                 | generated `static inline` definitions, per width                     |
+| `value._8_8_ = x`                       | write eight bytes at offset eight | `ASTRAL_STORE`, which copies bytes rather than converting the number |
+| `xunknown1 [16] f(void)`                | value returned in two registers   | a struct of that size, which C can return                            |
+| `func_0x1234(a, b)`                     | call to an unnamed target         | a prototype matching the call site                                   |
+| `iRam000100c068`                        | an unnamed global                 | an `extern` with the type its name encodes                           |
+| `xunknown8 main(void)`                  | recovered entry point             | `int main(void)`, as C requires                                      |
 
 Imported functions are resolved to their real names, their arguments typed from
 a table of library prototypes, and the header that declares them included. That
@@ -190,10 +190,10 @@ int main(void)
 
 The claim is measured rather than asserted, on a corpus written to be hard:
 
-| | |
-|---|---|
-| decompiled | 40/40 |
-| compiled | 40/40 |
+|                         |       |
+| ----------------------- | ----- |
+| decompiled              | 40/40 |
+| compiled                | 40/40 |
 | behaved as the original | 20/20 |
 
 ```sh
@@ -231,22 +231,22 @@ The decompiler engine in `engine/` is derived from Ghidra's C++ decompiler
 Astral. Everything Ghidra normally supplies from its Java
 side, plus the parts it has no answer for, live in `src/`:
 
-| Piece | Where | Replaces |
-|---|---|---|
-| ELF reader | `src/format/loader_elf.cc` | `ElfLoader` and friends |
-| PE/COFF reader | `src/format/loader_pe.cc` | `PeLoader`, export and import parsing |
-| Mach-O reader | `src/format/loader_macho.cc` | `MachoLoader`, universal binaries, import stubs |
-| .NET reader | `src/format/dotnet.cc` | nothing upstream; CIL recovered as C |
-| Image model | `src/format/image.cc` | `Memory`, `MemoryBlock` |
-| Language selection | `src/core/langmap.cc` | the processor `.opinion` files |
-| Decompiler session | `src/core/session.cc` | `DecompInterface` |
-| Readable listing | `src/core/listing.cc` | nothing upstream; a listing meant to be edited |
-| Library prototypes | `src/emit/libc_protos.cc` | Ghidra's data-type archives |
-| Real-C emitter | `src/emit/creal.cc` | nothing upstream; this is new |
-| Naming and knowledge | `src/knowledge/` | nothing upstream |
-| Patching and re-signing | `src/patch/` | nothing upstream |
-| C ABI | `src/api/capi.cc` | — |
-| C++ API | `src/api/cpp_api.cc` | — |
+| Piece                   | Where                        | Replaces                                        |
+| ----------------------- | ---------------------------- | ----------------------------------------------- |
+| ELF reader              | `src/format/loader_elf.cc`   | `ElfLoader` and friends                         |
+| PE/COFF reader          | `src/format/loader_pe.cc`    | `PeLoader`, export and import parsing           |
+| Mach-O reader           | `src/format/loader_macho.cc` | `MachoLoader`, universal binaries, import stubs |
+| .NET reader             | `src/format/dotnet.cc`       | nothing upstream; CIL recovered as C            |
+| Image model             | `src/format/image.cc`        | `Memory`, `MemoryBlock`                         |
+| Language selection      | `src/core/langmap.cc`        | the processor `.opinion` files                  |
+| Decompiler session      | `src/core/session.cc`        | `DecompInterface`                               |
+| Readable listing        | `src/core/listing.cc`        | nothing upstream; a listing meant to be edited  |
+| Library prototypes      | `src/emit/libc_protos.cc`    | Ghidra's data-type archives                     |
+| Real-C emitter          | `src/emit/creal.cc`          | nothing upstream; this is new                   |
+| Naming and knowledge    | `src/knowledge/`             | nothing upstream                                |
+| Patching and re-signing | `src/patch/`                 | nothing upstream                                |
+| C ABI                   | `src/api/capi.cc`            | —                                               |
+| C++ API                 | `src/api/cpp_api.cc`         | —                                               |
 
 Two more subsystems live beside the engine rather than in `src/`: the assembler
 in `engine/assembler/`, which turns an edited listing back into bytes for arm64,
@@ -263,9 +263,12 @@ Needs CMake 3.20+, a C++17 compiler and zlib. Cargo as well, for the interface.
 
 ```sh
 ./install.sh                 # build and install where the system expects it
-./install.sh --user          # under ~/.astral instead, no elevation
-./install.sh --languages ALL # every processor Ghidra ships
-./install.sh --uninstall
+./install.sh --user          # under ~/.local instead, and nothing asks for a password
+./install.sh --prefix DIR    # exactly there
+./install.sh --no-gui        # the command, the library and the headers only
+./install.sh --no-service    # skip the updater, so nothing runs as root
+./install.sh --jobs N        # parallel build jobs
+./install.sh --uninstall     # take it all back out again
 ```
 
 The location depends on what the system allows: `/usr/local` on a macOS with
@@ -329,11 +332,11 @@ and building it, which is what the Ghidra and language options are for.
 A tag starting `v` builds one archive per platform and attaches them to a GitHub
 release:
 
-| Archive | Built on |
-|---|---|
-| `astral-<version>-macos-arm64.tar.gz` | macOS 14, Apple silicon |
-| `astral-<version>-macos-x86_64.tar.gz` | macOS 13, Intel |
-| `astral-<version>-linux-x86_64.tar.gz` | Ubuntu 22.04 |
+| Archive                                | Built on                |
+| -------------------------------------- | ----------------------- |
+| `astral-<version>-macos-arm64.tar.gz`  | macOS 14, Apple silicon |
+| `astral-<version>-macos-x86_64.tar.gz` | macOS 13, Intel         |
+| `astral-<version>-linux-x86_64.tar.gz` | Ubuntu 22.04            |
 
 Each holds exactly what an install puts down — the command, the application, the
 libraries, the headers and the compiled specifications — under a single
@@ -455,20 +458,20 @@ image, so `--all` covers this program's own code.
 library, in the same process. A filterable symbol list, the decompiled function
 beside it, and a details pane of parameters, locals and callees.
 
-| Key | Does |
-|---|---|
-| `↑` `↓` `j` `k` `PgUp` `PgDn` `g` `G` | move |
-| `Tab` | cycle panes |
-| `1` `2` `3` `4`, `v` | decompiled C, compilable C, disassembly, p-code |
-| `Enter` | decompile the selection, or jump to a callee |
-| `/` | filter by name or address |
-| `r` | rename, which also teaches it |
-| `x` | who calls this |
-| `s` | save the pane to a file |
-| `b` | toggle the details pane |
-| `Backspace` `h` | back |
-| `?` | help |
-| `q` | quit |
+| Key                                   | Does                                            |
+| ------------------------------------- | ----------------------------------------------- |
+| `↑` `↓` `j` `k` `PgUp` `PgDn` `g` `G` | move                                            |
+| `Tab`                                 | cycle panes                                     |
+| `1` `2` `3` `4`, `v`                  | decompiled C, compilable C, disassembly, p-code |
+| `Enter`                               | decompile the selection, or jump to a callee    |
+| `/`                                   | filter by name or address                       |
+| `r`                                   | rename, which also teaches it                   |
+| `x`                                   | who calls this                                  |
+| `s`                                   | save the pane to a file                         |
+| `b`                                   | toggle the details pane                         |
+| `Backspace` `h`                       | back                                            |
+| `?`                                   | help                                            |
+| `q`                                   | quit                                            |
 
 The first frame is always painted before any decompiling starts, so it never
 looks hung, and the terminal is restored even if the process is killed.

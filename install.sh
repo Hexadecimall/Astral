@@ -1,166 +1,311 @@
-#!/bin/sh
-# Builds and installs Astral.
+#!/bin/bash
+# Installs Astral: the command, the library, the headers, the specifications,
+# the knowledge base and the window.
 #
-# Where it goes depends on what the system allows. On a macOS with System
-# Integrity Protection, /usr is sealed and /usr/local is the place for anything
-# not shipped by the vendor. Without SIP, and on Linux, /usr is the normal
-# place. Windows has its own convention entirely. This picks the right one and
-# asks for elevation only if the chosen location is not already writable.
+#   ./install.sh                system-wide, where this machine keeps such things
+#   ./install.sh --user         into ~/.local, no service, nothing needs a password
+#   ./install.sh --prefix DIR   exactly there
+#   ./install.sh --no-gui       the command, the library and the headers only
+#   ./install.sh --no-service   skip the updater, so nothing runs as root
+#   ./install.sh --uninstall    take it all back out again
 #
-#   ./install.sh                 install to the system location
-#   ./install.sh --prefix DIR    install somewhere else
-#   ./install.sh --user          install under ~/.astral, no elevation needed
-#   ./install.sh --languages ALL compile every processor specification
-#   ./install.sh --jobs N        parallel build jobs
-#   ./install.sh --uninstall     remove a previous install
-set -eu
+# Where the root goes is not a preference, it is a fact about the machine:
+# Linux keeps this in /usr; a Mac with System Integrity Protection cannot write
+# there and keeps it in /usr/local; a Mac without SIP is a Linux box about this
+# and goes to /usr. Windows is installed by install.ps1, which can register a
+# service and write the machine's PATH, neither of which a shell script can do.
+set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
+cd "$here"
+
+mode=system
 prefix=""
-languages=""
-jobs=""
+gui=1
+service=1
 uninstall=0
-user_install=0
+jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --prefix) prefix=${2:?--prefix needs a directory}; shift 2 ;;
-        --languages) languages=${2:?--languages needs a list}; shift 2 ;;
-        --jobs|-j) jobs=${2:?--jobs needs a number}; shift 2 ;;
-        --user) user_install=1; shift ;;
-        --uninstall) uninstall=1; shift ;;
-        --help|-h)
-            sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
-            exit 0 ;;
-        *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
+        --user)       mode=user ;;
+        --prefix)     shift; prefix="${1:-}" ;;
+        --no-gui)     gui=0 ;;
+        --no-service) service=0 ;;
+        --uninstall)  uninstall=1 ;;
+        --jobs)       shift; jobs="${1:-$jobs}" ;;
+        --help|-h)    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) printf 'install: no such option %s\n' "$1" >&2; exit 2 ;;
     esac
+    shift
 done
 
-# ------------------------------------------------------------ where it goes
+bold=""; green=""; red=""; dim=""; plain=""
+if [ -t 1 ]; then
+    bold=$'\033[1m'; green=$'\033[32m'; red=$'\033[31m'; dim=$'\033[2m'; plain=$'\033[0m'
+fi
+step() { printf '\n%s==>%s %s%s%s\n' "$bold" "$plain" "$bold" "$1" "$plain"; }
+ok()   { printf '    %sok%s   %s\n' "$green" "$plain" "$1"; }
+bad()  { printf '    %sFAIL%s %s\n' "$red" "$plain" "$1"; }
+skip() { printf '    %sskip%s %s\n' "$dim" "$plain" "$1"; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
-sip_enabled() {
-    # csrutil only exists on macOS; anywhere else there is no SIP to enable.
-    command -v csrutil >/dev/null 2>&1 || return 1
-    csrutil status 2>/dev/null | grep -qi 'status: enabled'
-}
-
-detect_prefix() {
-    case "$(uname -s 2>/dev/null || echo unknown)" in
-        MINGW*|MSYS*|CYGWIN*|Windows_NT)
-            echo "${PROGRAMFILES:-C:/Program Files}/Astral" ;;
-        Darwin)
-            # A sealed system volume means /usr is out of reach.
-            if sip_enabled; then echo /usr/local; else echo /usr; fi ;;
-        *)
-            # Some Unixes carry SIP-like protection; treat those as macOS does.
-            if sip_enabled; then echo /usr/local; else echo /usr; fi ;;
-    esac
-}
-
-if [ "$user_install" -eq 1 ]; then
-    prefix="$HOME/.astral"
-elif [ -z "$prefix" ]; then
-    prefix=$(detect_prefix)
+# --------------------------------------------------------------- the machine
+system=$(uname -s)
+case "$system" in
+    Darwin)
+        # SIP is what decides. With it on, /usr is sealed and /usr/local is
+        # where anything installed by hand belongs; with it off there is no
+        # reason not to be where Linux is.
+        if csrutil status 2>/dev/null | grep -qi "enabled"; then
+            system_prefix=/usr/local
+            sip=on
+        else
+            system_prefix=/usr
+            sip=off
+        fi
+        ;;
+    Linux)  system_prefix=/usr; sip=none ;;
+    *)      system_prefix=/usr/local; sip=none ;;
+esac
+if [ "$mode" = user ]; then
+    default_prefix="$HOME/.local"
+else
+    default_prefix="$system_prefix"
 fi
 
-# ------------------------------------------------------------- elevation
+[ -n "$prefix" ] || prefix="$default_prefix"
 
-# True when every directory the install writes into is already writable, so
-# elevation is only asked for when it is genuinely needed.
-writable_tree() {
-    root=$1
-    if [ ! -e "$root" ]; then
-        parent=$(dirname "$root")
-        while [ ! -e "$parent" ] && [ "$parent" != "/" ]; do parent=$(dirname "$parent"); done
-        [ -w "$parent" ]
-        return
-    fi
-    # Nothing is written to the prefix itself, only into these, so a sealed
-    # /usr/local with writable subdirectories needs no elevation.
-    for part in bin include lib share; do
-        target="$root/$part"
-        if [ -e "$target" ] && [ ! -w "$target" ]; then return 1; fi
-        if [ ! -e "$target" ] && [ ! -w "$root" ]; then return 1; fi
-    done
-    return 0
-}
+# A prefix given by hand is taken at its word: everything goes under it and
+# nothing outside it is touched, which is what makes a test install a test
+# install rather than something that quietly writes to /Applications.
+own_prefix=0
+[ -n "$prefix" ] && [ "$prefix" != "$default_prefix" ] && own_prefix=1
 
-elevate=""
-if ! writable_tree "$prefix"; then
-    if command -v sudo >/dev/null 2>&1; then
-        elevate="sudo"
-        echo "$prefix is not writable by this user; the install step will use sudo"
-    else
-        echo "install.sh: $prefix is not writable and sudo is not available" >&2
-        exit 1
-    fi
+# The Nova library store is not under the prefix on purpose: it is written to
+# long after the install, by whoever is reading a binary, and it survives the
+# install being replaced. A prefix given by hand keeps its own.
+if [ "$own_prefix" -eq 1 ]; then
+    novalib="$prefix/nova/lib"
+elif [ "$mode" = user ]; then
+    novalib="$HOME/.nova/libs"
+else
+    novalib=/usr/local/nova/lib
 fi
 
-# --------------------------------------------------------------- uninstall
+# Where the application goes, for the same reason.
+if [ "$own_prefix" -eq 1 ]; then
+    app_home="$prefix/Applications"
+elif [ "$mode" = user ]; then
+    app_home="$HOME/Applications"
+else
+    app_home=/Applications
+fi
 
+# Anything under the prefix needs sudo unless the prefix is the user's.
+as_root=""
+if [ "$mode" != user ] && [ ! -w "$(dirname "$prefix")" ]; then
+    as_root="sudo"
+fi
+
+# ------------------------------------------------------------------ removing
 if [ "$uninstall" -eq 1 ]; then
-    echo "removing Astral from $prefix"
-    $elevate rm -rf \
-        "$prefix/lib/astral" \
-        "$prefix/share/astral" \
-        "$prefix/include/astral" \
-        "$prefix/bin/astral" \
-        "$prefix/bin/astral-tui" \
-        "$prefix/bin/astral-update" \
-        "$prefix/bin/astral-sleigh"
-    # The last three were separate programs in earlier releases; they are named
-    # here so an upgrade from one of those leaves nothing behind.
-    echo "removed. Anything you taught it is still in ${ASTRAL_HOME:-$HOME/.astral}"
+    step "Removing"
+    for gone in "$prefix/bin/astral" "$prefix/bin/astral-gui" \
+                "$prefix/lib/libAstral.a" "$prefix/lib/libAstral.dylib" \
+                "$prefix/lib/libAstral.so" "$prefix/lib/pkgconfig/astral.pc" \
+                "$prefix/libexec/astral-updater"; do
+        [ -e "$gone" ] && $as_root rm -f "$gone" && ok "$gone"
+    done
+    for tree in "$prefix/include/astral" "$prefix/share/astral"; do
+        [ -d "$tree" ] && $as_root rm -rf "$tree" && ok "$tree"
+    done
+    if [ "$system" = Darwin ]; then
+        for app in /Applications/Astral.app "$HOME/Applications/Astral.app"; do
+            [ -d "$app" ] && rm -rf "$app" 2>/dev/null || $as_root rm -rf "$app" 2>/dev/null
+            [ -d "$app" ] || ok "$app"
+        done
+        [ -f /Library/LaunchDaemons/dev.astral.updater.plist ] && {
+            $as_root launchctl bootout system/dev.astral.updater 2>/dev/null
+            $as_root rm -f /Library/LaunchDaemons/dev.astral.updater.plist
+            ok "the updater"
+        }
+    else
+        [ -f /usr/lib/systemd/system/astral-updater.service ] && {
+            $as_root systemctl disable --now astral-updater 2>/dev/null
+            $as_root rm -f /usr/lib/systemd/system/astral-updater.service
+            ok "the updater"
+        }
+        [ -f "$prefix/share/applications/astral.desktop" ] &&
+            $as_root rm -f "$prefix/share/applications/astral.desktop" && ok "the desktop entry"
+    fi
+    printf '\n%sThe Nova library at %s was left alone.%s\n' "$dim" "$novalib" "$plain"
+    printf '%sIt holds what you taught it; remove it by hand if you mean to.%s\n' "$dim" "$plain"
     exit 0
 fi
 
-# ------------------------------------------------------------------- build
+# ------------------------------------------------------------------ building
+step "What this is"
+printf '    %-10s %s\n' "system" "$system${sip:+ (SIP $sip)}"
+printf '    %-10s %s\n' "prefix" "$prefix"
+printf '    %-10s %s\n' "nova" "$novalib"
+printf '    %-10s %s\n' "window" "$([ $gui -eq 1 ] && echo yes || echo no)"
 
-if ! command -v cmake >/dev/null 2>&1; then
-    echo "install.sh: cmake is required" >&2
+if [ ! -x build/astral ]; then
+    step "Building"
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" >/dev/null 2>&1 \
+        || { bad "cmake could not configure"; exit 1; }
+    cmake --build build --parallel "$jobs" >/dev/null 2>&1 \
+        || { bad "the build did not finish"; exit 1; }
+    ok "built"
+else
+    # The prefix is written into the pkg-config file and the install rules, so
+    # it has to be the one being installed to.
+    cmake -S . -B build -DCMAKE_INSTALL_PREFIX="$prefix" >/dev/null 2>&1
+    cmake --build build --parallel "$jobs" >/dev/null 2>&1
+    ok "already built"
+fi
+
+step "Installing"
+if $as_root cmake --install build --prefix "$prefix" >/dev/null 2>&1; then
+    ok "$prefix/bin/astral"
+    ok "$prefix/lib, $prefix/include/astral, $prefix/share/astral"
+else
+    bad "the install did not finish"
     exit 1
 fi
 
-build="$here/build"
-configure="cmake -S $here -B $build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$prefix"
-[ -n "$languages" ] && configure="$configure -DASTRAL_LANGUAGES=$languages"
-
-echo "==> configuring for $prefix"
-$configure >/dev/null
-
-echo "==> building"
-if [ -n "$jobs" ]; then
-    cmake --build "$build" --parallel "$jobs"
-else
-    cmake --build "$build" --parallel
+# ------------------------------------------------------------------- the app
+if [ "$gui" -eq 1 ]; then
+    step "The window"
+    if [ "$system" = Darwin ]; then
+        # The bundle with Qt inside it, so it runs on a machine that has never
+        # heard of Homebrew. macdeployqt is what puts the frameworks in.
+        cmake --build build --target astral_gui_dist --parallel "$jobs" >/dev/null 2>&1
+        built=build/gui/dist/Astral.app
+        [ -d "$built" ] || built=build/gui/Astral.app
+        if [ -d "$built" ]; then
+            destination="$app_home"
+            if ! mkdir -p "$destination" 2>/dev/null; then
+                $as_root mkdir -p "$destination" || { bad "could not make $destination"; destination=""; }
+            fi
+            if [ -n "$destination" ]; then
+                $as_root rm -rf "$destination/Astral.app"
+                if $as_root cp -R "$built" "$destination/Astral.app"; then
+                    # Copying breaks the signature, so it is made again. Ad hoc
+                    # is enough: this is not being distributed, it is being
+                    # installed.
+                    $as_root codesign --force --deep --sign - "$destination/Astral.app" >/dev/null 2>&1
+                    ok "$destination/Astral.app"
+                    frameworks=$(ls "$destination/Astral.app/Contents/Frameworks" 2>/dev/null | wc -l | tr -d ' ')
+                    if [ "${frameworks:-0}" -gt 0 ]; then
+                        ok "Qt bundled inside it ($frameworks items)"
+                    else
+                        skip "Qt was not bundled; the window will need Qt installed"
+                    fi
+                else
+                    bad "could not write $destination/Astral.app"
+                fi
+            fi
+        else
+            skip "no application was built"
+        fi
+    else
+        # Linux has no bundle, so the libraries go beside the binary and the
+        # binary is told to look there. Qt's plugins need a home too, and
+        # qt.conf is how a Qt program is told where that is.
+        libdir="$prefix/lib/astral"
+        $as_root mkdir -p "$libdir"
+        copied=0
+        if have ldd; then
+            for library in $(ldd build/gui/astral-gui 2>/dev/null | awk '/Qt6|icu/ {print $3}'); do
+                [ -f "$library" ] || continue
+                $as_root cp -Ln "$library" "$libdir/" 2>/dev/null && copied=$((copied + 1))
+            done
+        fi
+        if [ "$copied" -gt 0 ]; then
+            ok "Qt bundled into $libdir ($copied libraries)"
+            for plugins in /usr/lib/*/qt6/plugins /usr/lib/qt6/plugins; do
+                [ -d "$plugins" ] || continue
+                $as_root cp -R "$plugins" "$libdir/plugins" 2>/dev/null && ok "Qt plugins" && break
+            done
+            printf '[Paths]\nPrefix = %s\nPlugins = plugins\n' "$libdir" > /tmp/astral-qt.conf
+            $as_root cp /tmp/astral-qt.conf "$prefix/bin/qt.conf"
+            rm -f /tmp/astral-qt.conf
+            have patchelf && $as_root patchelf --set-rpath "$libdir" "$prefix/bin/astral-gui" 2>/dev/null \
+                && ok "astral-gui looks in $libdir"
+        else
+            skip "Qt was not bundled; the window will need Qt installed"
+        fi
+        $as_root mkdir -p "$prefix/share/applications" "$prefix/share/icons/hicolor/512x512/apps"
+        cat > /tmp/astral.desktop <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Astral
+Comment=Read a binary as source
+Exec=$prefix/bin/astral-gui %f
+Icon=astral
+Terminal=false
+Categories=Development;
+MimeType=application/x-executable;application/x-sharedlib;
+DESKTOP
+        $as_root cp /tmp/astral.desktop "$prefix/share/applications/astral.desktop"
+        rm -f /tmp/astral.desktop
+        ok "$prefix/share/applications/astral.desktop"
+    fi
 fi
 
-echo "==> installing"
-$elevate cmake --install "$build" >/dev/null
+# ------------------------------------------------------- the library, shared
+step "The Nova library"
+if [ "$mode" = user ] || [ "$own_prefix" -eq 1 ]; then
+    if mkdir -p "$novalib" 2>/dev/null || $as_root mkdir -p "$novalib"; then
+        ok "$novalib"
+    else
+        bad "could not make $novalib"
+    fi
+else
+    # A system-wide install must not take away `astral learn --nova`. The store
+    # is setgid so that whatever is written there stays writable by the group,
+    # which is the difference between a shared library and a read-only one.
+    if $as_root mkdir -p "$novalib" 2>/dev/null; then
+        group=astral
+        if [ "$system" = Darwin ]; then
+            if ! dscl . -read /Groups/$group >/dev/null 2>&1; then
+                free=$(( $(dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | sort -n | tail -1) + 1 ))
+                $as_root dscl . -create /Groups/$group PrimaryGroupID "$free" >/dev/null 2>&1 &&
+                    ok "made the group $group"
+            fi
+            $as_root dseditgroup -o edit -a "$(id -un)" -t user $group >/dev/null 2>&1
+        else
+            getent group $group >/dev/null 2>&1 ||
+                { $as_root groupadd $group && ok "made the group $group"; }
+            $as_root usermod -aG $group "$(id -un)" 2>/dev/null
+        fi
+        if $as_root chgrp -R $group "$novalib" 2>/dev/null && $as_root chmod 2775 "$novalib"; then
+            ok "$novalib  (group $group, setgid, writable)"
+            printf '    %syou may need to log in again before the group takes effect%s\n' "$dim" "$plain"
+        else
+            skip "$novalib is read-only; astral learn --nova will use ~/.nova/libs"
+        fi
+    else
+        bad "could not make $novalib"
+    fi
+fi
 
-# ------------------------------------------------------------------ report
+# ----------------------------------------------------------------- the updater
+if [ "$service" -eq 1 ] && [ "$mode" != user ]; then
+    step "The updater"
+    skip "the privileged helper is not built yet; astral update installs as you"
+fi
 
-cat <<REPORT
-
-Astral is installed in $prefix
-
-  program    $prefix/bin/astral
-  headers    $prefix/include/astral
-  libraries  $prefix/lib/astral/dynamic-libs
-             $prefix/lib/astral/static-libs
-  data       $prefix/share/astral
-
-Compile against it with:
-
-  cc yours.c -I$prefix/include -L$prefix/lib/astral/static-libs -lAstral -lz -lc++
-
-Try it:
-
-  astral info /bin/ls
-  astral decompile --tui /bin/ls
-REPORT
-
-case ":${PATH}:" in
-    *":$prefix/bin:"*) ;;
-    *) echo "\nNote: $prefix/bin is not on your PATH." ;;
+# --------------------------------------------------------------------- ending
+step "Done"
+if [ -x "$prefix/bin/astral" ]; then
+    ok "$("$prefix/bin/astral" --version 2>&1 | head -1)"
+fi
+case ":$PATH:" in
+    *":$prefix/bin:"*) ok "$prefix/bin is on PATH" ;;
+    *) printf '    %sadd %s/bin to PATH%s\n' "$dim" "$prefix" "$plain" ;;
 esac
+printf '\n    astral open           %sthe window%s\n' "$dim" "$plain"
+printf '    astral decompile BIN  %sthe code%s\n' "$dim" "$plain"
