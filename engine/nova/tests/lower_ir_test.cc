@@ -219,6 +219,94 @@ void check_target_changes_widths()
            wide.empty() || narrow.empty() ? why : "");
 }
 
+// Loops. Each shape has a different place the test sits and a different place
+// `continue` goes, which is the whole of what distinguishes them.
+void check_loops()
+{
+    {
+        std::string why;
+        const std::string text = lowered_text(
+            "func counts(): i32 {\n"
+            "    var seen: i32 = 0;\n"
+            "    while (seen < 10) {\n"
+            "        seen = seen + 1;\n"
+            "    }\n"
+            "    return seen;\n"
+            "}\n",
+            "AARCH64:LE:64:AppleSilicon", why);
+        if (text.empty()) {
+            report(false, "a while lowers", why);
+        } else {
+            report(contains(text, "branch"), "the while tests and branches", text);
+            report(contains(text, "less"), "the comparison came through", text);
+        }
+    }
+
+    {
+        std::string why;
+        const std::string text = lowered_text(
+            "func once(): i32 {\n"
+            "    var seen: i32 = 0;\n"
+            "    do {\n"
+            "        seen = seen + 1;\n"
+            "    } while (seen < 2);\n"
+            "    return seen;\n"
+            "}\n",
+            "AARCH64:LE:64:AppleSilicon", why);
+        report(!text.empty() && contains(text, "branch"), "a do while lowers",
+               text.empty() ? why : text);
+    }
+
+    // `loop` has nothing to test, so the only way out is a break, and the block
+    // a break goes to has to exist for it to go there.
+    {
+        std::string why;
+        const std::string text = lowered_text(
+            "func breaks(): i32 {\n"
+            "    loop {\n"
+            "        break;\n"
+            "    }\n"
+            "    return 3;\n"
+            "}\n",
+            "AARCH64:LE:64:AppleSilicon", why);
+        report(!text.empty() && contains(text, "jump"), "a loop with a break in it lowers",
+               text.empty() ? why : text);
+    }
+
+    // A break outside any loop has nowhere to go and is refused rather than
+    // quietly jumping somewhere.
+    {
+        std::string why;
+        const std::string text = lowered_text(
+            "func stray(): i32 {\n"
+            "    break;\n"
+            "    return 0;\n"
+            "}\n",
+            "AARCH64:LE:64:AppleSilicon", why);
+        report(text.empty() && why.find("outside any loop") != std::string::npos,
+               "a break outside any loop is refused", text.empty() ? why : text);
+    }
+
+    // A break in a nested loop leaves the loop it is written in, not the
+    // outermost one, which is what the innermost-last stack is for.
+    {
+        std::string why;
+        const std::string text = lowered_text(
+            "func nested(): i32 {\n"
+            "    var outer: i32 = 0;\n"
+            "    while (outer < 3) {\n"
+            "        while (outer < 2) {\n"
+            "            break;\n"
+            "        }\n"
+            "        outer = outer + 1;\n"
+            "    }\n"
+            "    return outer;\n"
+            "}\n",
+            "AARCH64:LE:64:AppleSilicon", why);
+        report(!text.empty(), "a break inside a nested loop lowers", why);
+    }
+}
+
 void check_refuses_rather_than_drops()
 {
     // A statement that is not lowered yet has to be refused. Quietly leaving it
@@ -226,8 +314,8 @@ void check_refuses_rather_than_drops()
     // failure nothing downstream can catch.
     std::string why;
     const std::string text = lowered_text(
-        "func loops(): i32 {\n"
-        "    while (1) { }\n"
+        "func counts(): i32 {\n"
+        "    for (step in 0..10) { }\n"
         "    return 0;\n"
         "}\n",
         "AARCH64:LE:64:AppleSilicon", why);
@@ -251,6 +339,7 @@ int main()
     check_fixed_address();
     check_branch();
     check_target_changes_widths();
+    check_loops();
     check_refuses_rather_than_drops();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);

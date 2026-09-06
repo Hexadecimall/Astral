@@ -111,6 +111,9 @@ private:
     bool declaration(const Statement &statement);
     bool if_statement(const Statement &statement);
     bool while_statement(const Statement &statement);
+    bool do_while_statement(const Statement &statement);
+    bool loop_statement(const Statement &statement);
+    bool leave_loop(const Statement &statement, bool to_the_end);
     bool return_statement(const Statement &statement);
     bool assembly(const Statement &statement);
 
@@ -136,6 +139,15 @@ private:
     ir::Builder *builder_ = nullptr;
     std::map<std::string, Slot> slots_;
     std::map<std::string, ir::Value> pinned_;  // parameters, by the name they were given
+    // Where `break` and `continue` go, innermost last. A loop pushes one while
+    // its body is lowered, so a break in a nested loop leaves the loop it is
+    // written in rather than the outermost one.
+    struct Loop {
+        uint32_t again = 0;  // where `continue` goes
+        uint32_t after = 0;  // where `break` goes
+    };
+    std::vector<Loop> loops_;
+
     int64_t next_offset_ = 0;
     bool failed_ = false;
 };
@@ -469,10 +481,128 @@ bool Lowerer::if_statement(const Statement &statement)
     return true;
 }
 
+// while (condition) { body }
+//
+// The condition is tested in a block of its own rather than before the loop,
+// because it is tested again on every turn and the body has to be able to
+// reach it. That block is also where `continue` goes.
 bool Lowerer::while_statement(const Statement &statement)
 {
-    complain(statement.where, "a while is not lowered yet");
-    return false;
+    if (!statement.value) {
+        complain(statement.where, "a while with nothing to decide on");
+        return false;
+    }
+
+    // Where control is now, remembered before opening anything: opening a block
+    // makes it the one being written into.
+    const uint32_t before = builder_->current();
+
+    const uint32_t testing = builder_->block();
+    const uint32_t body = builder_->block();
+    const uint32_t after = builder_->block();
+
+    // Falling into the loop is a jump to the test, from wherever control was.
+    builder_->resume(before);
+    builder_->jump(testing);
+
+    builder_->resume(testing);
+    const ir::Value condition = expression(*statement.value);
+    if (!condition.is_valid())
+        return false;
+    builder_->branch(condition, body, after);
+
+    loops_.push_back({testing, after});
+    builder_->resume(body);
+    const bool walked = statement.then_branch ? this->statement(*statement.then_branch) : true;
+    loops_.pop_back();
+    if (!walked)
+        return false;
+    // A body that already left does not go round again.
+    if (builder_->block_is_open())
+        builder_->jump(testing);
+
+    builder_->resume(after);
+    return true;
+}
+
+// do { body } while (condition)
+//
+// The body runs before anything is tested, so control enters it directly and
+// the test sits after it. `continue` goes to the test, which is where the next
+// turn is decided, and not back to the top.
+bool Lowerer::do_while_statement(const Statement &statement)
+{
+    if (!statement.value) {
+        complain(statement.where, "a do while with nothing to decide on");
+        return false;
+    }
+
+    const uint32_t before = builder_->current();
+
+    const uint32_t body = builder_->block();
+    const uint32_t testing = builder_->block();
+    const uint32_t after = builder_->block();
+
+    builder_->resume(before);
+    builder_->jump(body);
+
+    loops_.push_back({testing, after});
+    builder_->resume(body);
+    const bool walked = statement.then_branch ? this->statement(*statement.then_branch) : true;
+    loops_.pop_back();
+    if (!walked)
+        return false;
+    if (builder_->block_is_open())
+        builder_->jump(testing);
+
+    builder_->resume(testing);
+    const ir::Value condition = expression(*statement.value);
+    if (!condition.is_valid())
+        return false;
+    builder_->branch(condition, body, after);
+
+    builder_->resume(after);
+    return true;
+}
+
+// loop { body }
+//
+// Nothing is tested. The only way out is something in the body breaking, and
+// `after` exists so that break has somewhere to go; when nothing breaks it is
+// left for the ending nobody wrote, the same as any other unreached block.
+bool Lowerer::loop_statement(const Statement &statement)
+{
+    const uint32_t before = builder_->current();
+
+    const uint32_t body = builder_->block();
+    const uint32_t after = builder_->block();
+
+    builder_->resume(before);
+    builder_->jump(body);
+
+    loops_.push_back({body, after});
+    builder_->resume(body);
+    const bool walked = statement.then_branch ? this->statement(*statement.then_branch) : true;
+    loops_.pop_back();
+    if (!walked)
+        return false;
+    if (builder_->block_is_open())
+        builder_->jump(body);
+
+    builder_->resume(after);
+    return true;
+}
+
+bool Lowerer::leave_loop(const Statement &statement, bool to_the_end)
+{
+    if (loops_.empty()) {
+        complain(statement.where, to_the_end ? "a break outside any loop"
+                                             : "a continue outside any loop");
+        return false;
+    }
+    const Loop &innermost = loops_.back();
+    builder_->jump(to_the_end ? innermost.after : innermost.again);
+    return true;
 }
 
 bool Lowerer::return_statement(const Statement &statement)
@@ -517,6 +647,14 @@ bool Lowerer::statement(const Statement &statement)
         return if_statement(statement);
     case Statement::Kind::While:
         return while_statement(statement);
+    case Statement::Kind::DoWhile:
+        return do_while_statement(statement);
+    case Statement::Kind::Loop:
+        return loop_statement(statement);
+    case Statement::Kind::Break:
+        return leave_loop(statement, true);
+    case Statement::Kind::Continue:
+        return leave_loop(statement, false);
     case Statement::Kind::Return:
         return return_statement(statement);
     case Statement::Kind::Asm:
