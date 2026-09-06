@@ -1,10 +1,15 @@
 #include "model/sourcepatcher.hh"
+
+
+#include <algorithm>
 #include "model/literalspace.hh"
 #include "model/programdocument.hh"
 
 #include "assembler/assembler.hh"
 #include "compiler/compiler.hh"
 #include "nova/nova.hh"
+#include "knowledge/knowledge.hh"
+#include "knowledge/novalibs.hh"
 
 #include <QStringList>
 #include <cstdint>
@@ -83,7 +88,7 @@ QString SourcePatcher::architectureName(const QString &languageId)
     return QString::fromUtf8(engine::assembler::target_name(targetFor(languageId)));
 }
 
-SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &after,
+SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &given,
                                         const QString &functionName, quint64 address, quint64 span,
                                         Language language)
 {
@@ -111,6 +116,73 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
             return *resolved;
         return std::nullopt;
     };
+
+    QString after = given;
+
+    // ------------------------------------------------------------- grab
+    //
+    // Resolved before the language sees any of it, so `grab` needs nothing of
+    // the grammar: what comes back is Nova, and Nova is what gets compiled.
+    // Two kinds of answer - a prototype the knowledge base holds, and a
+    // function somebody already decompiled - reached the same way, because to
+    // whoever writes the line they are the same thing: code that is not here.
+    QString resolved;
+    QStringList grabbed;
+    {
+        QStringList body;
+        for (const QString &line : after.split(QLatin1Char('\n'))) {
+            const QString bare = line.trimmed();
+            if (!bare.startsWith(QStringLiteral("grab "))) {
+                body << line;
+                continue;
+            }
+            QString what = bare.mid(5).trimmed();
+            if (what.endsWith(QLatin1Char(';')))
+                what.chop(1);
+            std::string failure;
+            const std::string text =
+                engine::NovaLibraries::resolve(what.trimmed().toStdString(), failure);
+            if (text.empty()) {
+                outcome.report = tr("%1: %2").arg(functionName,
+                                                  QString::fromStdString(failure));
+                outcome.errors = 1;
+                return outcome;
+            }
+            resolved += QString::fromStdString(text);
+            grabbed << what.trimmed();
+            // A blank line where the grab was, so a diagnostic's line number
+            // still points at the line the person wrote.
+            body << QString();
+        }
+        after = body.join(QLatin1Char('\n'));
+    }
+
+    // Every name this function calls that Astral knows a prototype for. Chief
+    // among them the variadic ones: a call to printf with its arguments in
+    // registers compiles, links, runs and prints rubbish, because on this
+    // platform printf reads them off the stack. Nothing else in a decompiled
+    // function says so.
+    {
+        const std::vector<std::string> called =
+            engine::NovaLibraries::called_names(after.toStdString());
+        // Each front end is handed its own dialect. Nova reads a body-less
+        // `func`; C reads the prototype the knowledge base already holds,
+        // which is written as C to begin with.
+        std::string known;
+        if (language == Language::Nova) {
+            known = engine::NovaLibraries::declarations_for(called);
+        } else {
+            const engine::Knowledge &knowledge = engine::Knowledge::instance();
+            for (const std::string &name : called) {
+                const std::string prototype = knowledge.prototype_for(name);
+                if (!prototype.empty())
+                    known += prototype + "\n";
+            }
+        }
+        resolved += QString::fromStdString(known);
+    }
+    if (!resolved.isEmpty())
+        after = resolved + after;
 
     const std::string sourceAfter = after.toStdString();
     const std::string sourceBefore = before.toStdString();
@@ -147,6 +219,11 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
                                        tr("string for %1").arg(functionName), error))
                 return false;
         return true;
+    };
+
+    // Whether one more four-byte no-op still lands below the strings.
+    auto codEndFits = [](quint64 end, qsizetype so_far, quint64 floor) {
+        return end + static_cast<quint64>(so_far) + 4 <= floor;
     };
 
     auto placementReport = [](const LiteralSpace &space) {
@@ -212,6 +289,13 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
                 return outcome;
             }
             qint64 written = 0;
+            // Where the new code stops. Anything between there and the strings
+            // is what the old function left behind: instructions that no longer
+            // belong to anything, which the decompiler reads as code because
+            // they are inside the function it was asked about. That is what
+            // turns a recompiled function into a page of NEON arithmetic and a
+            // bad-instruction warning.
+            quint64 codeEnd = 0;
             for (const engine::compiler::Update::Region &region : update.regions) {
                 const QByteArray bytes(reinterpret_cast<const char *>(region.bytes.data()),
                                        static_cast<qsizetype>(region.bytes.size()));
@@ -220,7 +304,27 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
                     outcome.report = error;
                     return outcome;
                 }
+                if (region.address >= address && region.address < address + span)
+                    codeEnd = std::max<quint64>(
+                        codeEnd, region.address + static_cast<quint64>(bytes.size()));
                 written += bytes.size();
+            }
+            // Filled with no-ops, the way the whole-function path already does
+            // it, so nothing stale is left to be reached or read.
+            if (!update.recompiled.empty() && codeEnd != 0 && codeEnd < space.spanFloor()) {
+                QByteArray padding;
+                static const char kNop[4] = {'\x1f', '\x20', '\x03', '\xd5'};
+                while (codEndFits(codeEnd, padding.size(), space.spanFloor()))
+                    padding.append(kNop, 4);
+                if (!padding.isEmpty()) {
+                    if (!document_->patchBytes(codeEnd, padding,
+                                               tr("no-ops after %1").arg(functionName), error)) {
+                        outcome.report = error;
+                        return outcome;
+                    }
+                    written += padding.size();
+                    outcome.padded = padding.size();
+                }
             }
             outcome.ok = true;
             outcome.changed = true;
@@ -229,6 +333,8 @@ SourcePatchOutcome SourcePatcher::patch(const QString &before, const QString &af
 
             QStringList said;
             said << tr("%1 region(s), %2 byte(s)").arg(update.regions.size()).arg(written);
+            if (outcome.padded != 0)
+                said << tr("%1 bytes of no-ops after it").arg(outcome.padded);
             said << (outcome.recompiled.isEmpty()
                          ? tr("nothing recompiled")
                          : tr("recompiled: %1").arg(listed(outcome.recompiled)));

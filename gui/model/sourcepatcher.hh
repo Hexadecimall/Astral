@@ -27,6 +27,9 @@ struct SourcePatchOutcome {
     QString diagnostics;
     int errors = 0;
     int regions = 0;
+    // Bytes of no-ops written after a recompiled body, so nothing stale is
+    // left between it and whatever follows.
+    qint64 padded = 0;
     qint64 bytes = 0;
     QStringList recompiled;
     QStringList untouched;
@@ -54,7 +57,7 @@ public:
     // which is what the editor holds now. Queues whatever has to change. An
     // empty `before` means no trustworthy starting point, and the whole
     // function is compiled instead.
-    SourcePatchOutcome patch(const QString &before, const QString &after,
+    SourcePatchOutcome patch(const QString &before, const QString &given,
                              const QString &functionName, quint64 address, quint64 span,
                              Language language = Language::C);
 

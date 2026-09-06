@@ -78,6 +78,7 @@ set(ASTRAL_LIB_SRC
     ${RUNTIME_EMBEDDED}
     ${KNOWLEDGE_EMBEDDED}
     src/knowledge/knowledge.cc
+    src/knowledge/novalibs.cc
     src/knowledge/naming.cc
     src/core/paths.cc
     src/knowledge/contribute.cc
