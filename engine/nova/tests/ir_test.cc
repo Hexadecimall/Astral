@@ -1,0 +1,256 @@
+// The intermediate representation: what it says about a processor, and what it
+// refuses to accept about a function.
+//
+// The first half reads real specifications rather than a table written here,
+// because the whole point of describing a target instead of listing one is that
+// the answer comes from the same files the decompiler already reads. The
+// processors checked are the awkward ones: the machine whose instructions and
+// data disagree about byte order, the sixty-four bit machine with four-byte
+// pointers, and the ones whose addresses are neither thirty-two nor sixty-four
+// bits wide. A representation that gets those right gets the ordinary ones
+// right for free.
+//
+// The second half feeds the checker functions that are wrong in each of the
+// ways a function can be wrong, because a check that only ever sees correct
+// input is not a check.
+#include "ir.hh"
+
+#include "session.hh"
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+using namespace astral_internal;
+using namespace astral_internal::nova;
+
+namespace {
+
+int passed = 0;
+int failed = 0;
+
+void report(bool ok, const std::string &what, const std::string &saw)
+{
+    if (ok) {
+        ++passed;
+        std::printf("ok   %s\n", what.c_str());
+        return;
+    }
+    ++failed;
+    std::printf("FAIL %s\n     %s\n", what.c_str(), saw.c_str());
+}
+
+void expect(bool ok, const std::string &what) { report(ok, what, "it was not so"); }
+
+void expect_equal(long long got, long long wanted, const std::string &what)
+{
+    char saw[128];
+    std::snprintf(saw, sizeof saw, "got %lld, wanted %lld", got, wanted);
+    report(got == wanted, what, saw);
+}
+
+// Reads a target, reporting the failure rather than asserting, so one missing
+// specification does not hide every other answer.
+bool target_for(const std::string &language_id, ir::Target &target)
+{
+    std::string error;
+    if (ir::Target::from_language_id(language_id, target, error)) {
+        return true;
+    }
+    report(false, "reads " + language_id, error);
+    return false;
+}
+
+void check_targets()
+{
+    ir::Target target;
+
+    // Instructions little-endian, data big-endian. One flag cannot hold this,
+    // which is the reason there are two.
+    if (target_for("ARM:LEBE:32:v8LEInstruction", target)) {
+        expect(!target.instruction_big_endian,
+               "ARM LEBE reads its instructions little-endian");
+        expect(target.data_big_endian, "ARM LEBE reads its data big-endian");
+    }
+
+    // The ordinary case, where both halves agree.
+    if (target_for("x86:LE:64:default", target)) {
+        expect(!target.instruction_big_endian && !target.data_big_endian,
+               "x86 is little-endian throughout");
+        expect_equal(target.address_bits, 64, "x86-64 addresses are sixty-four bits");
+        expect_equal(target.pointer_bytes, 8, "x86-64 pointers are eight bytes");
+    }
+
+    if (target_for("MIPS:BE:64:default", target)) {
+        expect(target.instruction_big_endian && target.data_big_endian,
+               "big-endian MIPS is big-endian throughout");
+    }
+
+    // Sixteen bits, which nothing that assumes a machine word is eight bytes
+    // will get right.
+    if (target_for("z80:LE:16:default", target)) {
+        expect_equal(target.address_bits, 16, "a z80 addresses sixteen bits");
+        expect_equal(target.pointer_bytes, 2, "a z80 pointer is two bytes");
+    }
+
+    // Twenty-four, which is not a whole number of anything convenient and is
+    // why the byte count rounds up rather than dividing.
+    if (target_for("PIC-24F:LE:24:default", target)) {
+        expect_equal(target.address_bits, 24, "a PIC-24 addresses twenty-four bits");
+        expect_equal(target.pointer_bytes, 3, "a PIC-24 pointer is three bytes");
+    }
+
+    // A language id with a compiler on the end names the same language.
+    {
+        ir::Target with_compiler;
+        std::string error;
+        const bool read = ir::Target::from_language_id("x86:LE:64:default:gcc", with_compiler,
+                                                       error);
+        report(read && with_compiler.language_id == "x86:LE:64:default",
+               "an id with a compiler on the end still names its language",
+               read ? with_compiler.language_id : error);
+    }
+
+    // Something that is not a processor is refused, and says so.
+    {
+        ir::Target nothing;
+        std::string error;
+        const bool read = ir::Target::from_language_id("Nonesuch:LE:32:default", nothing, error);
+        report(!read && !error.empty(), "a processor with no specification is refused",
+               read ? "it was accepted" : "it gave no reason");
+    }
+}
+
+// A function that does nothing but return, which is the smallest correct one.
+ir::Function returning_function()
+{
+    ir::Function function;
+    function.name = "returns";
+    function.entry = 1;
+
+    ir::Block block;
+    block.identifier = 1;
+
+    ir::Instruction constant;
+    constant.operation = ir::Operation::Constant;
+    constant.result.identifier = 10;
+    constant.immediate = 7;
+    constant.width = 4;
+    block.instructions.push_back(constant);
+
+    ir::Instruction leave;
+    leave.operation = ir::Operation::Return;
+    leave.arguments.push_back(constant.result);
+    block.instructions.push_back(leave);
+
+    function.blocks.push_back(block);
+    return function;
+}
+
+void check_verification()
+{
+    {
+        ir::Function function = returning_function();
+        std::vector<std::string> problems;
+        report(ir::verify(function, problems), "a function that only returns is accepted",
+               problems.empty() ? "" : problems.front());
+    }
+
+    // A value given twice makes every question about where it lives
+    // unanswerable, so it is the first thing checked.
+    {
+        ir::Function function = returning_function();
+        ir::Instruction again;
+        again.operation = ir::Operation::Constant;
+        again.result.identifier = 10;  // already given
+        again.width = 4;
+        function.blocks[0].instructions.insert(function.blocks[0].instructions.begin(), again);
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "a value given twice is refused");
+    }
+
+    // Reading something nothing gives is what becomes machine code for a
+    // register nobody wrote to.
+    {
+        ir::Function function = returning_function();
+        function.blocks[0].instructions.back().arguments[0].identifier = 999;
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "reading a value nothing gives is refused");
+    }
+
+    // A block has to have a way out.
+    {
+        ir::Function function = returning_function();
+        function.blocks[0].instructions.pop_back();
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "a block with no way out is refused");
+    }
+
+    // And only one, at the end.
+    {
+        ir::Function function = returning_function();
+        ir::Instruction extra;
+        extra.operation = ir::Operation::Return;
+        function.blocks[0].instructions.insert(function.blocks[0].instructions.begin(), extra);
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "leaving before the end of a block is refused");
+    }
+
+    // Going somewhere that does not exist.
+    {
+        ir::Function function = returning_function();
+        function.blocks[0].instructions.back().operation = ir::Operation::Jump;
+        function.blocks[0].instructions.back().successors.push_back(77);
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "going to a block that does not exist is refused");
+    }
+
+    // The entry has to be a block that is there.
+    {
+        ir::Function function = returning_function();
+        function.entry = 42;
+        std::vector<std::string> problems;
+        expect(!ir::verify(function, problems), "an entry that is not a block is refused");
+    }
+}
+
+// A width of zero asks for the target's own word, which is the only way an
+// instruction can be written once and mean the right thing on a z80 and on
+// an x86-64.
+void check_widths()
+{
+    ir::Instruction instruction;
+    instruction.width = 0;
+
+    ir::Target wide;
+    wide.word_bytes = 8;
+    expect_equal(ir::width_of(instruction, wide), 8, "an unsaid width is the target's word");
+
+    ir::Target narrow;
+    narrow.word_bytes = 2;
+    expect_equal(ir::width_of(instruction, narrow), 2,
+                 "the same instruction is two bytes wide on a two-byte machine");
+
+    instruction.width = 4;
+    expect_equal(ir::width_of(instruction, narrow), 4, "a width that was said is kept");
+}
+
+} // namespace
+
+int main()
+{
+    // The library's own start-up, rather than Ghidra's: the specifications ship
+    // in a flat tree here, so the directories holding them are collected before
+    // the decompiler is handed them, and that is what `initialize` does.
+    if (initialize(nullptr) != ASTRAL_OK) {
+        std::printf("FAIL no compiled specifications were found; set ASTRAL_SPECS\n");
+        return 1;
+    }
+
+    check_targets();
+    check_verification();
+    check_widths();
+
+    std::printf("\n%d passed, %d failed\n", passed, failed);
+    return failed == 0 ? 0 : 1;
+}
