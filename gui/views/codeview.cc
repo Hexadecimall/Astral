@@ -1,7 +1,13 @@
 #include "views/codeview.hh"
 #include "theme/theme.hh"
 
+#include <QAbstractItemView>
+#include <QCompleter>
 #include <QFontDatabase>
+#include <QKeyEvent>
+#include <QScrollBar>
+#include <QSet>
+#include <QStringListModel>
 #include <QContextMenuEvent>
 
 #include <algorithm>
@@ -64,6 +70,425 @@ void CodeView::setEditable(bool editable)
     setReadOnly(!editable);
     setTextInteractionFlags(editable ? Qt::TextEditorInteraction
                                      : Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
+}
+
+
+// ------------------------------------------------------------------- editing
+//
+// What a person expects of any editor, and what recovered code needs more than
+// most: the brackets match because they were written as a pair, the indent
+// carries because nobody wants to press space four times, and the names on
+// offer are the ones already in the document rather than a dictionary.
+
+namespace {
+
+// The closing character for an opening one, or nul when it does not open
+// anything. Quotes close themselves.
+QChar closerFor(QChar opener)
+{
+    switch (opener.unicode()) {
+    case '(': return QLatin1Char(')');
+    case '[': return QLatin1Char(']');
+    case '{': return QLatin1Char('}');
+    case '"': return QLatin1Char('"');
+    case '\'': return QLatin1Char('\'');
+    default: return QChar();
+    }
+}
+
+bool isCloser(QChar c)
+{
+    return c == QLatin1Char(')') || c == QLatin1Char(']') || c == QLatin1Char('}') ||
+           c == QLatin1Char('"') || c == QLatin1Char('\'');
+}
+
+// A name character, so the character before the cursor decides whether a quote
+// is opening a string or ending an identifier that happens to end in one.
+bool isNameChar(QChar c) { return c.isLetterOrNumber() || c == QLatin1Char('_'); }
+
+QString indentOf(const QString &line)
+{
+    int at = 0;
+    while (at < line.size() && (line.at(at) == QLatin1Char(' ') || line.at(at) == QLatin1Char('\t')))
+        ++at;
+    return line.left(at);
+}
+
+const QStringList &wordsFor(CodeView::Language language)
+{
+    static const QStringList none;
+    static const QStringList c = {
+        QStringLiteral("break"), QStringLiteral("case"), QStringLiteral("char"),
+        QStringLiteral("const"), QStringLiteral("continue"), QStringLiteral("default"),
+        QStringLiteral("do"), QStringLiteral("double"), QStringLiteral("else"),
+        QStringLiteral("enum"), QStringLiteral("extern"), QStringLiteral("float"),
+        QStringLiteral("for"), QStringLiteral("goto"), QStringLiteral("if"),
+        QStringLiteral("int"), QStringLiteral("long"), QStringLiteral("return"),
+        QStringLiteral("short"), QStringLiteral("signed"), QStringLiteral("sizeof"),
+        QStringLiteral("static"), QStringLiteral("struct"), QStringLiteral("switch"),
+        QStringLiteral("typedef"), QStringLiteral("union"), QStringLiteral("unsigned"),
+        QStringLiteral("void"), QStringLiteral("while"),
+        QStringLiteral("int8_t"), QStringLiteral("int16_t"), QStringLiteral("int32_t"),
+        QStringLiteral("int64_t"), QStringLiteral("uint8_t"), QStringLiteral("uint16_t"),
+        QStringLiteral("uint32_t"), QStringLiteral("uint64_t"), QStringLiteral("bool"),
+        QStringLiteral("memcpy"), QStringLiteral("memset"), QStringLiteral("printf"),
+        QStringLiteral("puts"), QStringLiteral("strcmp"), QStringLiteral("strlen"),
+        QStringLiteral("malloc"), QStringLiteral("free"),
+    };
+    static const QStringList nova = {
+        QStringLiteral("func"), QStringLiteral("var"), QStringLiteral("val"),
+        QStringLiteral("stack"), QStringLiteral("asm"), QStringLiteral("call"),
+        QStringLiteral("return"), QStringLiteral("if"), QStringLiteral("else"),
+        QStringLiteral("while"), QStringLiteral("for"), QStringLiteral("loop"),
+        QStringLiteral("break"), QStringLiteral("continue"), QStringLiteral("switch"),
+        QStringLiteral("case"), QStringLiteral("as"), QStringLiteral("true"),
+        QStringLiteral("false"), QStringLiteral("null"),
+        QStringLiteral("i8"), QStringLiteral("i16"), QStringLiteral("i32"), QStringLiteral("i64"),
+        QStringLiteral("u8"), QStringLiteral("u16"), QStringLiteral("u32"), QStringLiteral("u64"),
+        QStringLiteral("f32"), QStringLiteral("f64"), QStringLiteral("bool"),
+        QStringLiteral("void"), QStringLiteral("char"),
+        QStringLiteral("unknown8"), QStringLiteral("unknown16"),
+        QStringLiteral("unknown32"), QStringLiteral("unknown64"),
+    };
+    switch (language) {
+    case CodeView::Language::C: return c;
+    case CodeView::Language::Nova: return nova;
+    default: return none;
+    }
+}
+
+} // namespace
+
+void CodeView::setLanguage(Language language)
+{
+    language_ = language;
+}
+
+void CodeView::setKnownNames(const QStringList &names)
+{
+    knownNames_ = names;
+}
+
+// Everything worth offering, in one list: what the language calls things, what
+// the program calls things, and every name already written in this document -
+// which for recovered code is most of what anyone wants to type.
+QStringList CodeView::completionWords() const
+{
+    QSet<QString> words;
+    for (const QString &word : wordsFor(language_))
+        words.insert(word);
+    for (const QString &name : knownNames_)
+        words.insert(name);
+    static const QRegularExpression name(QStringLiteral("[A-Za-z_][A-Za-z0-9_]{2,}"));
+    QRegularExpressionMatchIterator it = name.globalMatch(toPlainText());
+    while (it.hasNext())
+        words.insert(it.next().captured());
+    QStringList sorted(words.begin(), words.end());
+    std::sort(sorted.begin(), sorted.end());
+    return sorted;
+}
+
+QString CodeView::prefixUnderCursor() const
+{
+    QTextCursor cursor = textCursor();
+    const QString line = cursor.block().text();
+    int at = cursor.positionInBlock();
+    int start = at;
+    while (start > 0 && isNameChar(line.at(start - 1)))
+        --start;
+    return line.mid(start, at - start);
+}
+
+void CodeView::insertCompletion(const QString &completion)
+{
+    QTextCursor cursor = textCursor();
+    const int extra = completion.size() - completer_->completionPrefix().size();
+    cursor.insertText(completion.right(extra));
+    setTextCursor(cursor);
+}
+
+// The list is rebuilt each time it is asked for. A document being edited is a
+// document whose names are changing, and an offer of a name that was deleted a
+// minute ago is worse than no offer.
+void CodeView::showCompletions()
+{
+    if (completer_ == nullptr) {
+        completer_ = new QCompleter(this);
+        completer_->setWidget(this);
+        completer_->setCompletionMode(QCompleter::PopupCompletion);
+        completer_->setCaseSensitivity(Qt::CaseInsensitive);
+        connect(completer_, QOverload<const QString &>::of(&QCompleter::activated), this,
+                &CodeView::insertCompletion);
+    }
+    const QString prefix = prefixUnderCursor();
+    if (prefix.size() < 2) {
+        completer_->popup()->hide();
+        return;
+    }
+    completer_->setModel(new QStringListModel(completionWords(), completer_));
+    completer_->setCompletionPrefix(prefix);
+    if (completer_->completionCount() == 0 ||
+        (completer_->completionCount() == 1 && completer_->currentCompletion() == prefix)) {
+        completer_->popup()->hide();
+        return;
+    }
+    completer_->popup()->setCurrentIndex(completer_->completionModel()->index(0, 0));
+    QRect where = cursorRect();
+    where.setWidth(completer_->popup()->sizeHintForColumn(0) +
+                   completer_->popup()->verticalScrollBar()->sizeHint().width());
+    completer_->complete(where);
+}
+
+// An opening bracket is written as a pair, so what is opened is closed. Over a
+// selection the pair goes around it rather than replacing it, which is how a
+// person wraps an expression in parentheses.
+bool CodeView::closeBracket(QKeyEvent *event)
+{
+    if (event->text().size() != 1)
+        return false;
+    const QChar typed = event->text().at(0);
+    const QChar closer = closerFor(typed);
+    if (closer.isNull())
+        return false;
+    QTextCursor cursor = textCursor();
+    if (cursor.hasSelection()) {
+        const QString selected = cursor.selectedText();
+        cursor.insertText(typed + selected + closer);
+        return true;
+    }
+    // A quote right after a name is an apostrophe in someone's identifier, or
+    // the end of a string being retyped; either way it is not opening one.
+    const QString line = cursor.block().text();
+    const int at = cursor.positionInBlock();
+    if (closer == typed && at > 0 && isNameChar(line.at(at - 1)))
+        return false;
+    // Nor is a bracket opened in front of a name, where what follows would end
+    // up inside it.
+    if (at < line.size() && isNameChar(line.at(at)))
+        return false;
+    cursor.insertText(QString(typed) + closer);
+    cursor.movePosition(QTextCursor::PreviousCharacter);
+    setTextCursor(cursor);
+    return true;
+}
+
+// Typing the closer that is already there steps over it instead of writing a
+// second one, so a pair written by the editor closes the way a person expects.
+bool CodeView::stepOverClose(QKeyEvent *event)
+{
+    if (event->text().size() != 1)
+        return false;
+    const QChar typed = event->text().at(0);
+    if (!isCloser(typed))
+        return false;
+    QTextCursor cursor = textCursor();
+    if (cursor.hasSelection())
+        return false;
+    const QString line = cursor.block().text();
+    const int at = cursor.positionInBlock();
+    if (at >= line.size() || line.at(at) != typed)
+        return false;
+    cursor.movePosition(QTextCursor::NextCharacter);
+    setTextCursor(cursor);
+    return true;
+}
+
+// A new line starts where the last one did. After a brace it starts one level
+// further in, and a brace waiting on the other side of the cursor is put on a
+// line of its own, so the block is opened complete.
+bool CodeView::openLine(QKeyEvent *event)
+{
+    if (event->key() != Qt::Key_Return && event->key() != Qt::Key_Enter)
+        return false;
+    if (event->modifiers() != Qt::NoModifier && event->modifiers() != Qt::KeypadModifier)
+        return false;
+    QTextCursor cursor = textCursor();
+    const QString line = cursor.block().text();
+    const int at = cursor.positionInBlock();
+    const QString indent = indentOf(line);
+    const QString before = line.left(at).trimmed();
+    const QString after = line.mid(at);
+    const bool opens = before.endsWith(QLatin1Char('{'));
+    const QString deeper = indent + QStringLiteral("    ");
+
+    cursor.beginEditBlock();
+    if (opens && after.trimmed().startsWith(QLatin1Char('}'))) {
+        cursor.insertText(QStringLiteral("\n") + deeper + QStringLiteral("\n") + indent);
+        cursor.movePosition(QTextCursor::PreviousBlock);
+        cursor.movePosition(QTextCursor::EndOfBlock);
+    } else {
+        cursor.insertText(QStringLiteral("\n") + (opens ? deeper : indent));
+    }
+    cursor.endEditBlock();
+    setTextCursor(cursor);
+    return true;
+}
+
+// A closing brace belongs one level out from what it closes, so typing it on a
+// line holding nothing else moves that line back rather than leaving the brace
+// wherever the indent happened to be.
+bool CodeView::outdentClose(QKeyEvent *event)
+{
+    if (event->text() != QStringLiteral("}"))
+        return false;
+    QTextCursor cursor = textCursor();
+    if (cursor.hasSelection())
+        return false;
+    const QString line = cursor.block().text();
+    const int at = cursor.positionInBlock();
+    if (!line.left(at).trimmed().isEmpty())
+        return false;
+    const QString indent = indentOf(line);
+    if (indent.size() < 4)
+        return false;
+    cursor.beginEditBlock();
+    cursor.movePosition(QTextCursor::StartOfBlock);
+    cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 4);
+    cursor.removeSelectedText();
+    cursor.movePosition(QTextCursor::EndOfBlock);
+    cursor.insertText(QStringLiteral("}"));
+    cursor.endEditBlock();
+    setTextCursor(cursor);
+    return true;
+}
+
+// Erasing the opening half of an empty pair erases both. The pair was written
+// by one keystroke, so it comes back out on one.
+bool CodeView::eraseEmptyPair(QKeyEvent *event)
+{
+    if (event->key() != Qt::Key_Backspace || event->modifiers() != Qt::NoModifier)
+        return false;
+    QTextCursor cursor = textCursor();
+    if (cursor.hasSelection())
+        return false;
+    const QString line = cursor.block().text();
+    const int at = cursor.positionInBlock();
+    if (at == 0 || at >= line.size())
+        return false;
+    if (closerFor(line.at(at - 1)) != line.at(at))
+        return false;
+    cursor.beginEditBlock();
+    cursor.movePosition(QTextCursor::PreviousCharacter);
+    cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, 2);
+    cursor.removeSelectedText();
+    cursor.endEditBlock();
+    setTextCursor(cursor);
+    return true;
+}
+
+// Tab is four spaces, because that is what the emitter writes and a document
+// that mixes the two lines up under one font and not under another. Over a
+// selection it moves the whole block, and with shift it moves it back.
+bool CodeView::indentBySpaces(QKeyEvent *event)
+{
+    const bool forward = event->key() == Qt::Key_Tab;
+    const bool back = event->key() == Qt::Key_Backtab ||
+                      (event->key() == Qt::Key_Tab &&
+                       (event->modifiers() & Qt::ShiftModifier) != 0);
+    if (!forward && !back)
+        return false;
+
+    QTextCursor cursor = textCursor();
+    if (!cursor.hasSelection() && forward && !back) {
+        // Round up to the next stop, so a tab lands where the next one would.
+        const int column = cursor.positionInBlock();
+        cursor.insertText(QString(4 - column % 4, QLatin1Char(' ')));
+        setTextCursor(cursor);
+        return true;
+    }
+
+    const int start = cursor.selectionStart();
+    const int end = cursor.selectionEnd();
+    cursor.beginEditBlock();
+    cursor.setPosition(start);
+    const int first = cursor.blockNumber();
+    cursor.setPosition(end);
+    const int last = cursor.blockNumber();
+    for (int number = first; number <= last; ++number) {
+        QTextCursor line(document()->findBlockByNumber(number));
+        if (back) {
+            const QString text = line.block().text();
+            int spaces = 0;
+            while (spaces < 4 && spaces < text.size() && text.at(spaces) == QLatin1Char(' '))
+                ++spaces;
+            if (spaces == 0)
+                continue;
+            line.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor, spaces);
+            line.removeSelectedText();
+        } else {
+            line.insertText(QStringLiteral("    "));
+        }
+    }
+    cursor.endEditBlock();
+    return true;
+}
+
+void CodeView::keyPressEvent(QKeyEvent *event)
+{
+    if (isReadOnly()) {
+        QPlainTextEdit::keyPressEvent(event);
+        return;
+    }
+
+    // While the list is up it owns the keys that move through it and the ones
+    // that decide, and the view sees neither.
+    if (completer_ != nullptr && completer_->popup()->isVisible()) {
+        switch (event->key()) {
+        case Qt::Key_Enter:
+        case Qt::Key_Return:
+        case Qt::Key_Tab:
+            insertCompletion(completer_->currentCompletion());
+            completer_->popup()->hide();
+            event->accept();
+            return;
+        case Qt::Key_Escape:
+            completer_->popup()->hide();
+            event->accept();
+            return;
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            event->ignore();
+            return;
+        default:
+            break;
+        }
+    }
+
+    // Asked for by name, whatever is under the cursor.
+    const bool asked = event->key() == Qt::Key_Space &&
+                       (event->modifiers() & Qt::ControlModifier) != 0;
+    if (asked) {
+        showCompletions();
+        event->accept();
+        return;
+    }
+
+    if (eraseEmptyPair(event) || openLine(event) || outdentClose(event) ||
+        indentBySpaces(event) || stepOverClose(event) || closeBracket(event)) {
+        event->accept();
+        if (completer_ != nullptr && completer_->popup()->isVisible())
+            completer_->popup()->hide();
+        return;
+    }
+
+    QPlainTextEdit::keyPressEvent(event);
+
+    // Offered as the name is typed, never for the first letter: one letter
+    // matches most of the document and the list would be noise.
+    if (!event->text().isEmpty() && (event->text().at(0).isLetterOrNumber() ||
+                                     event->text().at(0) == QLatin1Char('_')))
+        showCompletions();
+    else if (completer_ != nullptr && completer_->popup()->isVisible())
+        completer_->popup()->hide();
+}
+
+void CodeView::focusInEvent(QFocusEvent *event)
+{
+    if (completer_ != nullptr)
+        completer_->setWidget(this);
+    QPlainTextEdit::focusInEvent(event);
 }
 
 std::optional<quint64> CodeView::addressAtLine(int blockNumber) const

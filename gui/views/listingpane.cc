@@ -68,6 +68,9 @@ void ListingPane::setListing(const QString &text)
 {
     pristine_ = text;
     view_->setEditable(true);
+    // Instructions, so the words offered are the ones already written here
+    // rather than a language's.
+    view_->setLanguage(CodeView::Language::Assembly);
     view_->setPlainText(text);
     status_->clear();
     updateButtons();

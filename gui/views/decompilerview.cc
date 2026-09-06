@@ -53,6 +53,7 @@ DecompilerView::DecompilerView(QWidget *parent) : QWidget(parent)
 
     code_ = new CodeView;
     code_->setEditable(true);
+    code_->setLanguage(CodeView::Language::C);
     highlighter_ = new CHighlighter(code_->document());
     layout->addWidget(code_, 1);
 
@@ -127,6 +128,9 @@ void DecompilerView::setPseudo(bool pseudo)
         delete highlighter_;
         highlighter_ = pseudo ? static_cast<QSyntaxHighlighter *>(new NovaHighlighter(code_->document()))
                               : static_cast<QSyntaxHighlighter *>(new CHighlighter(code_->document()));
+        // What is offered on completion follows what is being shown, for the
+        // same reason the colouring does.
+        code_->setLanguage(pseudo ? CodeView::Language::Nova : CodeView::Language::C);
     }
     pseudo_ = pseudo;
     // Both views are documents to work in. The engine's listing names types by

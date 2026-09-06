@@ -113,8 +113,12 @@ void SearchResults::chooseCurrent()
     QListWidgetItem *item = list_->currentItem();
     if (item == nullptr)
         return;
+    // The address is taken before the list is put away. Hiding it clears the
+    // list, which deletes every item in it, so reading the item afterwards
+    // reads memory that has been freed - and Enter on a match crashed.
+    const quint64 address = item->data(Qt::UserRole).toULongLong();
     hideMatches();
-    Q_EMIT chosen(item->data(Qt::UserRole).toULongLong());
+    Q_EMIT chosen(address);
 }
 
 bool SearchResults::eventFilter(QObject *watched, QEvent *event)
