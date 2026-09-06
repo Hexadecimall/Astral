@@ -1,6 +1,7 @@
 #include "views/terminalview.hh"
 
 #include "model/pty.hh"
+#include "model/settings.hh"
 #include "theme/theme.hh"
 
 #include <QApplication>
@@ -27,6 +28,9 @@ constexpr int kScrollback = 5000;
 // the cube and the greys every terminal agrees about.
 QColor indexedColour(int index)
 {
+    // A colour the program gave in full rather than by number.
+    if (index >= 0x1000000)
+        return QColor(QRgb(index & 0xffffff) | 0xff000000u);
     const Theme &theme = Theme::current();
     static const char *const names[16] = {
         "term.black",   "term.red",     "term.green",   "term.yellow",
@@ -75,8 +79,39 @@ int parameter(const QVector<int> &values, int at, int fallback)
 
 TerminalView::TerminalView(QWidget *parent) : QAbstractScrollArea(parent)
 {
-    QFont mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    mono.setPointSizeF(mono.pointSizeF() + 0.5);
+    // A prompt that draws bars and gauges is written in glyphs only some
+    // fonts carry, and picking one the machine does not have leaves a row of
+    // empty boxes. The setting decides; failing that, the fonts that do carry
+    // them are looked for by name, and the system's own is the last resort.
+    const Settings &settings = Settings::instance();
+    QFont mono;
+    const QString wanted = settings.stringValue(QStringLiteral("terminal.font"));
+    const QStringList families = QFontDatabase::families();
+    QString chosen;
+    if (!wanted.isEmpty() && families.contains(wanted, Qt::CaseInsensitive)) {
+        chosen = wanted;
+    } else {
+        for (const QString &name : {QStringLiteral("JetBrainsMono Nerd Font Mono"),
+                                    QStringLiteral("JetBrainsMono Nerd Font"),
+                                    QStringLiteral("MesloLGS NF"),
+                                    QStringLiteral("Hack Nerd Font Mono"),
+                                    QStringLiteral("FiraCode Nerd Font Mono"),
+                                    QStringLiteral("SauceCodePro Nerd Font Mono")}) {
+            if (families.contains(name, Qt::CaseInsensitive)) {
+                chosen = name;
+                break;
+            }
+        }
+    }
+    if (chosen.isEmpty()) {
+        mono = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+        mono.setPointSizeF(mono.pointSizeF() + 0.5);
+    } else {
+        mono = QFont(chosen);
+        mono.setPointSizeF(settings.intValue(QStringLiteral("terminal.fontSize"), 12));
+        mono.setFixedPitch(true);
+    }
+    mono.setStyleHint(QFont::Monospace);
     setFont(mono);
     const QFontMetricsF metrics(mono);
     cellWidth_ = std::max(1, qRound(metrics.horizontalAdvance(QLatin1Char('M'))));
@@ -103,25 +138,68 @@ TerminalView::TerminalView(QWidget *parent) : QAbstractScrollArea(parent)
             send(command);
         }
         // What arrives puts the view back at the bottom, which is where
-        // anything being typed is.
-        verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+        // anything being typed is - unless the reader has scrolled back, in
+        // which case dragging them away from what they are reading is the
+        // last thing to do.
+        if (following_)
+            verticalScrollBar()->setValue(verticalScrollBar()->maximum());
         viewport()->update();
     });
-    connect(pty_, &Pty::finished, this, &TerminalView::sessionEnded);
+    connect(pty_, &Pty::finished, this, [this] {
+        // A shell that ends should not leave a dead pane behind. What it said
+        // stays on the screen, and a keypress starts another.
+        notice(tr("[the shell ended - press Enter for another]"));
+        viewport()->update();
+        Q_EMIT sessionEnded();
+    });
 }
 
 // ------------------------------------------------------------------ session
 
-void TerminalView::startSession(const QString &directory, const QString &extraPath)
+void TerminalView::startSession(const QString &directory, const QString &extraPath,
+                                const QString &startup)
 {
+    directory_ = directory;
+    extraPath_ = extraPath;
+    startup_ = startup;
     QString error;
     pty_->resize(columns_, rows_);
     if (!pty_->start(directory, extraPath, error)) {
-        for (QChar c : error)
-            put(c);
-        newline();
+        notice(error);
         viewport()->update();
+        return;
     }
+    if (!startup.isEmpty())
+        sendWhenReady(startup);
+}
+
+void TerminalView::restart()
+{
+    if (running())
+        return;
+    // The cursor goes to a fresh line so the new shell's first prompt does not
+    // land on top of the notice.
+    cursorColumn_ = 0;
+    newline();
+    startSession(directory_, extraPath_, startup_);
+    viewport()->update();
+}
+
+// Astral's own words, told apart from the program's by being dim.
+void TerminalView::notice(const QString &text)
+{
+    const Cell had = pen_;
+    if (cursorColumn_ != 0) {
+        cursorColumn_ = 0;
+        newline();
+    }
+    pen_ = Cell();
+    pen_.faint = true;
+    for (QChar c : text)
+        put(c);
+    cursorColumn_ = 0;
+    newline();
+    pen_ = had;
 }
 
 bool TerminalView::running() const
@@ -622,12 +700,11 @@ void TerminalView::selectGraphic(const QVector<int> &parameters)
                 (foreground ? pen_.foreground : pen_.background) = parameters[i + 2];
                 i += 2;
             } else if (kind == 2 && i + 4 < parameters.size()) {
-                // Astral's own listings only ever ask for the sixteen, so the
-                // nearest of those is close enough and keeps one table.
-                const int r = parameters[i + 2], g = parameters[i + 3], b = parameters[i + 4];
-                const int grey = (r + g + b) / 3;
+                // A colour given outright. Anything that draws its own bars
+                // and gauges asks for these, and rounding them to the nearest
+                // of sixteen is why such a thing looked colourless.
                 (foreground ? pen_.foreground : pen_.background) =
-                    grey < 64 ? 0 : grey > 192 ? 15 : 7;
+                    directColour(parameters[i + 2], parameters[i + 3], parameters[i + 4]);
                 i += 4;
             }
             break;
@@ -657,7 +734,8 @@ QColor TerminalView::colourOf(int index, bool foreground, bool bold) const
         return c.isValid() ? c : (foreground ? QColor(220, 220, 220) : QColor(20, 20, 20));
     }
     // A bold one of the first eight is the brighter of the pair, which is what
-    // every terminal has always done.
+    // every terminal has always done. A colour given outright is already
+    // exactly what was asked for.
     if (bold && index < 8)
         index += 8;
     const QColor c = indexedColour(index);
@@ -667,6 +745,16 @@ QColor TerminalView::colourOf(int index, bool foreground, bool bold) const
 int TerminalView::topLine() const
 {
     return verticalScrollBar()->value();
+}
+
+void TerminalView::scrollContentsBy(int dx, int dy)
+{
+    Q_UNUSED(dx);
+    Q_UNUSED(dy);
+    // The whole viewport is drawn from the screen and the history, so moving
+    // the bar means painting again rather than shifting pixels about.
+    following_ = verticalScrollBar()->value() >= verticalScrollBar()->maximum();
+    viewport()->update();
 }
 
 void TerminalView::updateScrollBar()
@@ -808,6 +896,13 @@ bool TerminalView::focusNextPrevChild(bool next)
 void TerminalView::keyPressEvent(QKeyEvent *event)
 {
     if (pty_ == nullptr || !pty_->running()) {
+        // Nothing is running: a keypress asks for another shell rather than
+        // going nowhere.
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter
+            || !event->text().isEmpty()) {
+            restart();
+            return;
+        }
         QAbstractScrollArea::keyPressEvent(event);
         return;
     }

@@ -27,9 +27,14 @@ class TerminalView : public QAbstractScrollArea {
 public:
     explicit TerminalView(QWidget *parent = nullptr);
 
-    // Starts a shell. `directory` is where it begins and `extraPath` goes in
-    // front of PATH, so Astral's own command is the one found first.
-    void startSession(const QString &directory, const QString &extraPath);
+    // Starts a shell. `directory` is where it begins, `extraPath` goes in
+    // front of PATH so Astral's own command is the one found first, and
+    // `startup` is run once the shell is listening. All three are kept, so a
+    // shell that ends can be replaced by the same one.
+    void startSession(const QString &directory, const QString &extraPath,
+                      const QString &startup = QString());
+    // Starts another shell exactly like the last, keeping what is on screen.
+    void restart();
     bool running() const;
     // Types text as though it had been typed, ending with a newline.
     void send(const QString &text);
@@ -60,7 +65,11 @@ private:
     // One place on the screen: what is written there and how it looks.
     struct Cell {
         QChar ch = QLatin1Char(' ');
-        // An index into the 256-colour table, or -1 for the theme's own.
+        // What colour this is: -1 for the theme's own, 0 to 255 for a place in
+        // the table every terminal shares, and anything larger for a colour
+        // given outright, with the red, green and blue in the low three bytes.
+        // One number rather than three fields, because there is one of these
+        // for every place on the screen and every line kept behind it.
         int foreground = -1;
         int background = -1;
         bool bold = false;
@@ -104,11 +113,22 @@ private:
     int cellWidth() const { return cellWidth_; }
     int cellHeight() const { return cellHeight_; }
     void updateScrollBar();
+    // Repaints when the scrollbar moves, which nothing else does for a view
+    // that draws its own contents.
+    void scrollContentsBy(int dx, int dy) override;
+    // A colour written out in full, as one number.
+    static int directColour(int r, int g, int b)
+    {
+        return 0x1000000 | ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+    }
     // The row of the whole history the top of the viewport shows.
     int topLine() const;
     // What the selection covers, as text.
     QString selectedText() const;
     void copySelection();
+    // Writes a line of Astral's own into the screen, marked as not being the
+    // program's output.
+    void notice(const QString &text);
     // Where a point falls, in history rows and columns.
     void positionAt(const QPoint &point, int &line, int &column) const;
 
@@ -146,11 +166,18 @@ private:
     QByteArray partial_;
     // Held until the far end says something, then typed.
     QString pendingCommand_;
+    // What the last session was, so another can be started the same way.
+    QString directory_;
+    QString extraPath_;
+    QString startup_;
 
     int cellWidth_ = 8;
     int cellHeight_ = 16;
     int baseline_ = 12;
     bool focused_ = false;
+    // Whether the view is following what arrives. It stops when the reader
+    // scrolls back, or output would drag them away from what they are reading.
+    bool following_ = true;
     // Where a drag started and where it is now, in history rows and columns.
     bool selecting_ = false;
     int anchorLine_ = -1;

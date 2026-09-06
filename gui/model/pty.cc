@@ -4,6 +4,7 @@
 
 #include <cerrno>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -92,6 +93,16 @@ void Pty::readReady()
     for (;;) {
         const ssize_t got = ::read(master_, buffer, sizeof buffer);
         if (got > 0) {
+            // Everything the far end says, kept byte for byte when asked. A
+            // terminal is only ever wrong about what it was told, so what it
+            // was told is the thing worth being able to look at.
+            static const QByteArray log = qgetenv("ASTRAL_TERMINAL_LOG");
+            if (!log.isEmpty()) {
+                if (FILE *f = ::fopen(log.constData(), "ab")) {
+                    ::fwrite(buffer, 1, static_cast<size_t>(got), f);
+                    ::fclose(f);
+                }
+            }
             Q_EMIT output(QByteArray(buffer, static_cast<int>(got)));
             // A program producing without pause would otherwise keep the
             // window from ever painting.
