@@ -453,6 +453,59 @@ void check_it_computes_what_the_source_said()
     }
 }
 
+
+// The shapes that are not a straight line: choosing between many, and going
+// somewhere by name.
+void check_choosing_and_going()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+    const char *picking =
+        "func pick(@w0): i32 {\n"
+        "  match (w0) {\n"
+        "    1 { return 100; }\n"
+        "    2 { return 200; }\n"
+        "    else { return 900; }\n"
+        "  }\n"
+        "}\n";
+
+    struct Case {
+        uint64_t given;
+        uint64_t wanted;
+        const char *what;
+    };
+    const Case cases[] = {
+        {1, 100, "a match takes the arm whose value it is"},
+        {2, 200, "and the next arm when it is that one instead"},
+        {9, 900, "and the else arm when it is none of them"},
+    };
+    for (const Case &one : cases) {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(picking, arm, {{"w0", one.given}}, value, why);
+        report(ran && value == one.wanted, one.what,
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A goto reaches a label written after it, which is the case that needs the
+    // block to exist before it has been reached. The statement in between can
+    // never run, and has to go somewhere anyway.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_for(
+            "func jumps(): i32 {\n"
+            "  goto done;\n"
+            "  return 1;\n"
+            "  label done:\n"
+            "  return 7;\n"
+            "}\n",
+            arm, {}, value, why);
+        report(ran && value == 7,
+               "a goto reaches a label written after it, past a statement that cannot run",
+               ran ? "got " + std::to_string(value) : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -468,6 +521,7 @@ int main()
     check_a_pinned_value_is_its_register();
     check_raw_is_refused();
     check_it_computes_what_the_source_said();
+    check_choosing_and_going();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

@@ -114,6 +114,13 @@ private:
     bool do_while_statement(const Statement &statement);
     bool loop_statement(const Statement &statement);
     bool leave_loop(const Statement &statement, bool to_the_end);
+    bool match_statement(const Statement &statement);
+    bool label_statement(const Statement &statement);
+    bool goto_statement(const Statement &statement);
+
+    // A block written under a name, made the first time the name is mentioned
+    // whether that is the label or a goto reaching forward to it.
+    uint32_t block_for_label(const std::string &name);
     bool return_statement(const Statement &statement);
     bool assembly(const Statement &statement);
 
@@ -147,6 +154,11 @@ private:
         uint32_t after = 0;  // where `break` goes
     };
     std::vector<Loop> loops_;
+
+    // Blocks that have names, because a goto can reach one before it has been
+    // written. The block is made when the name is first mentioned and filled in
+    // when the label itself is reached.
+    std::map<std::string, uint32_t> labels_;
 
     int64_t next_offset_ = 0;
     bool failed_ = false;
@@ -418,7 +430,16 @@ ir::Value Lowerer::expression(const Expression &expression)
 bool Lowerer::compound(const Statement &statement)
 {
     for (const StatementPtr &inner : statement.body) {
-        if (inner && !this->statement(*inner))
+        if (!inner)
+            continue;
+        // Statements after a return or a goto are still statements, and they
+        // still have to go somewhere: control cannot arrive at them, but the
+        // representation has no way to say "nowhere" and a block that has been
+        // left cannot be added to. A block nothing jumps to says exactly that,
+        // and it is what a later pass will drop.
+        if (!builder_->block_is_open())
+            builder_->block();
+        if (!this->statement(*inner))
             return false;
     }
     return true;
@@ -605,6 +626,110 @@ bool Lowerer::leave_loop(const Statement &statement, bool to_the_end)
     return true;
 }
 
+uint32_t Lowerer::block_for_label(const std::string &name)
+{
+    auto found = labels_.find(name);
+    if (found != labels_.end())
+        return found->second;
+    // A goto can name a label that has not been written yet, so the block is
+    // made when the name is first mentioned rather than when it is reached.
+    const uint32_t where = builder_->current();
+    const uint32_t made = builder_->block();
+    builder_->resume(where);
+    labels_.emplace(name, made);
+    return made;
+}
+
+// A label is a place control can arrive at from somewhere else, which is a
+// block. Falling into it from the statement before is a jump like any other.
+bool Lowerer::label_statement(const Statement &statement)
+{
+    const uint32_t named = block_for_label(statement.name);
+    if (builder_->block_is_open())
+        builder_->jump(named);
+    builder_->resume(named);
+    return true;
+}
+
+bool Lowerer::goto_statement(const Statement &statement)
+{
+    builder_->jump(block_for_label(statement.name));
+    return true;
+}
+
+// match (subject) { a, b: ... else: ... }
+//
+// Each arm is a run of comparisons against the subject, any of which taking it.
+// Written out this way rather than as a table because a table is an
+// optimisation and this is a lowering: what it has to be is right, and a
+// comparison per value is right on every processor.
+bool Lowerer::match_statement(const Statement &statement)
+{
+    if (!statement.value) {
+        complain(statement.where, "a match with nothing to match on");
+        return false;
+    }
+    const ir::Value subject = expression(*statement.value);
+    if (!subject.is_valid())
+        return false;
+
+    // Where the first test goes, taken before anything is opened: opening a
+    // block makes it the one being written into, so asking afterwards would
+    // put the tests inside the last arm's body.
+    uint32_t testing = builder_->current();
+
+    const uint32_t after = builder_->block();
+
+    // The arm bodies, and the block each arm's test starts in. `else` has no
+    // values and is where control goes when nothing else took it.
+    uint32_t otherwise = after;
+    std::vector<std::pair<const MatchArm *, uint32_t>> bodies;
+    for (const MatchArm &arm : statement.arms) {
+        const uint32_t body = builder_->block();
+        bodies.emplace_back(&arm, body);
+        if (arm.values.empty())
+            otherwise = body;
+    }
+
+    // The tests, each falling through to the next when it does not take.
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        const MatchArm &arm = *bodies[i].first;
+        if (arm.values.empty())
+            continue;  // else is not tested, it is where the tests run out
+        for (const ExpressionPtr &value : arm.values) {
+            if (!value)
+                continue;
+            builder_->resume(testing);
+            const ir::Value against = expression(*value);
+            if (!against.is_valid())
+                return false;
+            const int width = width_of(subject);
+            const ir::Value same =
+                builder_->binary(ir::Operation::Equal, subject, against, width, false);
+            const uint32_t next = builder_->block();
+            builder_->resume(testing);
+            builder_->branch(same, bodies[i].second, next);
+            testing = next;
+        }
+    }
+
+    // Nothing took it, so it goes to the else arm or past the whole thing.
+    builder_->resume(testing);
+    if (builder_->block_is_open())
+        builder_->jump(otherwise);
+
+    for (const auto &one : bodies) {
+        builder_->resume(one.second);
+        if (one.first->body && !this->statement(*one.first->body))
+            return false;
+        if (builder_->block_is_open())
+            builder_->jump(after);
+    }
+
+    builder_->resume(after);
+    return true;
+}
+
 bool Lowerer::return_statement(const Statement &statement)
 {
     if (!statement.value) {
@@ -655,6 +780,12 @@ bool Lowerer::statement(const Statement &statement)
         return leave_loop(statement, true);
     case Statement::Kind::Continue:
         return leave_loop(statement, false);
+    case Statement::Kind::Match:
+        return match_statement(statement);
+    case Statement::Kind::Label:
+        return label_statement(statement);
+    case Statement::Kind::Goto:
+        return goto_statement(statement);
     case Statement::Kind::Return:
         return return_statement(statement);
     case Statement::Kind::Asm:
@@ -673,6 +804,8 @@ bool Lowerer::function(const Function &source, ir::Function &out)
     builder_ = &builder;
     slots_.clear();
     pinned_.clear();
+    labels_.clear();
+    loops_.clear();
     next_offset_ = 0;
     failed_ = false;
 
