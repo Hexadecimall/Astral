@@ -2477,6 +2477,19 @@ void MainWindow::buildMenus()
                      this, [this] { showFunctionFacts(); });
     tools->addAction(tr("Learn Names From This Program"), this, &MainWindow::learnNames);
     tools->addSeparator();
+    // Debugging takes the window over rather than living in a tab, so this is
+    // what turns it on: the transport bar and the three docks appear, and
+    // unticking it puts the window back the way it was.
+    debuggerAction_ = tools->addAction(tr("Debugger"),
+                                       QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D), this,
+                                       [this](bool on) { setDebugging(on); });
+    debuggerAction_->setCheckable(true);
+    debuggerAction_->setChecked(debugging_);
+    tools->addAction(tr("Run Configurations..."), this, [this] {
+        if (debuggerPane_ != nullptr)
+            debuggerPane_->editConfigurations();
+    });
+    tools->addSeparator();
     tools->addAction(tr("Decompiler Settings..."), QKeySequence(Qt::CTRL | Qt::Key_Comma), this,
                      &MainWindow::showDecompilerSettings);
     tools->addSeparator();
@@ -2639,21 +2652,18 @@ void MainWindow::startTerminal()
             break;
     }
     const QString path = ahead.join(QLatin1Char(':'));
-    terminal_->startSession(directory, path);
-
-    // An interactive shell reads the user's own start-up files, and those
-    // usually put their own directories at the front of PATH, which undoes
-    // what was handed in. Saying it again once the shell is running is the
-    // only place it wins. The screen is cleared afterwards so the pane opens
-    // on a prompt rather than on plumbing.
     // A shell works out where a command lives once and remembers, so being
     // told about a new directory is not enough on its own: it has to be told
     // to look again. `hash -r` is how most say it and `rehash` is how zsh
-    // does, and asking for both is how this works in either.
-    if (terminal_->running() && !ahead.isEmpty())
-        terminal_->sendWhenReady(
-            QStringLiteral("export PATH=\"%1:$PATH\"; hash -r 2>/dev/null || rehash 2>/dev/null; clear")
-                .arg(path));
+    // does, and asking for both is how this works in either. It is handed to
+    // the session rather than typed, so a shell started again later gets it
+    // too.
+    QString startup;
+    if (!ahead.isEmpty())
+        startup = QStringLiteral(
+                      "export PATH=\"%1:$PATH\"; hash -r 2>/dev/null || rehash 2>/dev/null; clear")
+                      .arg(path);
+    terminal_->startSession(directory, path, startup);
 }
 
 void MainWindow::runTerminalHook(const QString &command)
