@@ -519,6 +519,11 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
     // used, and the register has to be one nothing is keeping anything in.
     std::vector<uint64_t> scratch;
     {
+        // The registers a call passes things in, which are the ones any
+        // instruction can name. The wider set the convention has an opinion
+        // about includes the floating-point file, and an integer instruction
+        // cannot name one of those - a value put in d10 and then added to
+        // something was every form refusing at once.
         std::vector<Storage> places;
         Storage answer;
         std::string trouble;

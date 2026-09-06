@@ -299,6 +299,37 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
         if (return_address(address_name, address, missing))
             spoken_for.insert(address.offset);
 
+        // The ones a float goes in are not the ones an integer goes in.
+        //
+        // A convention has an opinion about its floating-point registers too -
+        // it says which are preserved and which are destroyed - so asking only
+        // whether it has an opinion put d10 and d11 among the places an integer
+        // might live, and an integer instruction cannot name those. Which they
+        // are is the same question asked of the same specification, with a
+        // float where the integer was.
+        std::set<uint64_t> for_floats;
+        {
+            ghidra::PrototypePieces proto;
+            proto.model = model;
+            proto.name = "asked";
+            proto.outtype = held->types->getBase(width, ghidra::TYPE_FLOAT);
+            proto.firstVarArgSlot = -1;
+            for (int i = 0; i < 12; ++i) {
+                proto.intypes.push_back(held->types->getBase(width, ghidra::TYPE_FLOAT));
+                proto.innames.push_back(std::string());
+            }
+            std::vector<ghidra::ParameterPieces> places;
+            try {
+                model->assignParameterStorage(proto, places, true);
+                for (const ghidra::ParameterPieces &piece : places) {
+                    if (!piece.addr.isInvalid())
+                        for_floats.insert(piece.addr.getOffset());
+                }
+            } catch (ghidra::LowlevelError &) {
+                // A processor with no floating point has none to leave out.
+            }
+        }
+
         ghidra::AddrSpace *registers = held->translate->getSpaceByName("register");
         if (registers == nullptr) {
             error = "this processor keeps its registers somewhere with no name";
@@ -307,7 +338,8 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
 
         std::set<uint64_t> already;
         for (const auto &one : register_places) {
-            if (one.second.width != width || spoken_for.count(one.second.offset) != 0)
+            if (one.second.width != width || spoken_for.count(one.second.offset) != 0 ||
+                for_floats.count(one.second.offset) != 0)
                 continue;
             const ghidra::Address at(registers, one.second.offset);
             if (model->hasEffect(at, one.second.width) == ghidra::EffectRecord::unknown_effect)
