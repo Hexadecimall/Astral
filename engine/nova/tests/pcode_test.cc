@@ -624,6 +624,122 @@ void check_reaching_and_choosing()
     }
 }
 
+
+// Calling, which is the one thing a function cannot do alone.
+namespace {
+
+// Runs the named function out of a file that may hold several, so that a call
+// has something to reach.
+bool answer_from(const std::string &source, const std::string &entry,
+                 const std::string &language_id, uint64_t &value, std::string &why)
+{
+    std::vector<compiler::Diagnostic> diagnostics;
+    const std::vector<Token> tokens = tokenise(source, diagnostics);
+    Types types;
+    Unit unit;
+    if (!parse(tokens, types, unit, diagnostics)) {
+        why = "it did not parse";
+        return false;
+    }
+
+    ir::Target target;
+    if (!ir::Target::from_language_id(language_id, target, why))
+        return false;
+
+    ir::Unit lowered;
+    if (!lower_to_ir(unit, types, target, lowered, diagnostics)) {
+        why = diagnostics.empty() ? "it did not lower" : diagnostics.back().message;
+        return false;
+    }
+
+    std::vector<pcode::Sequence> written;
+    for (const ir::Function &function : lowered.functions) {
+        pcode::Sequence sequence;
+        std::vector<std::string> problems;
+        if (!pcode::to_pcode(function, lowered.target, sequence, problems)) {
+            why = problems.empty() ? "it was not written" : problems.front();
+            return false;
+        }
+        written.push_back(std::move(sequence));
+    }
+
+    pcode::Machine machine;
+    for (const pcode::Sequence &sequence : written)
+        machine.others[sequence.name] = &sequence;
+
+    for (const pcode::Sequence &sequence : written) {
+        if (sequence.name != entry)
+            continue;
+        const pcode::Answer answer = pcode::run(sequence, machine);
+        if (!answer.ok) {
+            why = answer.error;
+            return false;
+        }
+        value = answer.value;
+        return true;
+    }
+    why = "there is nothing called " + entry;
+    return false;
+}
+
+} // namespace
+
+void check_calling()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+
+    // The argument is put where the callee will look for it, and the answer
+    // comes back where the caller looks. Neither end was told the other's
+    // choice: both asked the same specification.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_from(
+            "func twice(value: i32): i32 {\n  return value + value;\n}\n"
+            "func main(): i32 {\n  return twice(21);\n}\n",
+            "main", arm, value, why);
+        report(ran && value == 42, "a call agrees with what it calls about where the argument is",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // Two arguments, so the second has to go somewhere different from the
+    // first, and in the right order.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_from(
+            "func subtract(first: i32, second: i32): i32 {\n  return first - second;\n}\n"
+            "func main(): i32 {\n  return subtract(50, 8);\n}\n",
+            "main", arm, value, why);
+        report(ran && value == 42, "two arguments go to two places, and in the order written",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // A call inside a call, which only works if the answer is taken before the
+    // registers are used again.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_from(
+            "func twice(value: i32): i32 {\n  return value + value;\n}\n"
+            "func main(): i32 {\n  return twice(twice(10));\n}\n",
+            "main", arm, value, why);
+        report(ran && value == 40, "a call whose argument is another call answers correctly",
+               ran ? "got " + std::to_string(value) : why);
+    }
+
+    // Calling something that is not there stops rather than guessing.
+    {
+        uint64_t value = 0;
+        std::string why;
+        const bool ran = answer_from("func main(): i32 {\n  return missing(1);\n}\n", "main", arm,
+                                     value, why);
+        report(!ran && why.find("nothing here called") != std::string::npos,
+               "calling something that is not there stops rather than guessing",
+               ran ? "it ran" : why);
+    }
+}
+
 } // namespace
 
 int main()
@@ -642,6 +758,7 @@ int main()
     check_choosing_and_going();
     check_counting();
     check_reaching_and_choosing();
+    check_calling();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

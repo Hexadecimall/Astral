@@ -61,6 +61,10 @@ struct Operation {
     // names an instruction rather than a block, so these are kept as the blocks
     // they were and resolved when addresses exist.
     std::vector<uint32_t> successors;
+
+    // Who is being called, for a call. A call names an address once there is
+    // one; until then the name is what there is to go on.
+    std::string callee;
 };
 
 // A block of operations, still in the order and shape the representation had.
@@ -107,6 +111,10 @@ struct Machine {
     // How many operations may run before it is called a loop that never ends.
     // A recovered function is not always a function that finishes.
     uint64_t budget = 100000;
+
+    // The other functions a call can reach, by name. A call to something not
+    // here stops rather than guessing what it would have done.
+    std::map<std::string, const Sequence *> others;
 };
 
 struct Answer {
@@ -115,6 +123,8 @@ struct Answer {
     uint64_t value = 0;      // what was returned, when something was
     std::string error;       // why it stopped, when it stopped badly
     uint64_t steps = 0;      // how many operations ran
+    // What the registers held when it stopped, which is what a caller sees.
+    std::map<uint64_t, uint64_t> registers;
 };
 
 // Runs `sequence` from its entry block and answers with what it returned.

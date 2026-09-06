@@ -233,6 +233,7 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
     case ir::Operation::Call:
         made.opcode = ghidra::CPUI_CALL;
         made.inputs = arguments;
+        made.callee = instruction.callee;
         break;
     case ir::Operation::Return:
         made.opcode = ghidra::CPUI_RETURN;
@@ -343,6 +344,8 @@ std::string to_text(const Sequence &sequence)
             if (operation.writes)
                 out << varnode_text(operation.output) << " = ";
             out << opcode_name(operation.opcode);
+            if (!operation.callee.empty())
+                out << " " << operation.callee;
             for (const Varnode &input : operation.inputs)
                 out << " " << varnode_text(input);
             for (uint32_t successor : operation.successors)
@@ -408,6 +411,9 @@ public:
             return;
         store_for(node.where)[node.offset] = narrowed(value, node.size);
     }
+
+    const std::map<uint64_t, uint64_t> &registers() const { return registers_; }
+    void take_registers(const std::map<uint64_t, uint64_t> &from) { registers_ = from; }
 
 private:
     const std::map<uint64_t, uint64_t> &store_for(Where where) const
@@ -564,10 +570,37 @@ Answer run(const Sequence &sequence, const Machine &machine)
                                                  : operation.successors[1]);
                 wrote = false;
                 break;
+            case ghidra::CPUI_CALL: {
+                // A call runs the other function over the same registers, which
+                // is what a call is: the arguments were put where the callee
+                // will look for them before this ran.
+                auto found = machine.others.find(operation.callee);
+                if (found == machine.others.end() || found->second == nullptr) {
+                    answer.error = "there is nothing here called " + operation.callee;
+                    return answer;
+                }
+                Machine inner;
+                inner.others = machine.others;
+                inner.budget = machine.budget > answer.steps ? machine.budget - answer.steps : 0;
+                inner.registers = running.registers();
+                const Answer came_back = run(*found->second, inner);
+                answer.steps += came_back.steps;
+                if (!came_back.ok) {
+                    answer.error = "in " + operation.callee + ": " + came_back.error;
+                    return answer;
+                }
+                // What it answered with goes where the caller is looking, and
+                // what it left in the registers stays there, the way a real
+                // call leaves them.
+                running.take_registers(came_back.registers);
+                made = came_back.value;
+                break;
+            }
             case ghidra::CPUI_RETURN:
                 answer.ok = true;
                 answer.returned = true;
                 answer.value = operation.inputs.empty() ? 0 : input(0);
+                answer.registers = running.registers();
                 return answer;
 
             default:

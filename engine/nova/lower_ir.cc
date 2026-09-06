@@ -81,8 +81,9 @@ struct Slot {
 
 class Lowerer {
 public:
-    Lowerer(Types &types, const ir::Target &target, std::vector<Diagnostic> &diagnostics)
-        : types_(types), target_(target), diagnostics_(diagnostics)
+    Lowerer(const Unit &unit, Types &types, const ir::Target &target,
+            std::vector<Diagnostic> &diagnostics)
+        : unit_(unit), types_(types), target_(target), diagnostics_(diagnostics)
     {
     }
 
@@ -148,6 +149,11 @@ private:
     int width_of_operands(const Expression &expression) const;
     int width_of(const ir::Value &value) const;
 
+    // What the whole file says, so a call can ask what the thing it calls
+    // answers with. The tree's own types are filled in while checking and are
+    // not there during this, and how wide the answer is decides which register
+    // it comes back in.
+    const Unit &unit_;
     Types &types_;
     const ir::Target &target_;
     std::vector<Diagnostic> &diagnostics_;
@@ -586,19 +592,64 @@ ir::Value Lowerer::call(const Expression &expression)
         return ir::Value();
     }
 
-    ir::Instruction instruction;
-    instruction.operation = ir::Operation::Call;
-    instruction.callee = expression.callee->name;
-    instruction.width = width_of_type(expression.type, target_);
+    // Each argument, and how wide it is, because where it goes depends on that.
+    std::vector<ir::Value> given;
+    std::vector<int> widths;
     for (const ExpressionPtr &argument : expression.arguments) {
         if (!argument)
             continue;
         const ir::Value lowered = this->expression(*argument);
         if (!lowered.is_valid())
             return ir::Value();
-        instruction.arguments.push_back(lowered);
+        given.push_back(lowered);
+        widths.push_back(width_of_value(argument->type, lowered.storage, target_));
     }
-    instruction.result = builder_->value(expression.type);
+
+    // How wide the answer is, taken from what the called function was declared
+    // to answer with. Guessing the machine word would ask for a register that
+    // is right by accident on a processor whose narrow registers overlap its
+    // wide ones, and wrong on one whose do not.
+    TypePtr answers = expression.type;
+    if (answers == nullptr) {
+        for (const Function &other : unit_.functions) {
+            if (other.name == expression.callee->name) {
+                answers = other.result;
+                break;
+            }
+        }
+    }
+    const int answers_with = width_of_type(answers, target_);
+    std::vector<Storage> places;
+    Storage answer_place;
+    std::string error;
+    if (!target_.calling_convention(widths, answers_with, places, answer_place, error)) {
+        complain(expression.where,
+                 "this processor's specification does not say how a call is made: " + error);
+        return ir::Value();
+    }
+
+    // The arguments are put where the callee will look for them. This is a copy
+    // into a place rather than an argument handed over: a call does not carry
+    // values, it agrees with the callee about where they already are.
+    ir::Instruction instruction;
+    instruction.operation = ir::Operation::Call;
+    instruction.callee = expression.callee->name;
+    instruction.width = answers_with;
+    for (size_t i = 0; i < given.size(); ++i) {
+        const Storage where = i < places.size() ? places[i] : Storage();
+        ir::Instruction put;
+        put.operation = ir::Operation::Copy;
+        put.width = widths[i];
+        put.arguments.push_back(given[i]);
+        put.result = builder_->value(nullptr, where);
+        const ir::Value placed = builder_->emit(std::move(put));
+        if (!placed.is_valid())
+            return ir::Value();
+        instruction.arguments.push_back(placed);
+    }
+
+    // And the answer comes back where the convention says it does.
+    instruction.result = builder_->value(answers, answer_place);
     return builder_->emit(std::move(instruction));
 }
 
@@ -1236,7 +1287,7 @@ bool lower_to_ir(const Unit &nova, Types &types, const ir::Target &target, ir::U
         if (source.body == nullptr)
             continue;  // a declaration says a function exists, not what it does
         ir::Function lowered;
-        Lowerer lowerer(types, read, diagnostics);
+        Lowerer lowerer(nova, types, read, diagnostics);
         if (!lowerer.function(source, lowered)) {
             all = false;
             continue;
