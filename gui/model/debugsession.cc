@@ -260,6 +260,132 @@ void DebugSession::callFunction(quint64 address, const QStringList &arguments)
                        .arg(wrote.isEmpty() ? QString() : tr(", wrote: %1").arg(wrote.trimmed())));
 }
 
+// The names kept, in the order a list should show them.
+QStringList DebugSession::snapshotNames() const
+{
+    QStringList names;
+    for (const auto &kept : snapshots_)
+        names << kept.first;
+    return names;
+}
+
+// A register is written where it is: the program sees the new value from the
+// next instruction on, which is what makes a wrong branch worth stepping past
+// twice.
+void DebugSession::setRegister(const QString &name, quint64 value)
+{
+    if (!ensureOpen())
+        return;
+    const QByteArray held = name.toUtf8();
+    if (astral_debugger_set_register(debugger_, held.constData(), value) != ASTRAL_OK) {
+        Q_EMIT message(tr("%1 was not set: %2")
+                           .arg(name, QString::fromUtf8(astral_last_error())));
+        return;
+    }
+    afterStop();
+}
+
+void DebugSession::writeMemory(quint64 address, const QByteArray &bytes)
+{
+    if (!ensureOpen() || bytes.isEmpty())
+        return;
+    if (astral_debugger_write(debugger_, address, bytes.constData(),
+                              static_cast<size_t>(bytes.size())) != ASTRAL_OK) {
+        Q_EMIT message(tr("0x%1 was not written: %2")
+                           .arg(address, 0, 16)
+                           .arg(QString::fromUtf8(astral_last_error())));
+        return;
+    }
+    Q_EMIT memoryWritten(address, bytes);
+    afterStop();
+}
+
+void DebugSession::addWatchpoint(quint64 address, quint64 size)
+{
+    if (size == 0)
+        return;
+    removeWatchpoint(address);
+    watchpoints_.push_back({address, size});
+    if (debugger_ != nullptr)
+        astral_debugger_add_watchpoint(debugger_, address, size);
+    Q_EMIT watchpointsChanged();
+}
+
+void DebugSession::removeWatchpoint(quint64 address)
+{
+    const auto found = std::find_if(watchpoints_.begin(), watchpoints_.end(),
+                                    [&](const DebugWatch &w) { return w.address == address; });
+    if (found == watchpoints_.end())
+        return;
+    watchpoints_.erase(found);
+    if (debugger_ != nullptr)
+        astral_debugger_remove_watchpoint(debugger_, address);
+    Q_EMIT watchpointsChanged();
+}
+
+bool DebugSession::hasWatchpoint(quint64 address) const
+{
+    return std::any_of(watchpoints_.begin(), watchpoints_.end(),
+                       [&](const DebugWatch &w) { return w.address == address; });
+}
+
+// The whole machine, kept under a name. What this buys is the question every
+// debugger session ends up asking: what would have happened if that branch had
+// gone the other way.
+void DebugSession::takeSnapshot(const QString &name)
+{
+    if (!ensureOpen())
+        return;
+    const size_t size = astral_debugger_snapshot(debugger_, nullptr, 0);
+    if (size == 0) {
+        Q_EMIT message(tr("there is nothing to snapshot yet"));
+        return;
+    }
+    QByteArray bytes(static_cast<qsizetype>(size), '\0');
+    astral_debugger_snapshot(debugger_, bytes.data(), size);
+    snapshots_[name] = bytes;
+    Q_EMIT message(tr("%1 kept (%2 bytes)").arg(name).arg(bytes.size()));
+    Q_EMIT snapshotsChanged(snapshotNames());
+}
+
+void DebugSession::restoreSnapshot(const QString &name)
+{
+    if (!ensureOpen())
+        return;
+    const auto found = snapshots_.find(name);
+    if (found == snapshots_.end())
+        return;
+    if (astral_debugger_restore(debugger_, found->second.constData(),
+                                static_cast<size_t>(found->second.size())) != ASTRAL_OK) {
+        Q_EMIT message(tr("%1 was not restored: %2")
+                           .arg(name, QString::fromUtf8(astral_last_error())));
+        return;
+    }
+    Q_EMIT message(tr("wound back to %1").arg(name));
+    afterStop();
+}
+
+void DebugSession::forgetSnapshot(const QString &name)
+{
+    if (snapshots_.erase(name) != 0)
+        Q_EMIT snapshotsChanged(snapshotNames());
+}
+
+void DebugSession::setTrace(bool on)
+{
+    if (!ensureOpen())
+        return;
+    astral_debugger_set_trace(debugger_, on ? 1 : 0);
+    Q_EMIT message(on ? tr("recording every instruction") : tr("no longer recording"));
+}
+
+void DebugSession::requestTrace()
+{
+    if (!ensureOpen())
+        return;
+    Q_EMIT traceReady(take(astral_debugger_trace(debugger_)));
+}
+
 void DebugSession::readMemory(quint64 address, int size)
 {
     if (!ensureOpen())

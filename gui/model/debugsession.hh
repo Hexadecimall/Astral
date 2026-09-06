@@ -13,6 +13,7 @@
 #include <QStringList>
 #include <QThread>
 
+#include <map>
 #include <vector>
 
 struct astral_debugger;
@@ -47,6 +48,13 @@ struct DebugFrame {
     QString function;
 };
 
+// A place the run stops when it is written. The engine calls it a watchpoint;
+// a debugger's user calls it a memory breakpoint, and they are the same thing.
+struct DebugWatch {
+    quint64 address = 0;
+    quint64 size = 0;
+};
+
 class DebugSession : public QObject {
     Q_OBJECT
 public:
@@ -58,6 +66,8 @@ public:
     const DebugState &state() const { return state_; }
     const std::vector<quint64> &breakpoints() const { return breakpoints_; }
     bool hasBreakpoint(quint64 address) const;
+    const std::vector<DebugWatch> &watchpoints() const { return watchpoints_; }
+    bool hasWatchpoint(quint64 address) const;
 
     // Asks a run in progress to stop. Safe while it is running: this is the
     // one thing the engine allows from another thread.
@@ -79,6 +89,22 @@ public Q_SLOTS:
     void toggleBreakpoint(quint64 address);
     void callFunction(quint64 address, const QStringList &arguments);
     void readMemory(quint64 address, int size);
+    // Writes a register while the program is stopped. The change is the
+    // program's from the next instruction on, which is the point.
+    void setRegister(const QString &name, quint64 value);
+    void writeMemory(quint64 address, const QByteArray &bytes);
+    // Stops the run when any byte in the range is written.
+    void addWatchpoint(quint64 address, quint64 size);
+    void removeWatchpoint(quint64 address);
+    // Everything the machine holds, kept under a name, so a run can be wound
+    // back to it and tried again with something changed.
+    void takeSnapshot(const QString &name);
+    void restoreSnapshot(const QString &name);
+    void forgetSnapshot(const QString &name);
+    // A line for every instruction from here on, which is off unless asked
+    // for: a real program is millions of them.
+    void setTrace(bool on);
+    void requestTrace();
 
 Q_SIGNALS:
     // The program stopped; everything below has been refreshed.
@@ -91,6 +117,10 @@ Q_SIGNALS:
     // what a call answered, why something was refused.
     void message(const QString &line);
     void memoryRead(quint64 address, const QByteArray &bytes);
+    void memoryWritten(quint64 address, const QByteArray &bytes);
+    void watchpointsChanged();
+    void snapshotsChanged(const QStringList &names);
+    void traceReady(const QString &text);
     void failed(const QString &error);
 
 private Q_SLOTS:
@@ -104,6 +134,7 @@ private:
     void afterStop();
     void report();
     bool ensureOpen();
+    QStringList snapshotNames() const;
 
     QString path_;
     QThread worker_;
@@ -115,6 +146,10 @@ private:
     quint64 entry_ = 0;
     DebugState state_;
     std::vector<quint64> breakpoints_;
+    std::vector<DebugWatch> watchpoints_;
+    // Kept here rather than in the engine so a snapshot outlives the run it
+    // was taken from and can be named by whoever took it.
+    std::map<QString, QByteArray> snapshots_;
 };
 
 } // namespace astral::gui
@@ -122,5 +157,6 @@ private:
 Q_DECLARE_METATYPE(astral::gui::DebugState)
 Q_DECLARE_METATYPE(std::vector<astral::gui::DebugRegister>)
 Q_DECLARE_METATYPE(std::vector<astral::gui::DebugFrame>)
+Q_DECLARE_METATYPE(std::vector<astral::gui::DebugWatch>)
 
 #endif

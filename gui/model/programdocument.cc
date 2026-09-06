@@ -136,6 +136,25 @@ std::optional<FunctionEntry> ProgramDocument::functionAt(quint64 address) const
     return std::nullopt;
 }
 
+std::optional<FunctionEntry> ProgramDocument::functionContaining(quint64 address) const
+{
+    QMutexLocker guard(&cacheLock_);
+    // The nearest start at or below the address whose body reaches it. A
+    // function with no recorded size answers for its own address only, since
+    // guessing where it ends would claim everything after it.
+    const FunctionEntry *best = nullptr;
+    for (const FunctionEntry &f : functions_) {
+        if (f.address > address)
+            continue;
+        const quint64 end = f.size != 0 ? f.address + f.size : f.address + 1;
+        if (address >= end)
+            continue;
+        if (best == nullptr || f.address > best->address)
+            best = &f;
+    }
+    return best != nullptr ? std::optional<FunctionEntry>(*best) : std::nullopt;
+}
+
 std::optional<FunctionEntry> ProgramDocument::functionNamed(const QString &name) const
 {
     QMutexLocker guard(&cacheLock_);

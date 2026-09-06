@@ -131,6 +131,10 @@ public:
 
     const std::vector<FunctionEntry> &functions() const { return functions_; }
     std::optional<FunctionEntry> functionAt(quint64 address) const;
+    // The function whose body covers this address, which is not the same
+    // question: a debugger stops in the middle of one far more often than at
+    // the top of it.
+    std::optional<FunctionEntry> functionContaining(quint64 address) const;
     std::optional<FunctionEntry> functionNamed(const QString &name) const;
     // The address a word in the source stands for: a function or symbol name,
     // one of the address-encoded names Astral emits (subE5c, g100004130,

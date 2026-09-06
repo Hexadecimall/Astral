@@ -23,9 +23,19 @@ QString keyFor(const QString &program)
 
 bool RunConfiguration::operator==(const RunConfiguration &other) const
 {
-    return name == other.name && arguments == other.arguments && input == other.input
-           && entry == other.entry && stepLimit == other.stepLimit
-           && stopAtStart == other.stopAtStart;
+    return name == other.name && engine == other.engine && arguments == other.arguments
+           && input == other.input && entry == other.entry && stepLimit == other.stepLimit
+           && stopAtStart == other.stopAtStart && trace == other.trace;
+}
+
+QString RunConfiguration::engineName(Engine engine)
+{
+    return engine == Engine::Live ? QStringLiteral("live") : QStringLiteral("emulate");
+}
+
+RunConfiguration::Engine RunConfiguration::engineFor(const QString &name)
+{
+    return name == QStringLiteral("live") ? Engine::Live : Engine::Emulate;
 }
 
 RunConfiguration RunConfigurations::byDefault()
@@ -54,6 +64,9 @@ std::vector<RunConfiguration> RunConfigurations::forProgram(const QString &progr
         one.entry = settings.stringValue(prefix + QStringLiteral(".entry"));
         one.stepLimit = static_cast<quint64>(settings.intValue(prefix + QStringLiteral(".stepLimit"), 0));
         one.stopAtStart = settings.boolValue(prefix + QStringLiteral(".stopAtStart"), true);
+        one.trace = settings.boolValue(prefix + QStringLiteral(".trace"), false);
+        one.engine = RunConfiguration::engineFor(
+            settings.stringValue(prefix + QStringLiteral(".engine")));
         out.push_back(one);
     }
     if (out.empty())
@@ -68,7 +81,8 @@ void RunConfigurations::save(const QString &program, const std::vector<RunConfig
     // Anything recorded before goes, or a shorter list would leave a tail.
     for (int i = 1; i < 64; ++i) {
         const QString prefix = QStringLiteral("%1.%2").arg(key).arg(i);
-        for (const char *field : {".name", ".arguments", ".input", ".entry", ".stepLimit", ".stopAtStart"})
+        for (const char *field : {".name", ".arguments", ".input", ".entry", ".stepLimit",
+                                  ".stopAtStart", ".trace", ".engine"})
             settings.remove(prefix + QString::fromLatin1(field));
     }
     for (size_t i = 0; i < configurations.size(); ++i) {
@@ -80,6 +94,9 @@ void RunConfigurations::save(const QString &program, const std::vector<RunConfig
         settings.setString(prefix + QStringLiteral(".entry"), one.entry);
         settings.setInt(prefix + QStringLiteral(".stepLimit"), static_cast<int>(one.stepLimit));
         settings.setBool(prefix + QStringLiteral(".stopAtStart"), one.stopAtStart);
+        settings.setBool(prefix + QStringLiteral(".trace"), one.trace);
+        settings.setString(prefix + QStringLiteral(".engine"),
+                           RunConfiguration::engineName(one.engine));
     }
 }
 

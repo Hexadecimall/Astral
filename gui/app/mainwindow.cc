@@ -3,6 +3,8 @@
 #include "app/functionspane.hh"
 #include "model/functionlistmodel.hh"
 #include "app/programtab.hh"
+#include "views/debugsettingsdialog.hh"
+#include "model/debugsettings.hh"
 #include "app/searchresults.hh"
 #include "model/decompilersettings.hh"
 #include "model/settings.hh"
@@ -849,6 +851,7 @@ void MainWindow::setDebugging(bool debugging)
         return;
     }
     debugging_ = debugging;
+    updateCornerButton();
     if (debugging) {
         // Keep the layout the program was being read in, so stopping puts it
         // back rather than leaving the window rearranged.
@@ -858,9 +861,10 @@ void MainWindow::setDebugging(bool debugging)
         // disk is put away, because none of it is the question being asked
         // while the program is running.
         static const QStringList kept = {
-            QStringLiteral("functionsPane"), QStringLiteral("listingPane"),
-            QStringLiteral("registersPane"), QStringLiteral("stackPane"),
-            QStringLiteral("programOutputPane"),
+            QStringLiteral("functionsPane"),  QStringLiteral("listingPane"),
+            QStringLiteral("registersPane"),  QStringLiteral("stackPane"),
+            QStringLiteral("programOutputPane"), QStringLiteral("memoryPane"),
+            QStringLiteral("breakpointsPane"),
         };
         // Whether a pane is showing is not the question: one tabbed behind
         // another is not visible and is still wanted back. What matters is
@@ -872,10 +876,15 @@ void MainWindow::setDebugging(bool debugging)
             hiddenForDebugging_.append(pane);
             pane->hide();
         }
-        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_}) {
+        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_, memoryDock_,
+                                  breakpointsDock_}) {
             pane->show();
             pane->raise();
         }
+        // Output is what a person looks at first, so it is the one on top of
+        // the three sharing the bottom.
+        if (outputDock_ != nullptr)
+            outputDock_->raise();
         if (listingDock_ != nullptr) {
             listingDock_->show();
             listingDock_->raise();
@@ -887,13 +896,14 @@ void MainWindow::setDebugging(bool debugging)
     } else {
         if (!beforeDebugging_.isEmpty())
             restoreState(beforeDebugging_);
-        // Whatever the restore decided, the transport and the three docks
+        // Whatever the restore decided, the transport and the debugger's docks
         // belong to a run that is over, and the panes debugging put away are
         // the ones that come back.
         for (QDockWidget *pane : hiddenForDebugging_)
             pane->show();
         hiddenForDebugging_.clear();
-        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_})
+        for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_, memoryDock_,
+                                  breakpointsDock_})
             pane->hide();
         if (debugBar_ != nullptr)
             debugBar_->hide();
@@ -1210,6 +1220,122 @@ QMenu *MainWindow::buildAnalyzeMenu()
             tab->document()->cancelAnalysis();
     });
     return menu;
+}
+
+// The corner button is one button with two jobs, because reading a program and
+// running one are two modes of the same window and the thing in the corner
+// should be whichever one applies. Analysis is what a program at rest needs;
+// once it is running, what belongs there is the run.
+void MainWindow::updateCornerButton()
+{
+    if (analyzeButton_ == nullptr || analyzeAction_ == nullptr)
+        return;
+    if (debugging_) {
+        analyzeAction_->setText(tr("Debug"));
+        analyzeAction_->setToolTip(tr("Everything about how this program is run"));
+        analyzeButton_->setMenu(buildDebugMenu());
+    } else {
+        analyzeAction_->setText(tr("Analyze"));
+        analyzeAction_->setToolTip(tr("Decompile what the settings beside this ask for"));
+        analyzeButton_->setMenu(buildAnalyzeMenu());
+    }
+}
+
+// What the Debug button drops down: which way to run it, which engine, the
+// switches worth reaching without a dialog, and the dialog for the rest.
+QMenu *MainWindow::buildDebugMenu()
+{
+    auto *menu = new QMenu(this);
+    ProgramTab *tab = currentTab();
+    const QString program = tab != nullptr ? tab->document()->path() : QString();
+    const QString chosen = RunConfigurations::chosen(program);
+
+    // The ways this program can be run, ticked at the one in use.
+    menu->addSection(tr("Run as"));
+    auto *ways = new QActionGroup(menu);
+    for (const RunConfiguration &one : RunConfigurations::forProgram(program)) {
+        QAction *action = menu->addAction(one.name);
+        action->setCheckable(true);
+        action->setChecked(one.name == chosen || (chosen.isEmpty() && one.name == QStringLiteral("Default")));
+        ways->addAction(action);
+        const QString name = one.name;
+        connect(action, &QAction::triggered, this, [this, program, name] {
+            RunConfigurations::setChosen(program, name);
+            updateCornerButton();
+        });
+    }
+
+    // Emulating or live, which decides what everything else can do.
+    menu->addSection(tr("Engine"));
+    auto *engines = new QActionGroup(menu);
+    const QString using_ = DebugSettings::value(program, chosen, QStringLiteral("engine"));
+    for (const QString &name : {QStringLiteral("emulate"), QStringLiteral("live")}) {
+        QAction *action = menu->addAction(
+            name == QStringLiteral("emulate")
+                ? tr("Emulate  ·  Astral's own machine, any binary it can read")
+                : tr("Live  ·  the real program on this machine"));
+        action->setCheckable(true);
+        action->setChecked(using_ == name);
+        engines->addAction(action);
+        connect(action, &QAction::triggered, this, [this, program, chosen, name] {
+            DebugSettings::setValue(program, chosen, QStringLiteral("engine"), name);
+            updateCornerButton();
+        });
+    }
+
+    // The handful worth reaching without opening anything.
+    menu->addSection(tr("While it runs"));
+    for (const char *name : {"stopAtStart", "stopOnFault", "stopOnUnknownCall", "trace",
+                             "followLocation"}) {
+        const DebugOption *option = DebugSettings::find(QString::fromLatin1(name));
+        if (option == nullptr)
+            continue;
+        QAction *action = menu->addAction(option->label);
+        action->setCheckable(true);
+        action->setChecked(DebugSettings::boolValue(program, chosen, option->name));
+        action->setToolTip(option->explanation);
+        const QString key = option->name;
+        connect(action, &QAction::triggered, this, [this, program, chosen, key](bool on) {
+            DebugSettings::setValue(program, chosen, key,
+                                    on ? QStringLiteral("on") : QStringLiteral("off"));
+            if (DebuggerPane *pane = debuggerPane_)
+                pane->applySettings(program, chosen);
+        });
+    }
+
+    menu->addSeparator();
+    connect(menu->addAction(tr("Snapshot the run")), &QAction::triggered, this, [this] {
+        if (debuggerPane_ != nullptr)
+            debuggerPane_->snapshotHere();
+    });
+    connect(menu->addAction(tr("Wind back to the last snapshot")), &QAction::triggered, this,
+            [this] {
+                if (debuggerPane_ != nullptr)
+                    debuggerPane_->windBack();
+            });
+    menu->addSeparator();
+    connect(menu->addAction(tr("Edit the ways to run this…")), &QAction::triggered, this, [this] {
+        if (debuggerPane_ != nullptr)
+            debuggerPane_->editConfigurations();
+    });
+    connect(menu->addAction(tr("Debug Settings…")), &QAction::triggered, this,
+            &MainWindow::showDebugSettings);
+    return menu;
+}
+
+void MainWindow::showDebugSettings()
+{
+    ProgramTab *tab = currentTab();
+    const QString program = tab != nullptr ? tab->document()->path() : QString();
+    QString chosen = RunConfigurations::chosen(program);
+    if (chosen.isEmpty())
+        chosen = QStringLiteral("Default");
+    DebugSettingsDialog dialog(program, chosen, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    if (debuggerPane_ != nullptr)
+        debuggerPane_->applySettings(program, dialog.configuration());
+    updateCornerButton();
 }
 
 void MainWindow::analyzeCurrent()
@@ -1820,6 +1946,25 @@ void MainWindow::fillContextMenu(QMenu *menu, const ContextTarget &target)
                         this, [this, markAt] {
                             debuggerPane_->toggleBreakpoint(markAt);
                             refreshBreakpointMarks();
+                        });
+        // The two things a debugger's context menu is for. Run to here is only
+        // meaningful once something is running; watching memory is not.
+        if (debuggerPane_->isDebugging())
+            menu->addAction(tr("Run to 0x%1").arg(markAt, 0, 16), this,
+                            [this, markAt] { debuggerPane_->runToAddress(markAt); });
+        menu->addAction(debuggerPane_->hasWatchpoint(markAt)
+                            ? tr("Stop Watching 0x%1").arg(markAt, 0, 16)
+                            : tr("Stop When 0x%1 Is Written").arg(markAt, 0, 16),
+                        this, [this, markAt] {
+                            debuggerPane_->toggleWatchpoint(markAt, 16);
+                        });
+        menu->addAction(tr("Show 0x%1 in Memory").arg(markAt, 0, 16), this,
+                        [this, markAt] {
+                            debuggerPane_->showMemory(markAt);
+                            if (memoryDock_ != nullptr) {
+                                memoryDock_->show();
+                                memoryDock_->raise();
+                            }
                         });
         menu->addAction(doc->hasBookmark(markAt) ? tr("Remove Bookmark") : tr("Bookmark This..."),
                         this, [this, markAt] { toggleBookmarkAt(markAt); });
@@ -2643,6 +2788,7 @@ void MainWindow::buildToolBar()
     connect(analyzeAction_, &QAction::triggered, this, &MainWindow::analyzeCurrent);
     analyzeButton_->setDefaultAction(analyzeAction_);
     row->addWidget(analyzeButton_);
+    updateCornerButton();
     bar->addWidget(strip);
     // The strip is the toolbar's only item, so it has to be allowed to grow
     // with it or the stretch inside it has nothing to spend.
@@ -2850,7 +2996,17 @@ void MainWindow::buildDocks()
                          debuggerPane_->stackView(), Qt::RightDockWidgetArea);
     outputDock_ = addPane(tr("Program Output"), QStringLiteral("programOutputPane"),
                           debuggerPane_->outputView(), Qt::BottomDockWidgetArea);
-    for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_})
+    // What memory holds and where the run will stop: the other half of what a
+    // debugger is for, and both of them useless in a menu.
+    memoryDock_ = addPane(tr("Memory"), QStringLiteral("memoryPane"),
+                          debuggerPane_->memoryView(), Qt::BottomDockWidgetArea);
+    breakpointsDock_ = addPane(tr("Breakpoints"), QStringLiteral("breakpointsPane"),
+                               debuggerPane_->breakpointsView(), Qt::BottomDockWidgetArea);
+    tabifyDockWidget(outputDock_, memoryDock_);
+    tabifyDockWidget(memoryDock_, breakpointsDock_);
+    outputDock_->raise();
+    for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_, memoryDock_,
+                              breakpointsDock_})
         pane->hide();
     // The transport gets a bar of its own rather than crowding the one that
     // is always there. It appears with the debugger and goes with it.

@@ -168,6 +168,13 @@ private:
     void analyzeCurrent();
     // The Analysis settings, as a menu, so they can be changed where they are used.
     QMenu *buildAnalyzeMenu();
+    // Everything about how the program is run, hung off the Debug button. Built
+    // fresh each time it is opened, so it shows what is set now.
+    QMenu *buildDebugMenu();
+    void showDebugSettings();
+    // The one button in the right corner: Analyze while reading a program,
+    // Debug while running one.
+    void updateCornerButton();
     void appendLog(const QString &line);
     void savePatched();
     void onPatchApplied(ProgramTab *tab);
@@ -250,6 +257,8 @@ private:
     QDockWidget *registersDock_ = nullptr;
     QDockWidget *stackDock_ = nullptr;
     QDockWidget *outputDock_ = nullptr;
+    QDockWidget *memoryDock_ = nullptr;
+    QDockWidget *breakpointsDock_ = nullptr;
     QByteArray beforeDebugging_;
     bool debugging_ = false;
     ListingPane *listingPane_ = nullptr;

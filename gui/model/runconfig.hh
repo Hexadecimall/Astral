@@ -16,7 +16,14 @@
 namespace astral::gui {
 
 struct RunConfiguration {
+    // What runs the program. Emulating is Astral's own machine: it executes
+    // the p-code the decompiler already lifted, against a stand-in libc, and
+    // it works on anything Astral can read whatever the host is. Live is the
+    // real thing on this machine, which needs a native back end.
+    enum class Engine { Emulate, Live };
+
     QString name;
+    Engine engine = Engine::Emulate;
     // Handed to the program as argv, after argv[0], which is the program.
     QStringList arguments;
     // What it reads from its input.
@@ -28,6 +35,13 @@ struct RunConfiguration {
     quint64 stepLimit = 0;
     // Stop at the first instruction rather than running to a breakpoint.
     bool stopAtStart = true;
+    // Keep a line for every instruction. Off unless asked for: a real program
+    // is millions of them.
+    bool trace = false;
+
+    // The engine's name as it is written in the settings file, and back.
+    static QString engineName(Engine engine);
+    static Engine engineFor(const QString &name);
 
     bool operator==(const RunConfiguration &other) const;
 };

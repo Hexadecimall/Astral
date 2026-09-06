@@ -111,19 +111,39 @@ ProgramTab::ProgramTab(std::unique_ptr<ProgramDocument> document, QWidget *paren
 
 ProgramTab::~ProgramTab() = default;
 
-void ProgramTab::showAddress(quint64 address)
+bool ProgramTab::showAddress(quint64 address)
 {
     if (document_->functionAt(address)) {
         showFunction(address);
         if (view_ == Hex)
             setView(Nova);
-        return;
+        return true;
     }
+    // Inside a function rather than at the top of one, which is where a
+    // debugger stops. Read the function it is in: going to the hex instead
+    // answers a question nobody asked.
+    if (const auto holding = document_->functionContaining(address)) {
+        showFunction(holding->address);
+        if (view_ == Hex)
+            setView(Nova);
+        return true;
+    }
+    // An address the image does not map is nowhere to go. Showing it anyway
+    // asks the hex view for bytes that were never loaded and puts the cursor
+    // outside what it holds, so it is refused here and said out loud by
+    // whoever asked.
+    bool mapped = false;
+    for (const SegmentEntry &segment : document_->segments())
+        mapped = mapped || (address >= segment.address &&
+                            address < segment.address + segment.size);
+    if (!mapped)
+        return false;
     hexAddress_ = address;
     if (view_ == Hex)
         refreshHex();
     else
         setView(Hex);
+    return true;
 }
 
 void ProgramTab::refreshHex()
@@ -253,7 +273,9 @@ void ProgramTab::refreshCurrent()
 
 void ProgramTab::replaceCodeText(const QString &text)
 {
-    decompiler_->setText(text);
+    // Into whichever view a patch would be built from, which is the one being
+    // read. Writing it into the other one edits a document nobody compiles.
+    ((view_ == Nova || view_ == PseudoC) ? pseudo_ : decompiler_)->setText(text);
 }
 
 void ProgramTab::compileCurrent(DecompilerView *view)
@@ -392,8 +414,10 @@ bool ProgramTab::navigateTo(const QString &target)
     const quint64 address = hex.toULongLong(&ok, 16);
     if (!ok)
         return false;
-    showFunction(address);
-    return true;
+    // Only somewhere the image has. A number that parses is not an address
+    // this program contains, and going to one it does not have puts every
+    // view in front of bytes that were never loaded.
+    return showAddress(address);
 }
 
 } // namespace astral::gui

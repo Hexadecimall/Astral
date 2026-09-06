@@ -1,5 +1,11 @@
 #include "views/debuggerpane.hh"
 
+#include "model/debugsettings.hh"
+
+#include <QAbstractItemView>
+#include <QLineEdit>
+#include <QMenu>
+#include <QAction>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -56,6 +62,21 @@ DebuggerPane::DebuggerPane(QWidget *parent) : QWidget(parent)
     output_->setReadOnly(true);
     output_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     output_->setPlaceholderText(tr("What the program writes, and the calls it makes"));
+    // A register is written by typing over its value, so the column that holds
+    // it is the one that can be edited.
+    registers_->setEditTriggers(QAbstractItemView::DoubleClicked |
+                                QAbstractItemView::SelectedClicked |
+                                QAbstractItemView::EditKeyPressed);
+    connect(registers_, &QTreeWidget::itemChanged, this, &DebuggerPane::writeRegister);
+    // Double-clicking a frame goes to it, which is how a stack is read.
+    connect(stack_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        bool ok = false;
+        const quint64 address = QStringView(item->text(0)).mid(2).toULongLong(&ok, 16);
+        if (ok)
+            Q_EMIT locationChanged(address);
+    });
+    buildMemory();
+    buildBreakpoints();
 }
 
 DebuggerPane::~DebuggerPane() = default;
@@ -63,6 +84,8 @@ DebuggerPane::~DebuggerPane() = default;
 QWidget *DebuggerPane::registersView() const { return registers_; }
 QWidget *DebuggerPane::stackView() const { return stack_; }
 QWidget *DebuggerPane::outputView() const { return output_; }
+QWidget *DebuggerPane::memoryView() const { return memory_; }
+QWidget *DebuggerPane::breakpointsView() const { return breakpoints_; }
 bool DebuggerPane::isDebugging() const { return debugging_; }
 
 void DebuggerPane::buildControls(QVBoxLayout *layout)
@@ -117,6 +140,17 @@ void DebuggerPane::buildControls(QVBoxLayout *layout)
         if (!session_)
             return;
         const RunConfiguration one = current();
+        // Live is a setting with no back end behind it yet. Saying so is the
+        // only honest thing to do: quietly emulating instead would answer a
+        // different question than the one that was asked.
+        if (DebugSettings::value(path_, one.name, QStringLiteral("engine")) ==
+            QStringLiteral("live")) {
+            status_->setText(tr("live runs need a native back end, which is not built yet"));
+            Q_EMIT logMessage(tr("debug: this run is set to live, and Astral has no native "
+                                 "back end yet. Set the engine to emulate in Debug Settings, "
+                                 "or choose Emulate under the Debug button."));
+            return;
+        }
         session_->setArguments(one.arguments);
         session_->setInput(one.input);
         QMetaObject::invokeMethod(session_.get(), "start", Qt::QueuedConnection);
@@ -136,6 +170,264 @@ void DebuggerPane::buildControls(QVBoxLayout *layout)
         if (session_)
             session_->cancel();
     });
+}
+
+
+// ------------------------------------------------------------------- memory
+//
+// The dump: sixteen bytes to a line against their address, following whatever
+// it is pointed at. Editing a line writes those bytes into the program, which
+// is the whole reason a debugger shows memory rather than describing it.
+
+void DebuggerPane::buildMemory()
+{
+    memory_ = new QWidget;
+    auto *layout = new QVBoxLayout(memory_);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto *row = new QWidget;
+    row->setObjectName(QStringLiteral("decompilerHeader"));
+    row->setAttribute(Qt::WA_StyledBackground, true);
+    auto *bar = new QHBoxLayout(row);
+    bar->setContentsMargins(8, 4, 8, 4);
+    bar->setSpacing(6);
+    memoryWhere_ = new QLineEdit;
+    memoryWhere_->setPlaceholderText(tr("Address, a register name, or sp"));
+    memoryWhere_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    bar->addWidget(memoryWhere_, 1);
+    auto *watch = new QToolButton;
+    watch->setObjectName(QStringLiteral("transportButton"));
+    watch->setText(tr("Watch"));
+    watch->setToolTip(tr("Stop when these bytes are written"));
+    bar->addWidget(watch);
+    layout->addWidget(row);
+
+    memoryBytes_ = new QPlainTextEdit;
+    memoryBytes_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    memoryBytes_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    memoryBytes_->setPlaceholderText(tr("Bytes the program can see, once it is running"));
+    layout->addWidget(memoryBytes_, 1);
+
+    // A register name follows that register, so pointing the dump at sp keeps
+    // it on the stack as the stack moves.
+    connect(memoryWhere_, &QLineEdit::returnPressed, this, [this] { refreshMemory(); });
+    connect(watch, &QToolButton::clicked, this, [this] {
+        if (memoryAt_ != 0)
+            toggleWatchpoint(memoryAt_, 16);
+    });
+    // Editing the dump writes it back. Only the bytes that changed are sent,
+    // so a stray keystroke somewhere else in the pane costs nothing.
+    connect(memoryBytes_, &QPlainTextEdit::textChanged, this, [this] {
+        if (applying_ || session_ == nullptr || !debugging_)
+            return;
+        const QStringList lines = memoryBytes_->toPlainText().split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            const int colon = line.indexOf(QLatin1Char(':'));
+            if (colon <= 0)
+                continue;
+            bool ok = false;
+            const quint64 at = QStringView(line).left(colon).trimmed().toULongLong(&ok, 16);
+            if (!ok)
+                continue;
+            const QStringList parts =
+                line.mid(colon + 1).simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            QByteArray bytes;
+            for (const QString &part : parts) {
+                if (part.size() != 2)
+                    break;
+                bool byteOk = false;
+                const uint value = part.toUInt(&byteOk, 16);
+                if (!byteOk)
+                    break;
+                bytes.append(static_cast<char>(value));
+            }
+            if (!bytes.isEmpty())
+                QMetaObject::invokeMethod(session_.get(), "writeMemory", Qt::QueuedConnection,
+                                          Q_ARG(quint64, at), Q_ARG(QByteArray, bytes));
+        }
+    });
+}
+
+void DebuggerPane::showMemory(quint64 address)
+{
+    memoryAt_ = address;
+    if (memoryWhere_ != nullptr)
+        memoryWhere_->setText(QStringLiteral("0x%1").arg(address, 0, 16));
+    refreshMemory();
+}
+
+void DebuggerPane::refreshMemory()
+{
+    if (session_ == nullptr || memoryWhere_ == nullptr)
+        return;
+    const QString where = memoryWhere_->text().trimmed();
+    if (where.isEmpty())
+        return;
+    // A name is looked up among the registers, so `sp` follows the stack.
+    quint64 address = 0;
+    bool ok = false;
+    QString hex = where;
+    if (hex.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        hex = hex.mid(2);
+    address = hex.toULongLong(&ok, 16);
+    if (!ok) {
+        for (int i = 0; i < registers_->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = registers_->topLevelItem(i);
+            if (item->text(0).compare(where, Qt::CaseInsensitive) != 0)
+                continue;
+            address = QStringView(item->text(1)).mid(2).toULongLong(&ok, 16);
+            break;
+        }
+    }
+    if (!ok)
+        return;
+    memoryAt_ = address;
+    QMetaObject::invokeMethod(session_.get(), "readMemory", Qt::QueuedConnection,
+                              Q_ARG(quint64, address), Q_ARG(int, 256));
+}
+
+// -------------------------------------------------------------- breakpoints
+//
+// Everywhere the run will stop, in one list: the addresses it breaks at and
+// the memory it watches. Double-clicking one goes there; delete takes it away.
+
+void DebuggerPane::buildBreakpoints()
+{
+    breakpoints_ = table({tr("Kind"), tr("Where"), tr("What")});
+    breakpoints_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(breakpoints_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        bool ok = false;
+        const quint64 address = QStringView(item->text(1)).mid(2).toULongLong(&ok, 16);
+        if (ok)
+            Q_EMIT locationChanged(address);
+    });
+    connect(breakpoints_, &QWidget::customContextMenuRequested, this, [this](const QPoint &at) {
+        QTreeWidgetItem *item = breakpoints_->itemAt(at);
+        if (item == nullptr)
+            return;
+        bool ok = false;
+        const quint64 address = QStringView(item->text(1)).mid(2).toULongLong(&ok, 16);
+        if (!ok)
+            return;
+        QMenu menu;
+        const bool isWatch = item->text(0) == tr("write");
+        connect(menu.addAction(tr("Remove")), &QAction::triggered, this, [this, address, isWatch] {
+            if (isWatch)
+                toggleWatchpoint(address, 0);
+            else
+                toggleBreakpoint(address);
+        });
+        menu.exec(breakpoints_->viewport()->mapToGlobal(at));
+    });
+}
+
+void DebuggerPane::refreshBreakpoints()
+{
+    if (breakpoints_ == nullptr || session_ == nullptr)
+        return;
+    breakpoints_->clear();
+    for (quint64 address : session_->breakpoints()) {
+        new QTreeWidgetItem(breakpoints_, {tr("execute"), QStringLiteral("0x%1").arg(address, 0, 16),
+                                           tr("stops before this instruction")});
+    }
+    for (const DebugWatch &watch : session_->watchpoints()) {
+        new QTreeWidgetItem(breakpoints_,
+                            {tr("write"), QStringLiteral("0x%1").arg(watch.address, 0, 16),
+                             tr("%n byte(s)", nullptr, static_cast<int>(watch.size))});
+    }
+}
+
+bool DebuggerPane::hasWatchpoint(quint64 address) const
+{
+    return session_ && session_->hasWatchpoint(address);
+}
+
+void DebuggerPane::toggleWatchpoint(quint64 address, quint64 size)
+{
+    if (!session_)
+        return;
+    if (session_->hasWatchpoint(address) || size == 0)
+        QMetaObject::invokeMethod(session_.get(), "removeWatchpoint", Qt::QueuedConnection,
+                                  Q_ARG(quint64, address));
+    else
+        QMetaObject::invokeMethod(session_.get(), "addWatchpoint", Qt::QueuedConnection,
+                                  Q_ARG(quint64, address), Q_ARG(quint64, size));
+}
+
+void DebuggerPane::runToAddress(quint64 address)
+{
+    if (session_)
+        QMetaObject::invokeMethod(session_.get(), "runTo", Qt::QueuedConnection,
+                                  Q_ARG(quint64, address));
+}
+
+// A register typed over is written into the program. What is typed is read as
+// hex whether or not it says 0x, because that is what the column shows.
+void DebuggerPane::writeRegister(QTreeWidgetItem *item, int column)
+{
+    if (applying_ || column != 1 || session_ == nullptr)
+        return;
+    QString text = item->text(1).trimmed();
+    if (text.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive))
+        text = text.mid(2);
+    bool ok = false;
+    const quint64 value = text.toULongLong(&ok, 16);
+    if (!ok) {
+        Q_EMIT logMessage(tr("debug: %1 is not a number").arg(item->text(1)));
+        refreshMemory();
+        return;
+    }
+    QMetaObject::invokeMethod(session_.get(), "setRegister", Qt::QueuedConnection,
+                              Q_ARG(QString, item->text(0)), Q_ARG(quint64, value));
+}
+
+
+// The settings, put where each one belongs: some are the session's, some are
+// the views'. Read here rather than remembered, so a change made in the dialog
+// shows without restarting anything.
+void DebuggerPane::applySettings(const QString &program, const QString &configuration)
+{
+    configuration_ = configuration;
+    if (session_ == nullptr)
+        return;
+    QMetaObject::invokeMethod(
+        session_.get(), "setTrace", Qt::QueuedConnection,
+        Q_ARG(bool, DebugSettings::boolValue(program, configuration, QStringLiteral("trace"))));
+    const int bytes = DebugSettings::intValue(program, configuration, QStringLiteral("dumpBytes"));
+    if (bytes > 0 && memoryAt_ != 0)
+        QMetaObject::invokeMethod(session_.get(), "readMemory", Qt::QueuedConnection,
+                                  Q_ARG(quint64, memoryAt_), Q_ARG(int, bytes));
+    // What the dump points at when a run stops.
+    const QString follows =
+        DebugSettings::value(program, configuration, QStringLiteral("dumpFollows"));
+    if (follows != QStringLiteral("nothing") && memoryWhere_ != nullptr &&
+        memoryWhere_->text().isEmpty())
+        memoryWhere_->setText(follows);
+}
+
+// A snapshot is named for when it was taken, because what a person wants back
+// is "before I did that" and the number of times they have done that is the
+// only name that distinguishes them.
+void DebuggerPane::snapshotHere()
+{
+    if (session_ == nullptr)
+        return;
+    const QString name = tr("step %1").arg(session_->state().steps);
+    QMetaObject::invokeMethod(session_.get(), "takeSnapshot", Qt::QueuedConnection,
+                              Q_ARG(QString, name));
+    lastSnapshot_ = name;
+    ++snapshots_;
+}
+
+void DebuggerPane::windBack()
+{
+    if (session_ == nullptr || lastSnapshot_.isEmpty()) {
+        Q_EMIT logMessage(tr("debug: nothing has been snapshotted yet"));
+        return;
+    }
+    QMetaObject::invokeMethod(session_.get(), "restoreSnapshot", Qt::QueuedConnection,
+                              Q_ARG(QString, lastSnapshot_));
 }
 
 void DebuggerPane::setProgram(const QString &path)
@@ -158,10 +450,41 @@ void DebuggerPane::setProgram(const QString &path)
     });
     connect(session_.get(), &DebugSession::registersChanged, this,
             [this](const std::vector<DebugRegister> &registers) {
+                // Refilling the table changes every item, and a change is how a
+                // typed-over value is noticed, so the two are told apart here.
+                applying_ = true;
                 registers_->clear();
-                for (const DebugRegister &one : registers)
-                    new QTreeWidgetItem(registers_, {one.name, QStringLiteral("0x%1").arg(one.value, 0, 16)});
+                for (const DebugRegister &one : registers) {
+                    auto *item = new QTreeWidgetItem(
+                        registers_, {one.name, QStringLiteral("0x%1").arg(one.value, 0, 16)});
+                    item->setFlags(item->flags() | Qt::ItemIsEditable);
+                }
+                applying_ = false;
+                // The dump follows a register when it was pointed at one.
+                refreshMemory();
             });
+    connect(session_.get(), &DebugSession::memoryRead, this,
+            [this](quint64 address, const QByteArray &bytes) {
+                applying_ = true;
+                QString text;
+                for (qsizetype offset = 0; offset < bytes.size(); offset += 16) {
+                    QString hex, ascii;
+                    for (int i = 0; i < 16 && offset + i < bytes.size(); ++i) {
+                        const unsigned char c = static_cast<unsigned char>(bytes[offset + i]);
+                        hex += QStringLiteral("%1 ").arg(c, 2, 16, QLatin1Char('0'));
+                        ascii += (c >= 0x20 && c < 0x7f) ? QLatin1Char(char(c)) : QLatin1Char('.');
+                    }
+                    text += QStringLiteral("%1: %2 %3\n")
+                                .arg(address + static_cast<quint64>(offset), 12, 16, QLatin1Char('0'))
+                                .arg(hex.leftJustified(48), ascii);
+                }
+                memoryBytes_->setPlainText(text);
+                applying_ = false;
+            });
+    connect(session_.get(), &DebugSession::watchpointsChanged, this,
+            [this] { refreshBreakpoints(); Q_EMIT breakpointsChanged(); });
+    connect(session_.get(), &DebugSession::breakpointsChanged, this,
+            [this] { refreshBreakpoints(); });
     connect(session_.get(), &DebugSession::stackChanged, this,
             [this](const std::vector<DebugFrame> &frames) {
                 stack_->clear();

@@ -45,7 +45,9 @@ public:
 
     void showFunction(quint64 address);
     // A function address opens in Code; anything else opens in Hex.
-    void showAddress(quint64 address);
+    // Goes to the address. False when the image does not map it, which is
+    // the caller's to report; nothing in the view changes.
+    bool showAddress(quint64 address);
     void refreshHex();
     // Accepts a hex address, with or without 0x, or a function name.
     bool navigateTo(const QString &target);
