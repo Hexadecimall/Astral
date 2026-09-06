@@ -94,9 +94,14 @@ int main(int argc, char **argv)
         QTimer::singleShot(1500, &window, &astral::gui::MainWindow::dumpListing);
     const QString debugAt = qEnvironmentVariable("ASTRAL_GUI_DEBUG");
     if (!debugAt.isEmpty())
-        QTimer::singleShot(1500, &window, [&window, debugAt] {
+        // Late enough that the window has finished arranging itself. Taking
+        // the window over means putting it back, and what it is put back to
+        // has to be a layout that had settled.
+        QTimer::singleShot(3000, &window, [&window, debugAt] {
             window.runDebugHook(debugAt, qEnvironmentVariable("ASTRAL_GUI_DEBUG_ARGS"));
         });
+    if (qEnvironmentVariableIsSet("ASTRAL_GUI_DEBUG_STOP"))
+        QTimer::singleShot(6000, &window, &astral::gui::MainWindow::leaveDebuggingHook);
     const QString menuWord = qEnvironmentVariable("ASTRAL_GUI_MENU");
     if (!menuWord.isEmpty())
         QTimer::singleShot(1500, &window, [&window, menuWord] { window.runMenuHook(menuWord); });

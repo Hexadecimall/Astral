@@ -146,6 +146,9 @@ private:
 public:
     // Raises the terminal and types a command into it, for a scripted run.
     void runTerminalHook(const QString &command);
+    // Leaves debugging, for a scripted run that wants to check the window is
+    // put back the way it was.
+    void leaveDebuggingHook() { setDebugging(false); }
 private:
     // The dock on the right shows the disassembly, unless the centre already
     // is, in which case it shows Nova instead of the same thing twice.
@@ -266,6 +269,10 @@ private:
     // The transport, on a bar of its own that is only there while debugging.
     QToolBar *debugBar_ = nullptr;
     QAction *debuggerAction_ = nullptr;
+    // The panes debugging put away, so leaving it puts back exactly those and
+    // nothing else. Asking the saved layout to do it was not enough: what
+    // comes back has to be what was there, not what a restore decides.
+    QList<QDockWidget *> hiddenForDebugging_;
     QLabel *statusArch_ = nullptr;
     QLabel *statusAddress_ = nullptr;
     QLabel *statusAnalysis_ = nullptr;

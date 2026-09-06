@@ -849,14 +849,29 @@ void MainWindow::setDebugging(bool debugging)
         return;
     }
     debugging_ = debugging;
-    if (debuggerAction_ != nullptr)
-        debuggerAction_->setChecked(debugging);
-    if (debugBar_ != nullptr)
-        debugBar_->setVisible(debugging);
     if (debugging) {
         // Keep the layout the program was being read in, so stopping puts it
         // back rather than leaving the window rearranged.
         beforeDebugging_ = saveState();
+        // Debugging takes the window rather than borrowing a corner of it.
+        // Everything that answers a question about the program as it sits on
+        // disk is put away, because none of it is the question being asked
+        // while the program is running.
+        static const QStringList kept = {
+            QStringLiteral("functionsPane"), QStringLiteral("listingPane"),
+            QStringLiteral("registersPane"), QStringLiteral("stackPane"),
+            QStringLiteral("programOutputPane"),
+        };
+        // Whether a pane is showing is not the question: one tabbed behind
+        // another is not visible and is still wanted back. What matters is
+        // whether it was put away on purpose, which is what isHidden says.
+        hiddenForDebugging_.clear();
+        for (QDockWidget *pane : panes_) {
+            if (kept.contains(pane->objectName()) || pane->isHidden())
+                continue;
+            hiddenForDebugging_.append(pane);
+            pane->hide();
+        }
         for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_}) {
             pane->show();
             pane->raise();
@@ -866,12 +881,22 @@ void MainWindow::setDebugging(bool debugging)
             listingDock_->raise();
         }
         resizeDocks({registersDock_, stackDock_}, {260, 200}, Qt::Vertical);
+        if (debugBar_ != nullptr)
+            debugBar_->show();
         statusAnalysis_->setText(tr("debugging"));
     } else {
         if (!beforeDebugging_.isEmpty())
             restoreState(beforeDebugging_);
+        // Whatever the restore decided, the transport and the three docks
+        // belong to a run that is over, and the panes debugging put away are
+        // the ones that come back.
+        for (QDockWidget *pane : hiddenForDebugging_)
+            pane->show();
+        hiddenForDebugging_.clear();
         for (QDockWidget *pane : {registersDock_, stackDock_, outputDock_})
             pane->hide();
+        if (debugBar_ != nullptr)
+            debugBar_->hide();
         statusAnalysis_->setText(tr("idle"));
     }
 }
@@ -2485,6 +2510,10 @@ void MainWindow::buildMenus()
                                        [this](bool on) { setDebugging(on); });
     debuggerAction_->setCheckable(true);
     debuggerAction_->setChecked(debugging_);
+    // The way back. Debugging hides everything that answers a question about
+    // the program as it sits on disk, and this is what asks for it again.
+    tools->addAction(tr("Static Analysis"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E), this,
+                     [this] { setDebugging(false); });
     tools->addAction(tr("Run Configurations..."), this, [this] {
         if (debuggerPane_ != nullptr)
             debuggerPane_->editConfigurations();
@@ -2984,7 +3013,13 @@ void MainWindow::saveLayout()
         return;
     QSettings settings;
     settings.setValue(QStringLiteral("window/geometry"), saveGeometry());
-    settings.setValue(QStringLiteral("window/state"), saveState());
+    // A run in progress has taken the window over, and that arrangement is
+    // not the one to come back to next time: it is missing every pane that
+    // answers a question about the program as it sits on disk. What was there
+    // before the run started is what is kept.
+    const QByteArray arrangement =
+        debugging_ && !beforeDebugging_.isEmpty() ? beforeDebugging_ : saveState();
+    settings.setValue(QStringLiteral("window/state"), arrangement);
     settings.setValue(QStringLiteral("window/panes"), layoutSignature());
 }
 
