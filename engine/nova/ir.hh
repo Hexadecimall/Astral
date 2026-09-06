@@ -248,6 +248,12 @@ const char *operation_name(Operation operation);
 // natural word" against the target actually being compiled for.
 int width_of(const Instruction &instruction, const Target &target);
 
+// The function written out, one instruction to a line, in a form meant to be
+// read by a person and compared by a test. Storage is shown where it was
+// pinned, because a value that has to be somewhere is the thing most worth
+// seeing, and a width is shown when it was said.
+std::string to_text(const Function &function);
+
 // Whether a function is put together the way everything downstream assumes:
 // one definition per value, nothing read that is never given, every block
 // ending in exactly one way out, and every block jumped to existing. Appends

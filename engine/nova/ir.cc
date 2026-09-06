@@ -252,6 +252,125 @@ bool verify(const Function &function, std::vector<std::string> &problems)
     return problems.size() == before;
 }
 
+// ------------------------------------------------------------------ writing
+
+namespace {
+
+// Storage as the source would have written it, which is the same `@` in every
+// position it can appear.
+std::string storage_text(const Storage &storage)
+{
+    switch (storage.kind) {
+    case Storage::Kind::None:
+        return std::string();
+    case Storage::Kind::Register:
+        return "@" + storage.register_name;
+    case Storage::Kind::EntryRegister:
+        return "@" + storage.register_name + "@entry";
+    case Storage::Kind::Address: {
+        std::ostringstream out;
+        out << "@0x" << std::hex << storage.address;
+        return out.str();
+    }
+    case Storage::Kind::Frame: {
+        std::ostringstream out;
+        out << "@" << (storage.offset < 0 ? "-" : "+") << "0x" << std::hex
+            << (storage.offset < 0 ? -storage.offset : storage.offset);
+        return out.str();
+    }
+    }
+    return std::string();
+}
+
+std::string value_text(const Value &value)
+{
+    if (!value.is_valid())
+        return "_";
+    std::string text = "%" + std::to_string(value.identifier);
+    const std::string storage = storage_text(value.storage);
+    if (!storage.empty())
+        text += storage;
+    return text;
+}
+
+const char *level_text(Level level)
+{
+    switch (level) {
+    case Level::Machine: return "machine";
+    case Level::Storage: return "storage";
+    case Level::Typed: return "typed";
+    case Level::Source: return "source";
+    }
+    return "unknown";
+}
+
+} // namespace
+
+std::string to_text(const Function &function)
+{
+    std::ostringstream out;
+
+    out << "function " << function.name << " level " << level_text(function.level);
+    if (function.address != 0)
+        out << " at 0x" << std::hex << function.address << std::dec;
+    if (function.budget != 0)
+        out << " within " << function.budget << " bytes";
+    out << "\n";
+
+    if (!function.parameters.empty()) {
+        out << "  takes";
+        for (const Value &parameter : function.parameters)
+            out << " " << value_text(parameter);
+        out << "\n";
+    }
+
+    for (const Block &block : function.blocks) {
+        out << "block " << block.identifier;
+        if (block.identifier == function.entry)
+            out << " (entry)";
+        out << "\n";
+
+        for (const Instruction &instruction : block.instructions) {
+            out << "  ";
+            if (instruction.result.is_valid())
+                out << value_text(instruction.result) << " = ";
+            out << name_of(instruction.operation);
+
+            if (instruction.width > 0)
+                out << "." << instruction.width;
+            if (instruction.is_signed)
+                out << ".signed";
+
+            for (const Value &argument : instruction.arguments)
+                out << " " << value_text(argument);
+
+            switch (instruction.operation) {
+            case Operation::Constant:
+            case Operation::GlobalAddress:
+            case Operation::FrameAddress:
+                out << " 0x" << std::hex << instruction.immediate << std::dec;
+                break;
+            case Operation::Call:
+            case Operation::FunctionAddress:
+                out << " " << instruction.callee;
+                break;
+            case Operation::Raw:
+                out << " " << instruction.bytes.size() << " bytes";
+                break;
+            default:
+                break;
+            }
+
+            for (uint32_t successor : instruction.successors)
+                out << " -> " << successor;
+
+            out << "\n";
+        }
+    }
+
+    return out.str();
+}
+
 int width_of(const Instruction &instruction, const Target &target)
 {
     if (instruction.width > 0)

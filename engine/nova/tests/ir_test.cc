@@ -235,6 +235,84 @@ void check_widths()
     expect_equal(ir::width_of(instruction, narrow), 4, "a width that was said is kept");
 }
 
+// Storage is the whole reason this representation exists, so what it looks like
+// written down is checked rather than assumed: a value pinned to a register has
+// to still say so after lowering, or the pin was lost on the way.
+void check_writing()
+{
+    ir::Function function = returning_function();
+    function.name = "pinned";
+    function.address = 0x100000500;
+    function.budget = 52;
+
+    ir::Value parameter;
+    parameter.identifier = 1;
+    parameter.storage.kind = Storage::Kind::Register;
+    parameter.storage.register_name = "x0";
+    function.parameters.push_back(parameter);
+
+    const std::string text = ir::to_text(function);
+
+    report(text.find("@x0") != std::string::npos,
+           "a value pinned to a register still says so", text);
+    report(text.find("within 52 bytes") != std::string::npos,
+           "a size budget is part of what the function is", text);
+    report(text.find("at 0x100000500") != std::string::npos,
+           "a fixed address is part of what the function is", text);
+    report(text.find("(entry)") != std::string::npos, "the entry block is marked", text);
+
+    // Every kind of storage the language can write has to come back out.
+    {
+        ir::Function frame_pinned = returning_function();
+        ir::Value local;
+        local.identifier = 2;
+        local.storage.kind = Storage::Kind::Frame;
+        local.storage.offset = -0x70;
+        frame_pinned.parameters.push_back(local);
+        const std::string written = ir::to_text(frame_pinned);
+        report(written.find("@-0x70") != std::string::npos,
+               "a frame offset is written the way it was read", written);
+    }
+    {
+        ir::Function on_entry = returning_function();
+        ir::Value held;
+        held.identifier = 3;
+        held.storage.kind = Storage::Kind::EntryRegister;
+        held.storage.register_name = "x29";
+        on_entry.parameters.push_back(held);
+        const std::string written = ir::to_text(on_entry);
+        report(written.find("@x29@entry") != std::string::npos,
+               "what a register held on entry is not confused with the register", written);
+    }
+
+    // A function that is only bytes is still a function, which is what makes
+    // every level compile.
+    {
+        ir::Function machine;
+        machine.name = "already_instructions";
+        machine.level = Level::Machine;
+        machine.entry = 1;
+        ir::Block block;
+        block.identifier = 1;
+        ir::Instruction raw;
+        raw.operation = ir::Operation::Raw;
+        raw.bytes = {0x00, 0x01, 0x02, 0x03};
+        block.instructions.push_back(raw);
+        ir::Instruction leave;
+        leave.operation = ir::Operation::Return;
+        block.instructions.push_back(leave);
+        machine.blocks.push_back(block);
+
+        std::vector<std::string> problems;
+        report(ir::verify(machine, problems), "a function that is only bytes is accepted",
+               problems.empty() ? "" : problems.front());
+        const std::string written = ir::to_text(machine);
+        report(written.find("level machine") != std::string::npos &&
+                   written.find("4 bytes") != std::string::npos,
+               "bytes that were already instructions are kept as they were", written);
+    }
+}
+
 } // namespace
 
 int main()
@@ -250,6 +328,7 @@ int main()
     check_targets();
     check_verification();
     check_widths();
+    check_writing();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
