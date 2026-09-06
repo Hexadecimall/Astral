@@ -81,9 +81,9 @@ struct Slot {
 
 class Lowerer {
 public:
-    Lowerer(const Unit &unit, Types &types, const ir::Target &target,
+    Lowerer(const Unit &unit, Types &types, const ir::Target &target, ir::Unit &out,
             std::vector<Diagnostic> &diagnostics)
-        : unit_(unit), types_(types), target_(target), diagnostics_(diagnostics)
+        : unit_(unit), types_(types), target_(target), out_(out), diagnostics_(diagnostics)
     {
     }
 
@@ -156,6 +156,7 @@ private:
     const Unit &unit_;
     Types &types_;
     const ir::Target &target_;
+    ir::Unit &out_;
     std::vector<Diagnostic> &diagnostics_;
 
     ir::Builder *builder_ = nullptr;
@@ -403,9 +404,19 @@ ir::Value Lowerer::address_of(const Expression &expression, int &width, TypePtr 
         ir::Value base;
         TypePtr holding = expression.left->type;
         if (holding == nullptr && expression.left->kind == Expression::Kind::Name) {
+            // A local says what it holds, and so does a parameter - which is
+            // not a local and is not in the same place. Looking only at locals
+            // left every `buffer[index]` over an argument with nothing to say
+            // what an element of it is, which is most of the indexing there is
+            // in a recovered function.
             const Slot *slot = look_up(expression.left->name);
             if (slot != nullptr)
                 holding = slot->type;
+            else {
+                auto parameter = pinned_.find(expression.left->name);
+                if (parameter != pinned_.end())
+                    holding = parameter->second.type;
+            }
         }
         if (expression.left->kind == Expression::Kind::Name) {
             const Slot *slot = look_up(expression.left->name);
@@ -468,6 +479,67 @@ ir::Value Lowerer::index(const Expression &expression)
 
 ir::Value Lowerer::binary(const Expression &expression)
 {
+    // `and` and `or` are not operators over two values. They are a decision:
+    // the right-hand side runs only when the left did not already settle the
+    // answer, and that is what the words mean rather than an optimisation of
+    // them. A recovered function relies on it - `index != length && text[index]
+    // != 0` reads past the end of the text if the second half runs anyway - so
+    // this is lowered as the branch it is.
+    if ((expression.binary_op == compiler::BinaryOp::LogicalAnd ||
+         expression.binary_op == compiler::BinaryOp::LogicalOr) &&
+        expression.left && expression.right) {
+        const bool settles_when_true = expression.binary_op == compiler::BinaryOp::LogicalOr;
+
+        const ir::Value first = this->expression(*expression.left);
+        if (!first.is_valid())
+            return ir::Value();
+
+        Slot answer;
+        next_offset_ -= 1;
+        answer.offset = next_offset_;
+        answer.type = expression.type;
+        answer.width = 1;
+
+        const uint32_t deciding = builder_->current();
+        const uint32_t settled = builder_->block();
+        const uint32_t ask_again = builder_->block();
+        const uint32_t after = builder_->block();
+
+        builder_->resume(deciding);
+        builder_->branch(first, settles_when_true ? settled : ask_again,
+                         settles_when_true ? ask_again : settled);
+
+        // The left-hand side decided it, so the answer is what it decided.
+        builder_->resume(settled);
+        builder_->store(address_of_slot(answer), builder_->constant(settles_when_true ? 1 : 0, 1),
+                        answer.width, ir::Space::Frame);
+        builder_->jump(after);
+
+        // It did not, so the answer is whatever the right-hand side says - and
+        // only now does the right-hand side run at all.
+        builder_->resume(ask_again);
+        const ir::Value second = this->expression(*expression.right);
+        if (!second.is_valid())
+            return ir::Value();
+        builder_->store(address_of_slot(answer), second, answer.width, ir::Space::Frame);
+        builder_->jump(after);
+
+        builder_->resume(after);
+        return builder_->load(address_of_slot(answer), answer.width, ir::Space::Frame,
+                              answer.type);
+    }
+
+    // A comma is two things one after the other, and the second is the answer.
+    // Recovered code uses it to say that something was assigned on the way
+    // through a condition, so the left-hand side is run for what it does rather
+    // than for what it is worth.
+    if (expression.binary_op == compiler::BinaryOp::Comma && expression.left &&
+        expression.right) {
+        if (!this->expression(*expression.left).is_valid())
+            return ir::Value();
+        return this->expression(*expression.right);
+    }
+
     const ir::Value left = expression.left ? this->expression(*expression.left) : ir::Value();
     const ir::Value right = expression.right ? this->expression(*expression.right) : ir::Value();
     if (!left.is_valid() || !right.is_valid())
@@ -536,6 +608,72 @@ ir::Value Lowerer::unary(const Expression &expression)
     case compiler::UnaryOp::BitNot:
         instruction.operation = ir::Operation::BitNot;
         break;
+    case compiler::UnaryOp::Not:
+        // Not a bit operation. `!value` asks whether the value is nothing, and
+        // flipping its bits answers a different question: the negation of three
+        // is minus four, and the negation of three as a truth is false.
+        return builder_->binary(ir::Operation::Equal, inner,
+                                builder_->constant(0, width > 0 ? width : 1), 1, false,
+                                expression.type);
+    case compiler::UnaryOp::PreIncrement:
+    case compiler::UnaryOp::PreDecrement:
+    case compiler::UnaryOp::PostIncrement:
+    case compiler::UnaryOp::PostDecrement: {
+        // Stepping something by one, and putting it back. The difference
+        // between the two spellings is only which value the expression is: the
+        // one before the step or the one after.
+        const bool upwards = expression.unary_op == compiler::UnaryOp::PreIncrement ||
+                             expression.unary_op == compiler::UnaryOp::PostIncrement;
+        const bool answers_with_the_old =
+            expression.unary_op == compiler::UnaryOp::PostIncrement ||
+            expression.unary_op == compiler::UnaryOp::PostDecrement;
+
+        const int stepping = width > 0 ? width : width_of(inner);
+        const ir::Value stepped =
+            builder_->binary(upwards ? ir::Operation::Add : ir::Operation::Subtract, inner,
+                             builder_->constant(1, stepping), stepping,
+                             type_is_signed(expression.left->type), expression.left->type);
+        if (!stepped.is_valid())
+            return ir::Value();
+
+        // Where it goes back, which is wherever it came from.
+        if (expression.left->kind == Expression::Kind::Name) {
+            const Slot *slot = look_up(expression.left->name);
+            if (slot == nullptr) {
+                complain(expression.left->where,
+                         "nothing here is called " + expression.left->name);
+                return ir::Value();
+            }
+            builder_->store(address_of_slot(*slot), stepped, slot->width, ir::Space::Frame);
+        } else if (expression.left->kind == Expression::Kind::Unary &&
+                   expression.left->unary_op == compiler::UnaryOp::Dereference &&
+                   expression.left->left) {
+            const ir::Value address = this->expression(*expression.left->left);
+            if (!address.is_valid())
+                return ir::Value();
+            builder_->store(address, stepped, stepping, ir::Space::Data);
+        } else if (expression.left->kind == Expression::Kind::Index ||
+                   expression.left->kind == Expression::Kind::Member) {
+            int held = 0;
+            TypePtr type = nullptr;
+            const ir::Value where = address_of(*expression.left, held, type);
+            if (!where.is_valid())
+                return ir::Value();
+            builder_->store(where, stepped, held, ir::Space::Data);
+        } else {
+            complain(expression.where, "this is not something that can be stepped");
+            return ir::Value();
+        }
+        return answers_with_the_old ? inner : stepped;
+    }
+    case compiler::UnaryOp::AddressOf: {
+        int held = 0;
+        TypePtr type = nullptr;
+        const ir::Value where = address_of(*expression.left, held, type);
+        if (!where.is_valid())
+            complain(expression.where, "there is no address for this to be the address of");
+        return where;
+    }
     case compiler::UnaryOp::Dereference:
         instruction.operation = ir::Operation::Load;
         instruction.space = ir::Space::Data;
@@ -672,6 +810,37 @@ ir::Value Lowerer::expression(const Expression &expression)
     case Expression::Kind::NullLiteral:
         return builder_->constant(0, target_.pointer_bytes > 0 ? target_.pointer_bytes : 8,
                                   expression.type);
+    case Expression::Kind::StringLiteral: {
+        // A string is not a value, it is the address of bytes that have to be
+        // in the image. The bytes go into the unit and the expression becomes
+        // the address of them, which is a number once somebody lays the image
+        // out and a name until then.
+        std::string called = "text_" + std::to_string(out_.data.size());
+        for (const ir::Datum &already : out_.data) {
+            if (already.bytes.size() == expression.text.size() + 1 &&
+                std::equal(expression.text.begin(), expression.text.end(),
+                           already.bytes.begin())) {
+                called = already.name;
+                break;
+            }
+        }
+        if (called.rfind("text_", 0) == 0 && called == "text_" + std::to_string(out_.data.size())) {
+            ir::Datum held;
+            held.name = called;
+            for (char letter : expression.text)
+                held.bytes.push_back(static_cast<uint8_t>(letter));
+            held.bytes.push_back(0);  // what a string ends with
+            out_.data.push_back(std::move(held));
+        }
+
+        ir::Instruction instruction;
+        instruction.operation = ir::Operation::GlobalAddress;
+        instruction.width = target_.pointer_bytes > 0 ? target_.pointer_bytes : 8;
+        instruction.symbol = called;
+        instruction.where = expression.where;
+        instruction.result = builder_->value(expression.type);
+        return builder_->emit(std::move(instruction));
+    }
     case Expression::Kind::Name:
         return name(expression);
     case Expression::Kind::Register: {
@@ -1299,7 +1468,7 @@ bool lower_to_ir(const Unit &nova, Types &types, const ir::Target &target, ir::U
         if (source.body == nullptr)
             continue;  // a declaration says a function exists, not what it does
         ir::Function lowered;
-        Lowerer lowerer(nova, types, read, diagnostics);
+        Lowerer lowerer(nova, types, read, out, diagnostics);
         if (!lowerer.function(source, lowered)) {
             all = false;
             continue;

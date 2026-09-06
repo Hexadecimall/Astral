@@ -392,10 +392,22 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 called_any.push_back(std::move(where));
             };
 
+            // Which memory a load or a store touches is not an operand.
+            //
+            // p-code names the space first and the address second, because it
+            // describes machines that have more than one and has to say which.
+            // An instruction does not: a processor's load reads the memory it
+            // reads from, and the choice is in which instruction it is rather
+            // than in a field of one. Asking a form to hold it asked for a
+            // place too many and nothing matched.
+            const bool names_a_space = operation.opcode == ghidra::CPUI_LOAD ||
+                                       operation.opcode == ghidra::CPUI_STORE;
+            const size_t first_input = names_a_space ? 1 : 0;
+
             if (operation.writes)
                 want(operation.output, "writes to");
-            for (const pcode::Varnode &input : operation.inputs)
-                want(input, "reads");
+            for (size_t at = first_input; at < operation.inputs.size(); ++at)
+                want(operation.inputs[at], "reads");
             if (!nameable)
                 continue;
 
@@ -405,12 +417,14 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // whether a candidate is really the instruction wanted is settled
             // by reading it back rather than by leaving it out.
             const std::vector<const catalogue::Form *> forms =
-                catalogue.plainly_doing(operation.opcode,
-                                        static_cast<int>(operation.inputs.size()), true);
+                catalogue.plainly_doing(
+                    operation.opcode,
+                    static_cast<int>(operation.inputs.size() - first_input), true);
             if (forms.empty()) {
                 problems.push_back(std::string("this processor has no instruction that is only a ") +
                                    called + " over " +
-                                   std::to_string(operation.inputs.size()) + " things");
+                                   std::to_string(operation.inputs.size() - first_input) +
+                                   " things");
                 continue;
             }
 

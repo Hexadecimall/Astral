@@ -295,6 +295,11 @@ struct Instruction {
 
     // Operation::Call, and the blocks a terminator can reach.
     std::string callee;
+
+    // What a GlobalAddress points at, when it points at something the unit
+    // carries rather than at an address already known. Empty when `immediate`
+    // is the address itself.
+    std::string symbol;
     std::vector<uint32_t> successors;
 
     // Operation::Raw, kept exactly as written so that reading it back gives
@@ -345,10 +350,23 @@ struct Function {
     std::vector<uint8_t> existing;
 };
 
+// Bytes that have to be somewhere for the code to point at them.
+//
+// A string in the source is not a value, it is an address of bytes that exist
+// in the image. Where those bytes go is decided when the image is laid out,
+// which is after this, so what is carried is the bytes and a name to refer to
+// them by until an address exists.
+struct Datum {
+    std::string name;
+    std::vector<uint8_t> bytes;
+    uint64_t address = 0;  // zero until the image is laid out
+};
+
 // Everything being compiled together, and the machine it is for.
 struct Unit {
     Target target;
     std::vector<Function> functions;
+    std::vector<Datum> data;
 };
 
 // ------------------------------------------------------------------ building

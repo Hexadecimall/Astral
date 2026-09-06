@@ -268,6 +268,45 @@ Form::Piece through_moves(const std::vector<ghidra::OpTpl *> &operations, size_t
     return Form::Piece();
 }
 
+// An address the instruction makes out of its own operands.
+//
+// A load does not take an address. It takes the pieces one is made of - a
+// register and a displacement, added together inside the instruction - and no
+// amount of following moves reaches a single place, because there is not one:
+// there is a sum. So every place the address depends on is collected instead,
+// and the form is usable when exactly one of them is a register the caller can
+// name. The rest are numbers, and the instruction that means "read from the
+// address in this register" is that one with those numbers set to nought.
+//
+// Returns false when the address depends on more than one register, or on
+// nothing that can be named, which is an instruction whose address this cannot
+// supply rather than one to guess at.
+bool address_of(const std::vector<ghidra::OpTpl *> &operations, size_t before,
+                const ghidra::VarnodeTpl *target, const std::vector<Form::Slot> &slots,
+                Form::Piece &out, std::vector<int> &zeroed)
+{
+    std::vector<Form::Piece> pieces;
+    sources_of(operations, before, target, pieces);
+
+    bool found = false;
+    for (const Form::Piece &piece : pieces) {
+        if (!piece.is_slot || piece.slot < 0 ||
+            static_cast<size_t>(piece.slot) >= slots.size())
+            return false;
+        if (slots[piece.slot].is_register()) {
+            if (found)
+                return false;  // two registers is a sum this cannot supply
+            out = piece;
+            found = true;
+            continue;
+        }
+        if (!slots[piece.slot].is_placed())
+            return false;
+        zeroed.push_back(piece.slot);
+    }
+    return found;
+}
+
 // The bits a form always has, and how they are found.
 //
 // A form is chosen from a stream of bits by a tree: each node looks at a few
@@ -698,6 +737,9 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         form.shortest = made->getMinimumLength();
         form.line = made->getLineno();
 
+        for (int slot = 0; slot < made->getNumOperands(); ++slot)
+            form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
+
         ghidra::ConstructTpl *templ = made->getTempl();
         const ghidra::OpTpl *only = nullptr;
         size_t only_at = 0;
@@ -759,7 +801,41 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 }
             }
 
-            if (ends_at != nullptr && ends_at->numInput() > 0) {
+            if (ends_at == nullptr && only->getOut() == nullptr && only->numInput() > 0) {
+                // A form that writes nowhere is what its last operation is.
+                //
+                // A store, a call and a branch all produce no value, so there
+                // is no answer to trace back from - and looking for one skipped
+                // every one of them. What they read is what they read, with the
+                // moves that carried it followed through.
+                const std::vector<ghidra::OpTpl *> &all = templ->getOpvec();
+                std::vector<Form::Piece> reads;
+                std::vector<int> zeroed;
+                bool nameable = true;
+                for (int input = 0; input < only->numInput(); ++input) {
+                    Form::Piece piece = through_moves(all, only_at, only->getIn(input));
+                    if (!piece.is_slot && !piece.is_fixed &&
+                        !address_of(all, only_at, only->getIn(input), form.slots, piece, zeroed))
+                        nameable = false;
+                    reads.push_back(piece);
+                }
+                if (nameable) {
+                    form.zeroed = std::move(zeroed);
+                    std::vector<uint64_t> disturbed;
+                    for (const ghidra::OpTpl *operation : all) {
+                        if (operation == nullptr || operation == only ||
+                            is_bookkeeping(operation->getOpcode()))
+                            continue;
+                        const Form::Piece wrote = read_piece(operation->getOut());
+                        if (wrote.is_fixed && wrote.fixed_is_register)
+                            disturbed.push_back(wrote.fixed);
+                    }
+                    form.does.assign(1, only->getOpcode());
+                    form.writes = false;
+                    form.reads = std::move(reads);
+                    form.also_writes = std::move(disturbed);
+                }
+            } else if (ends_at != nullptr && ends_at->numInput() > 0) {
                 // What produced the answer, with the moves followed through.
                 const ghidra::OpTpl *doing = ends_at;
                 size_t doing_at = ends_at_index;
@@ -836,9 +912,6 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
             settle(pattern->second, form.shortest, form.fixed_mask, form.fixed_bits);
             form.needs_context = pattern->second.from_context;
         }
-
-        for (int slot = 0; slot < made->getNumOperands(); ++slot)
-            form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
 
         // A bit that a value goes in is not a bit the form insists on.
         //
@@ -975,6 +1048,27 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
     // pairing is made rather than assumed, and each slot is used once.
     std::vector<bool> filled(form.slots.size(), false);
     const uint64_t may_touch = ~form.fixed_mask;
+
+    // The displacements an address is made of are set to nought first, and are
+    // not offered to anything else. An instruction that reads from a register
+    // is the one that reads from that register plus nothing.
+    for (int which : form.zeroed) {
+        if (which < 0 || static_cast<size_t>(which) >= form.slots.size())
+            continue;
+        const Form::Slot &slot = form.slots[which];
+        for (const Form::Slot::Way &way : slot.numbers) {
+            uint64_t room = 0;
+            uint64_t nothing = 0;
+            if (!place_in_field(way.field, form.shortest, 0, room, nothing))
+                continue;
+            word &= ~(room & may_touch);
+            word = (word & ~(way.along_mask & may_touch)) |
+                   (way.along_bits & way.along_mask & may_touch);
+            break;
+        }
+        word = (word & ~form.fixed_mask) | form.fixed_bits;
+        filled[which] = true;
+    }
 
     for (size_t next = 0; next < places.size(); ++next) {
         bool placed = false;

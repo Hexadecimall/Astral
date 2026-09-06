@@ -90,6 +90,16 @@ struct Form {
     // recorded here and asked there.
     std::vector<uint64_t> also_writes;
 
+    // Slots that have to hold nought for the form to mean what it says.
+    //
+    // A load or a store does not take an address, it takes the pieces an
+    // address is made of: a register and a displacement, added together inside
+    // the instruction. Given an address already in a register, the instruction
+    // that means "read from there" is that one with the displacement set to
+    // nothing - so the register is the operand and the rest are noughts, and
+    // saying which is what lets the form be chosen at all.
+    std::vector<int> zeroed;
+
     // One of the places a form leaves open, and what can go in it.
     struct Slot {
         // Where in the instruction a number written here goes.

@@ -293,8 +293,20 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
         break;
 
     case ir::Operation::Call:
+        // A call names where it goes and nothing else.
+        //
+        // The arguments were put where the callee will look for them before
+        // this ran - that is what a calling convention is, and the copies that
+        // do it are already in the block above. Handing them to the call as
+        // well asked every processor for a call instruction that takes as many
+        // operands as the function takes arguments, and no processor has one:
+        // a call names an address, and that is all.
+        //
+        // Where the callee is, is not known until the image is laid out, so
+        // what is written now is nothing and the name is carried instead.
         made.opcode = ghidra::CPUI_CALL;
-        made.inputs = arguments;
+        made.inputs.push_back(
+            constant(0, target_.pointer_bytes > 0 ? target_.pointer_bytes : width));
         made.callee = instruction.callee;
         break;
     case ir::Operation::Return:

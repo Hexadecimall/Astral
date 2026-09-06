@@ -314,9 +314,9 @@ void check_refuses_rather_than_drops()
     // failure nothing downstream can catch.
     std::string why;
     const std::string text = lowered_text(
-        "func greets(): i32 {\n"
-        "    var greeting: i32 = \"hello\";\n"
-        "    return greeting;\n"
+        "func counts(): i32 {\n"
+        "    var numbers: i32 = {1, 2, 3};\n"
+        "    return numbers;\n"
         "}\n",
         "AARCH64:LE:64:AppleSilicon", why);
     report(text.empty() && why.find("not lowered yet") != std::string::npos,
@@ -324,6 +324,104 @@ void check_refuses_rather_than_drops()
            text.empty() ? why : text);
 }
 
+// A string is bytes that have to be in the image, and the expression is where
+// they are. Nothing about it is a value: what the code carries is an address,
+// and the bytes travel with the unit until somebody lays it out.
+void check_a_string_becomes_bytes_and_an_address()
+{
+    std::string why;
+    const std::string text = lowered_text(
+        "func greets(): *char {\n"
+        "    return \"hello\";\n"
+        "}\n",
+        "AARCH64:LE:64:AppleSilicon", why);
+    report(!text.empty() && contains(text, "globaladdress"),
+           "a string in the source becomes the address of bytes in the image",
+           text.empty() ? why : text);
+}
+
+
+// What a recovered function is actually written with.
+//
+// These are not exotic. Every one of them appeared in the first twenty
+// functions a real decompilation produced, and each stopped the whole function
+// dead until it lowered - so what is checked is that each comes through, on
+// source shaped the way a recovered function is shaped rather than written to
+// suit.
+void check_what_recovered_code_is_written_with()
+{
+    const char *arm = "AARCH64:LE:64:AppleSilicon";
+    std::string why;
+
+    // An argument is not a local, and something indexed through one has to know
+    // what an element of it is all the same.
+    {
+        const std::string text = lowered_text(
+            "func first(buffer: *char): i32 {\n"
+            "    return buffer[0] as i32;\n"
+            "}\n",
+            arm, why);
+        report(!text.empty(), "something indexed through an argument lowers",
+               text.empty() ? why : "");
+    }
+
+    // And and or are a decision, not an operation over two values. The right
+    // half runs only when the left did not already settle it, which is what
+    // stops a recovered condition reading past the end of what it is walking.
+    {
+        const std::string text = lowered_text(
+            "func both(text: *char, length: i64): bool {\n"
+            "    return (length != 0) && (text[0] != '\\0');\n"
+            "}\n",
+            arm, why);
+        report(!text.empty() && contains(text, "branch"),
+               "an and is lowered as the decision it is, so the second half may not run",
+               text.empty() ? why : text);
+    }
+
+    // Not asks whether something is nothing. Flipping its bits answers a
+    // different question: the negation of three is minus four, and three as a
+    // truth is true.
+    {
+        const std::string text = lowered_text(
+            "func absent(value: i32): bool {\n"
+            "    return !value;\n"
+            "}\n",
+            arm, why);
+        report(!text.empty() && contains(text, "equal") && !contains(text, "bitnot"),
+               "a not asks whether something is nothing rather than flipping its bits",
+               text.empty() ? why : text);
+    }
+
+    // Stepping something by one, where which value the expression is, is the
+    // whole difference between the two spellings. Only the one written in front
+    // is checked, because that is the one the parser reads - it does not take
+    // the other yet, and a test cannot claim otherwise.
+    {
+        const std::string text = lowered_text(
+            "func counts(): i32 {\n"
+            "    var index: i32 = 0;\n"
+            "    ++index;\n"
+            "    return index;\n"
+            "}\n",
+            arm, why);
+        report(!text.empty() && contains(text, "add"), "a step by one lowers",
+               text.empty() ? why : text);
+    }
+
+    // A comma is two things one after the other, and recovered code uses it to
+    // say that something was assigned on the way through a condition.
+    {
+        const std::string text = lowered_text(
+            "func aside(value: i32): i32 {\n"
+            "    var kept: i32 = 0;\n"
+            "    return (kept = value, kept + 1);\n"
+            "}\n",
+            arm, why);
+        report(!text.empty(), "a comma runs the first for what it does and answers with the second",
+               text.empty() ? why : "");
+    }
+}
 
 // A parameter nothing was said about goes where this processor's calling
 // convention puts it. The source is the same every time; only the processor
@@ -390,6 +488,8 @@ int main()
     check_loops();
     check_unpinned_parameters_follow_the_convention();
     check_refuses_rather_than_drops();
+    check_a_string_becomes_bytes_and_an_address();
+    check_what_recovered_code_is_written_with();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
