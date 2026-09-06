@@ -128,6 +128,8 @@ set(ASTRAL_LIB_SRC
     engine/nova/types.cc
     engine/nova/format.cc
     engine/nova/ir.cc
+    engine/nova/catalogue.cc
+    engine/nova/specification.cc
     engine/nova/lower.cc
     engine/nova/lower_ir.cc
     engine/nova/pcode.cc
@@ -310,7 +312,7 @@ target_include_directories(astral_x86_test PRIVATE ${ASTRAL_ENGINE_INCLUDE_DIRS}
 target_link_libraries(astral_x86_test PRIVATE astral_static)
 add_test(NAME assembler_x86 COMMAND astral_x86_test)
 
-foreach(suite lexer parser nova class ir lower_ir pcode)
+foreach(suite lexer parser nova class ir lower_ir pcode catalogue)
     add_executable(astral_nova_${suite}_test engine/nova/tests/${suite}_test.cc)
     # Nova's directory goes first: its headers share names with the C
     # compiler's, and a bare `#include "lexer.hh"` has to mean Nova's.
