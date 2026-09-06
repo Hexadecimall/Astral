@@ -36,6 +36,28 @@ struct Form {
     // in, and there is no instance yet - only the form. Where it was written is
     // recorded instead, which is enough to go and look.
 
+    // Where one of an operation's values comes from.
+    //
+    // A form does not name registers. It says "whatever was written in the
+    // second slot", and which register that is, is decided when an instruction
+    // is written rather than when the form was. So a value is either one of the
+    // form's own slots, which something has to be put into, or a fixed thing
+    // the form always uses.
+    struct Piece {
+        bool is_slot = false;  // one of the form's operands, to be filled in
+        int slot = -1;         // which one
+        bool is_fixed = false; // a number the form always uses
+        uint64_t fixed = 0;
+    };
+
+    // What the one operation writes to and reads from, when the form does
+    // exactly one thing. This is the shape a selection has to match: an
+    // addition whose two inputs are slots is a register-register add, and one
+    // whose second input is fixed is an add of a particular amount.
+    Piece writes_to;
+    bool writes = false;
+    std::vector<Piece> reads;
+
     // What it does, as the sequence of p-code operations its template holds.
     // One operation is the common case and the useful one; a form whose
     // template is longer does several things at once and is harder to choose
@@ -65,6 +87,11 @@ public:
 
     // How many forms were read.
     size_t size() const { return forms_.size(); }
+
+    // The forms that do this one operation with every value a slot - the
+    // plainest shape there is, and the one a selection reaches for first: two
+    // things in, one thing out, nothing about it fixed.
+    std::vector<const Form *> plainly_doing(ghidra::OpCode opcode, int inputs) const;
 
     // The forms whose whole meaning is this one operation. These are the ones
     // worth choosing between: a form that does one thing can be selected for

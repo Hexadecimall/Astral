@@ -159,6 +159,68 @@ void check_reading_twice()
            std::to_string(first.size()) + " against " + std::to_string(second.size()));
 }
 
+
+// The shape of a form, which is what a selection has to match.
+//
+// A form does not name registers. It says "whatever was written in the second
+// slot", and which register that is, is decided when an instruction is written.
+// So the question a selection asks is not "does this add" but "does this add
+// two things I can choose and put the answer where I choose".
+void check_shapes()
+{
+    catalogue::Catalogue arm;
+    if (catalogue_for("AARCH64:LE:64:AppleSilicon", arm)) {
+        const std::vector<const catalogue::Form *> plain =
+            arm.plainly_doing(ghidra::CPUI_INT_ADD, 2);
+        report(!plain.empty(), "a register machine adds two things it is given into a third",
+               std::to_string(plain.size()) + " such forms");
+
+        // Every piece of a plain form is a slot, which is what plain means.
+        bool all_slots = true;
+        for (const catalogue::Form *form : plain) {
+            all_slots = all_slots && form->writes && form->writes_to.is_slot;
+            for (const catalogue::Form::Piece &piece : form->reads)
+                all_slots = all_slots && piece.is_slot;
+        }
+        report(all_slots, "and every part of such a form is something to be filled in",
+               "one part was not");
+
+        // Copying takes one thing, not two, and asking for the wrong number
+        // finds nothing rather than something close.
+        report(arm.plainly_doing(ghidra::CPUI_COPY, 1).size() > 0 &&
+                   arm.plainly_doing(ghidra::CPUI_COPY, 2).empty(),
+               "copying reads one thing, and asking for two finds none",
+               std::to_string(arm.plainly_doing(ghidra::CPUI_COPY, 2).size()) + " with two");
+    }
+
+    // An accumulator machine adds into a particular register rather than into
+    // one it is told. It has forms that add, and none of them is plain - which
+    // is the difference a selection has to cope with, and a catalogue that
+    // reported them as plain would be choosing an instruction that cannot put
+    // the answer where it was asked to.
+    catalogue::Catalogue small;
+    if (catalogue_for("z80:LE:16:default", small)) {
+        report(!small.doing(ghidra::CPUI_INT_ADD).empty(),
+               "a z80 has instructions that add", "it has none");
+        report(small.plainly_doing(ghidra::CPUI_INT_ADD, 2).empty(),
+               "but none that adds into a register it is told, because it adds into one register",
+               std::to_string(small.plainly_doing(ghidra::CPUI_INT_ADD, 2).size()) + " were plain");
+    }
+
+    // A compressed encoding shows up as a plain form that is shorter, which is
+    // what a size budget picks.
+    catalogue::Catalogue riscv;
+    if (catalogue_for("RISCV:LE:64:default", riscv)) {
+        int shortest = 0;
+        for (const catalogue::Form *form : riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+            if (shortest == 0 || form->shortest < shortest)
+                shortest = form->shortest;
+        }
+        report(shortest == 2, "a compressed encoding is a plain form that takes two bytes",
+               std::to_string(shortest) + " bytes");
+    }
+}
+
 } // namespace
 
 int main()
@@ -172,6 +234,7 @@ int main()
     check_lengths_are_the_processors_own();
     check_what_a_processor_has_not_got();
     check_reading_twice();
+    check_shapes();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

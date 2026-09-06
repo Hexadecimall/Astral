@@ -27,6 +27,38 @@ bool is_bookkeeping(ghidra::OpCode opcode)
     return opcode == ghidra::CPUI_MULTIEQUAL || opcode == ghidra::CPUI_INDIRECT;
 }
 
+// What a value in a template refers to.
+//
+// A template says where a value is with three pieces - a space, an offset and a
+// size - and each is either a number written in the specification or a
+// reference to one of the form's own slots. A slot is what gets filled in when
+// an instruction is actually written, so a value whose offset is a slot is
+// "whatever register was put there".
+Form::Piece read_piece(const ghidra::VarnodeTpl *value)
+{
+    Form::Piece piece;
+    if (value == nullptr)
+        return piece;
+
+    const ghidra::ConstTpl &offset = value->getOffset();
+    switch (offset.getType()) {
+    case ghidra::ConstTpl::handle:
+        piece.is_slot = true;
+        piece.slot = offset.getHandleIndex();
+        break;
+    case ghidra::ConstTpl::real:
+        piece.is_fixed = true;
+        piece.fixed = offset.getReal();
+        break;
+    default:
+        // Something worked out while decoding - where the instruction is, or
+        // where it goes next. Neither is a slot to fill nor a fixed number, and
+        // saying so is better than pretending it is one.
+        break;
+    }
+    return piece;
+}
+
 } // namespace
 
 bool Catalogue::read(const ir::Target &target, std::string &error)
@@ -65,12 +97,26 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         form.line = made->getLineno();
 
         ghidra::ConstructTpl *templ = made->getTempl();
+        const ghidra::OpTpl *only = nullptr;
         if (templ != nullptr) {
             for (const ghidra::OpTpl *operation : templ->getOpvec()) {
                 if (operation == nullptr || is_bookkeeping(operation->getOpcode()))
                     continue;
                 form.does.push_back(operation->getOpcode());
+                only = operation;
             }
+        }
+
+        // The shape of it, when there is one operation to have a shape. This is
+        // what a selection matches against: which values are slots waiting to
+        // be filled and which the form always uses.
+        if (form.does.size() == 1 && only != nullptr) {
+            if (only->getOut() != nullptr) {
+                form.writes = true;
+                form.writes_to = read_piece(only->getOut());
+            }
+            for (int input = 0; input < only->numInput(); ++input)
+                form.reads.push_back(read_piece(only->getIn(input)));
         }
 
         forms_.push_back(std::move(form));
@@ -84,6 +130,23 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
             by_operation_[form.does.front()].push_back(&form);
     }
     return true;
+}
+
+std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int inputs) const
+{
+    std::vector<const Form *> plain;
+    for (const Form *form : doing(opcode)) {
+        if (!form->writes || !form->writes_to.is_slot)
+            continue;
+        if (static_cast<int>(form->reads.size()) != inputs)
+            continue;
+        bool all_slots = true;
+        for (const Form::Piece &piece : form->reads)
+            all_slots = all_slots && piece.is_slot;
+        if (all_slots)
+            plain.push_back(form);
+    }
+    return plain;
 }
 
 const std::vector<const Form *> &Catalogue::doing(ghidra::OpCode opcode) const
