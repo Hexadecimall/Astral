@@ -87,6 +87,13 @@ struct Form {
         // The bits those choices occupy, so writing one can clear them first.
         uint64_t register_mask = 0;
 
+        // What the way to those registers insisted on, which belongs to the
+        // instruction rather than to any one register. Kept apart from the
+        // choices above: mixed in, a register's encoding looks like it includes
+        // the opcode, and writing one then erases the instruction.
+        uint64_t along_the_way_mask = 0;
+        uint64_t along_the_way_bits = 0;
+
         bool is_register() const { return !registers.empty(); }
         bool is_placed() const { return first_bit >= 0 && last_bit >= first_bit; }
     };

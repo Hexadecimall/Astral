@@ -258,12 +258,12 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
             const ghidra::VarnodeSymbol *named = list->getVarnode(i);
             if (named == nullptr)
                 continue;
-            into.register_mask |= sofar_mask | mask;
             into.registers.emplace(named->getName(),
-                                   sofar_bits | ((static_cast<uint64_t>(i)
-                                                  << static_cast<unsigned>(shift)) &
-                                                 mask));
+                                   (static_cast<uint64_t>(i) << static_cast<unsigned>(shift)) &
+                                       mask);
         }
+        into.along_the_way_mask |= sofar_mask;
+        into.along_the_way_bits |= sofar_bits;
         return;
     }
 
@@ -281,8 +281,13 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
         std::string named;
         int forwards_to = -1;
         if (exported_register(one.first, by_offset, named, forwards_to)) {
-            into.register_mask |= sofar_mask | mask;
-            into.registers.emplace(named, sofar_bits | bits);
+            // The bits that pick this register, and separately the bits the way
+            // here insisted on. Mixing them makes a register's encoding look
+            // like it includes the opcode, and then writing one erases the
+            // instruction.
+            into.registers.emplace(named, bits);
+            into.along_the_way_mask |= sofar_mask;
+            into.along_the_way_bits |= sofar_bits;
             continue;
         }
         // It stands for whatever one of its own operands stands for, so the
@@ -343,12 +348,9 @@ Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
     // bits where the answers differ from one another.
     if (!slot.registers.empty()) {
         uint64_t either = 0;
-        uint64_t both = ~static_cast<uint64_t>(0);
-        for (const auto &one : slot.registers) {
+        for (const auto &one : slot.registers)
             either |= one.second;
-            both &= one.second;
-        }
-        slot.register_mask = either ^ both;
+        slot.register_mask = either;
     }
     return slot;
 }
@@ -539,6 +541,9 @@ bool Catalogue::write_any(const Form &form,
         // insisted on is what makes the instruction that instruction.
         const uint64_t may_touch = ~form.fixed_mask;
         word = (word & ~(slot.register_mask & may_touch)) | (found->second & may_touch);
+        // What the way to the register insisted on is part of the instruction,
+        // so it is set rather than cleared.
+        word |= slot.along_the_way_bits & may_touch;
         word = (word & ~form.fixed_mask) | form.fixed_bits;
         ++next;
     }
