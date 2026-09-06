@@ -163,6 +163,10 @@ void check_reading_twice()
 
 // The shape of a form, which is what a selection has to match.
 //
+// These ask what a processor can do at all, so forms that are real only under
+// some setting of it are included. Which of those may actually be written into
+// a particular program is the selector's question, not this one's.
+//
 // A form does not name registers. It says "whatever was written in the second
 // slot", and which register that is, is decided when an instruction is written.
 // So the question a selection asks is not "does this add" but "does this add
@@ -172,7 +176,7 @@ void check_shapes()
     catalogue::Catalogue arm;
     if (catalogue_for("AARCH64:LE:64:AppleSilicon", arm)) {
         const std::vector<const catalogue::Form *> plain =
-            arm.plainly_doing(ghidra::CPUI_INT_ADD, 2);
+            arm.plainly_doing(ghidra::CPUI_INT_ADD, 2, true);
         report(!plain.empty(), "a register machine adds two things it is given into a third",
                std::to_string(plain.size()) + " such forms");
 
@@ -188,10 +192,10 @@ void check_shapes()
 
         // Copying takes one thing, not two, and asking for the wrong number
         // finds nothing rather than something close.
-        report(arm.plainly_doing(ghidra::CPUI_COPY, 1).size() > 0 &&
-                   arm.plainly_doing(ghidra::CPUI_COPY, 2).empty(),
+        report(arm.plainly_doing(ghidra::CPUI_COPY, 1, true).size() > 0 &&
+                   arm.plainly_doing(ghidra::CPUI_COPY, 2, true).empty(),
                "copying reads one thing, and asking for two finds none",
-               std::to_string(arm.plainly_doing(ghidra::CPUI_COPY, 2).size()) + " with two");
+               std::to_string(arm.plainly_doing(ghidra::CPUI_COPY, 2, true).size()) + " with two");
     }
 
     // An accumulator machine adds into a particular register rather than into
@@ -203,9 +207,9 @@ void check_shapes()
     if (catalogue_for("z80:LE:16:default", small)) {
         report(!small.doing(ghidra::CPUI_INT_ADD).empty(),
                "a z80 has instructions that add", "it has none");
-        report(small.plainly_doing(ghidra::CPUI_INT_ADD, 2).empty(),
+        report(small.plainly_doing(ghidra::CPUI_INT_ADD, 2, true).empty(),
                "but none that adds into a register it is told, because it adds into one register",
-               std::to_string(small.plainly_doing(ghidra::CPUI_INT_ADD, 2).size()) + " were plain");
+               std::to_string(small.plainly_doing(ghidra::CPUI_INT_ADD, 2, true).size()) + " were plain");
     }
 
     // A compressed encoding shows up as a plain form that is shorter, which is
@@ -213,7 +217,7 @@ void check_shapes()
     catalogue::Catalogue riscv;
     if (catalogue_for("RISCV:LE:64:default", riscv)) {
         int shortest = 0;
-        for (const catalogue::Form *form : riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+        for (const catalogue::Form *form : riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
             if (shortest == 0 || form->shortest < shortest)
                 shortest = form->shortest;
         }
@@ -257,7 +261,7 @@ void check_fixed_bits()
     catalogue::Catalogue riscv;
     if (catalogue_for("RISCV:LE:64:default", riscv)) {
         const std::vector<const catalogue::Form *> adding =
-            riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2);
+            riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2, true);
         bool all_different = true;
         for (size_t i = 0; i < adding.size(); ++i) {
             for (size_t j = i + 1; j < adding.size(); ++j) {
@@ -288,7 +292,7 @@ void check_bits_against_real_instructions()
     if (catalogue_for("MIPS:BE:32:default", mips)) {
         bool found_add = false;
         bool found_addu = false;
-        for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+        for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
             if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull)
                 found_add = true;
             if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000021ull)
@@ -343,7 +347,7 @@ void check_writing_an_instruction()
         return;
 
     const catalogue::Form *adding = nullptr;
-    for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+    for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
         if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull) {
             adding = form;
             break;
