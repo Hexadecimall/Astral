@@ -45,6 +45,8 @@ private:
     std::vector<std::string> &problems_;
     std::map<uint32_t, Varnode> placed_;
     uint64_t next_unique_ = 0;
+    // Where this processor keeps its frame, read once for the whole function.
+    ir::Target::Frame frame_;
 };
 
 Varnode Writer::constant(uint64_t value, int size) const
@@ -207,23 +209,48 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
     case ir::Operation::Load:
         // A load names the space it reads from before the address it reads at.
         made.opcode = ghidra::CPUI_LOAD;
-        made.inputs.push_back(constant(static_cast<uint64_t>(instruction.space), 4));
+        made.inputs.push_back(constant(static_cast<uint64_t>(ir::Space::Data), 4));
         for (const Varnode &argument : arguments)
             made.inputs.push_back(argument);
         break;
     case ir::Operation::Store:
         made.opcode = ghidra::CPUI_STORE;
         made.writes = false;
-        made.inputs.push_back(constant(static_cast<uint64_t>(instruction.space), 4));
+        made.inputs.push_back(constant(static_cast<uint64_t>(ir::Space::Data), 4));
         for (const Varnode &argument : arguments)
             made.inputs.push_back(argument);
         break;
 
-    case ir::Operation::FrameAddress:
+    case ir::Operation::FrameAddress: {
+        // A frame offset is not an address. It is so many bytes from wherever
+        // this function's frame begins, and where that is, is in a register the
+        // processor names - so the address is that register plus the offset.
+        // This is the step where a place in a frame becomes somewhere real.
+        if (!frame_.known) {
+            complain("this processor has no frame to take an address in");
+            return false;
+        }
+        const ir::Target::RegisterPlace *pointer = target_.register_place(frame_.pointer);
+        if (pointer == nullptr) {
+            complain("this processor's stack register " + frame_.pointer + " has no place");
+            return false;
+        }
+        Varnode base;
+        base.where = Where::Register;
+        base.offset = pointer->offset;
+        base.size = pointer->width;
+
+        made.opcode = ghidra::CPUI_INT_ADD;
+        made.inputs.push_back(base);
+        made.inputs.push_back(constant(instruction.immediate, pointer->width));
+        if (made.writes)
+            made.output.size = pointer->width;
+        break;
+    }
     case ir::Operation::GlobalAddress:
     case ir::Operation::FunctionAddress:
-        // An address is a number until a frame and an image exist, and both are
-        // decided after this. Copying the number is what it means until then.
+        // An address in the image is a number until the image is laid out,
+        // which is decided after this.
         made.opcode = ghidra::CPUI_COPY;
         made.inputs.push_back(
             constant(instruction.immediate,
@@ -280,6 +307,12 @@ bool Writer::write(const ir::Function &function, Sequence &out)
 {
     out.name = function.name;
     out.entry = function.entry;
+
+    // Where the frame is measured from, read once rather than at every slot.
+    // A function that never touches its frame does not need one, so a processor
+    // with no stack is only a problem for a function that wanted a frame.
+    std::string unused;
+    target_.frame(frame_, unused);
 
     // A parameter is already somewhere before anything runs, so its place is
     // decided before the body is written and not when it is first read.

@@ -532,6 +532,55 @@ void check_calling_conventions()
     }
 }
 
+
+// Where a frame is measured from, which is what makes a frame offset an address
+// rather than a number.
+void check_frames()
+{
+    struct Case {
+        const char *language;
+        const char *pointer;
+        int width;
+    };
+    const Case cases[] = {
+        {"AARCH64:LE:64:AppleSilicon", "sp", 8},
+        {"x86:LE:64:default", "RSP", 8},
+        {"x86:LE:32:default", "ESP", 4},
+        {"RISCV:LE:64:default", "sp", 8},
+        {"z80:LE:16:default", "SP", 2},
+    };
+
+    for (const Case &one : cases) {
+        ir::Target target;
+        if (!target_for(one.language, target))
+            continue;
+        ir::Target::Frame frame;
+        std::string error;
+        if (!target.frame(frame, error)) {
+            report(false, std::string(one.language) + " says where its frame is", error);
+            continue;
+        }
+        report(frame.pointer == one.pointer && frame.pointer_width == one.width,
+               std::string(one.language) + " measures its frame from " + one.pointer,
+               frame.pointer + " of " + std::to_string(frame.pointer_width));
+        expect(frame.grows_downward, std::string(one.language) + " pushes its frame downward");
+    }
+
+    // A stack machine has no registers and no frame register, and saying so is
+    // better than naming something that is not one.
+    {
+        ir::Target target;
+        if (target_for("JVM:BE:32:default", target)) {
+            ir::Target::Frame frame;
+            std::string error;
+            const bool read = target.frame(frame, error);
+            report(!read && !error.empty(),
+                   "a processor with no stack register says so rather than naming one",
+                   read ? frame.pointer : error);
+        }
+    }
+}
+
 } // namespace
 
 int main()
@@ -550,6 +599,7 @@ int main()
     check_writing();
     check_building();
     check_calling_conventions();
+    check_frames();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

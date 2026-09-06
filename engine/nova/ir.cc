@@ -279,6 +279,44 @@ std::string register_named_at(const ghidra::Translate *translate, const ghidra::
 
 } // namespace
 
+bool Target::frame(Frame &out, std::string &error) const
+{
+    out = Frame();
+    try {
+        DescribingArchitecture *held = specification_for(
+            compiler.empty() ? language_id : language_id + ":" + compiler, error);
+        if (held == nullptr)
+            return false;
+
+        ghidra::ProtoModel *model = held->defaultfp;
+        ghidra::AddrSpace *stack = model != nullptr ? model->getSpacebase() : nullptr;
+        if (stack == nullptr || stack->numSpacebase() == 0) {
+            // Some processors have no stack worth speaking of. Saying so is
+            // better than naming a register that is not one.
+            error = "this processor's specification names no stack";
+            return false;
+        }
+
+        const ghidra::VarnodeData &base = stack->getSpacebase(0);
+        out.pointer = register_named_at(held->translate, base.getAddr(),
+                                        static_cast<int>(base.size));
+        out.pointer_width = static_cast<int>(base.size);
+        out.grows_downward = stack->stackGrowsNegative();
+        out.known = !out.pointer.empty();
+        if (!out.known) {
+            error = "this processor's stack is not kept in a register that has a name";
+            return false;
+        }
+        return true;
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return false;
+    } catch (ghidra::DecoderError &failure) {
+        error = failure.explain;
+        return false;
+    }
+}
+
 bool Target::calling_convention(const std::vector<int> &widths, int result_width,
                                 std::vector<Storage> &parameters, Storage &result,
                                 std::string &error) const

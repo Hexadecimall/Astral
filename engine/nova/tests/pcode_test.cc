@@ -16,6 +16,7 @@
 #include "session.hh"
 
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -740,6 +741,62 @@ void check_calling()
     }
 }
 
+
+// A frame slot has to become somewhere real, which means the register the
+// processor measures frames from plus the offset.
+void check_frames_become_addresses()
+{
+    std::vector<compiler::Diagnostic> diagnostics;
+    const std::string source =
+        "func total(): i32 {\n  var running: i32 = 2;\n  return running + 40;\n}\n";
+    const std::vector<Token> tokens = tokenise(source, diagnostics);
+    Types types;
+    Unit unit;
+    if (!parse(tokens, types, unit, diagnostics)) {
+        report(false, "the source parses", "it did not");
+        return;
+    }
+
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("AARCH64:LE:64:AppleSilicon", target, why)) {
+        report(false, "the target is read", why);
+        return;
+    }
+
+    ir::Unit lowered;
+    if (!lower_to_ir(unit, types, target, lowered, diagnostics) || lowered.functions.empty()) {
+        report(false, "it lowers", "it did not");
+        return;
+    }
+
+    pcode::Sequence sequence;
+    std::vector<std::string> problems;
+    if (!pcode::to_pcode(lowered.functions.front(), lowered.target, sequence, problems)) {
+        report(false, "it is written", problems.empty() ? "" : problems.front());
+        return;
+    }
+    const std::string text = pcode::to_text(sequence);
+
+    // The stack register, at the offset the specification gives it, added to.
+    const ir::Target::RegisterPlace *stack = lowered.target.register_place("sp");
+    if (stack == nullptr) {
+        report(false, "this processor has a stack register", "it has none");
+        return;
+    }
+    char wanted[64];
+    std::snprintf(wanted, sizeof wanted, "INT_ADD (register, 0x%llx,",
+                  static_cast<unsigned long long>(stack->offset));
+    report(contains(text, wanted), "a frame slot is the stack register plus an offset", text);
+
+    // Two four-byte values added together answer in four bytes. Falling through
+    // to the machine word made this eight, which is an instruction wider than
+    // anything asked for.
+    report(contains(text, "INT_ADD (unique, 0x14, 4) (unique, 0x18, 4)") ||
+               !contains(text, ", 8)\n"),
+           "adding two four-byte values answers in four", text);
+}
+
 } // namespace
 
 int main()
@@ -759,6 +816,7 @@ int main()
     check_counting();
     check_reaching_and_choosing();
     check_calling();
+    check_frames_become_addresses();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

@@ -203,7 +203,12 @@ int Lowerer::width_of_operands(const Expression &expression) const
     if (expression.type != nullptr && expression.type->kind != compiler::Type::Kind::Void)
         return width_of_type(expression.type, target_);
     // No type of its own, so the operands answer. A pinned name is the register
-    // it was pinned to, and the register is what says how wide it is.
+    // it was pinned to and the register says how wide it is; a local is its
+    // slot, and the slot was made the width the declaration asked for.
+    //
+    // Falling through to the machine word makes an addition between two
+    // four-byte values answer in eight, which is not what was written and is
+    // an instruction wider than it needed to be on every processor.
     for (const Expression *side : {expression.left.get(), expression.right.get()}) {
         if (side == nullptr || side->kind != Expression::Kind::Name)
             continue;
@@ -213,6 +218,9 @@ int Lowerer::width_of_operands(const Expression &expression) const
             if (width > 0)
                 return width;
         }
+        const Slot *slot = look_up(side->name);
+        if (slot != nullptr && slot->width > 0)
+            return slot->width;
     }
     return width_of_type(expression.type, target_);
 }

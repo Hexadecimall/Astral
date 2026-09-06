@@ -151,6 +151,23 @@ struct Target {
     // register by that name or has not been read.
     const RegisterPlace *register_place(const std::string &name) const;
 
+    // The register a frame is measured from, and which way the frame grows.
+    //
+    // A frame offset is not an address. `@-0x70` means seventy bytes below
+    // wherever this function's frame begins, and where that is, is in a
+    // register the processor names. Without that, a frame slot is a number and
+    // nothing can be read out of it.
+    struct Frame {
+        std::string pointer;         // the register the frame is measured from
+        int pointer_width = 0;
+        bool grows_downward = true;  // which way a frame is pushed
+        bool known = false;
+    };
+
+    // Reads how a frame works on this processor, from the same specification
+    // everything else here is read from.
+    bool frame(Frame &out, std::string &error) const;
+
     // Where a call puts its arguments and its answer, according to this
     // processor's own compiler specification.
     //
