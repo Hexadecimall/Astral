@@ -197,6 +197,19 @@ public:
     static bool write(const Form &form, const std::vector<std::string> &registers,
                       std::vector<uint8_t> &bytes, std::string &error);
 
+    // The same, where each place may go by more than one name.
+    //
+    // One register often has several: RISC-V calls the same one a0 and x10, and
+    // a form lists it under whichever name that form was written with. So what
+    // is offered per slot is every name the register goes by, and the slot uses
+    // the one it knows. Trying every combination of names instead grows past
+    // reason on a processor with many aliases, and picking per slot is the same
+    // answer without the growth.
+    static bool write_any(const Form &form,
+                          const std::vector<std::vector<std::string>> &registers,
+                          std::vector<uint8_t> &bytes, std::vector<std::string> &used,
+                          std::string &error);
+
 private:
     std::vector<Form> forms_;
     std::map<ghidra::OpCode, std::vector<const Form *>> by_operation_;

@@ -11,22 +11,29 @@ namespace select {
 
 namespace {
 
-// The register at an offset, since p-code names a register by where it is and a
-// form names one by what it is called.
-std::string register_at(const ir::Target &target, uint64_t offset, int size)
+// Every name for the register at a place, since p-code names one by where it is
+// and a form names one by what it is called - and a place often has more than
+// one name. RISC-V calls the same register a0 and x10, and a form that lists it
+// under one of those does not list it under the other, so all of them are
+// offered and whichever the form knows is the one used.
+//
+// Names of the right width come first. A register of another width at the same
+// place is a different register - the low half of x0 is w0 - so those are
+// offered only after, and only because a form may name a place either way.
+std::vector<std::string> names_at(const ir::Target &target, uint64_t offset, int size)
 {
+    std::vector<std::string> exact;
+    std::vector<std::string> elsewhere;
     for (const auto &one : target.register_places) {
-        if (one.second.offset == offset && one.second.width == size)
-            return one.first;
+        if (one.second.offset != offset)
+            continue;
+        if (one.second.width == size)
+            exact.push_back(one.first);
+        else
+            elsewhere.push_back(one.first);
     }
-    // A register of the wrong width at the right place is a different register:
-    // on AARCH64 the low half of x0 is w0, and writing one where the other was
-    // meant is a real mistake rather than a near miss.
-    for (const auto &one : target.register_places) {
-        if (one.second.offset == offset)
-            return one.first;
-    }
-    return std::string();
+    exact.insert(exact.end(), elsewhere.begin(), elsewhere.end());
+    return exact;
 }
 
 std::string where_it_is(const pcode::Varnode &node)
@@ -57,45 +64,35 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // Every value has to be somewhere that can be named. A value with
             // no home yet is not a failure of this processor, it is work that
             // has not been done: giving it one is register allocation.
-            std::vector<std::string> wanted;
+            // What each value could be called. A place with several names is
+            // one register, and a form knows it by whichever name that form was
+            // written with.
+            std::vector<std::vector<std::string>> called_any;
             bool nameable = true;
-            if (operation.writes) {
-                if (operation.output.where != pcode::Where::Register) {
-                    problems.push_back(std::string("a ") + called + " writes to " +
-                                       where_it_is(operation.output) +
-                                       ", and only a register can be named in an instruction");
-                    nameable = false;
-                } else {
-                    const std::string named =
-                        register_at(target, operation.output.offset, operation.output.size);
-                    if (named.empty()) {
-                        problems.push_back(std::string("a ") + called +
-                                           " writes to a place this processor has no name for");
-                        nameable = false;
-                    } else {
-                        wanted.push_back(named);
-                    }
-                }
-            }
-            for (const pcode::Varnode &input : operation.inputs) {
+            auto want = [&](const pcode::Varnode &node, const char *reading) {
                 if (!nameable)
-                    break;
-                if (input.where != pcode::Where::Register) {
-                    problems.push_back(std::string("a ") + called + " reads " +
-                                       where_it_is(input) +
+                    return;
+                if (node.where != pcode::Where::Register) {
+                    problems.push_back(std::string("a ") + called + " " + reading + " " +
+                                       where_it_is(node) +
                                        ", and only a register can be named in an instruction");
                     nameable = false;
-                    break;
+                    return;
                 }
-                const std::string named = register_at(target, input.offset, input.size);
-                if (named.empty()) {
-                    problems.push_back(std::string("a ") + called +
-                                       " reads a place this processor has no name for");
+                std::vector<std::string> names = names_at(target, node.offset, node.size);
+                if (names.empty()) {
+                    problems.push_back(std::string("a ") + called + " " + reading +
+                                       " a place this processor has no name for");
                     nameable = false;
-                    break;
+                    return;
                 }
-                wanted.push_back(named);
-            }
+                called_any.push_back(std::move(names));
+            };
+
+            if (operation.writes)
+                want(operation.output, "writes to");
+            for (const pcode::Varnode &input : operation.inputs)
+                want(input, "reads");
             if (!nameable)
                 continue;
 
@@ -127,10 +124,15 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // an instruction that adds names two registers rather than three.
             // That is only the same operation when the answer does go where the
             // first thing read was, so it is offered only then.
-            std::vector<std::vector<std::string>> ways;
-            ways.push_back(wanted);
-            if (operation.writes && wanted.size() == 3 && wanted[0] == wanted[1])
-                ways.push_back({wanted[0], wanted[2]});
+            // What to ask for, and for a processor that writes its answer over
+            // one of the things it read, the two-register spelling of the same
+            // thing. Each place is offered under every name it goes by and the
+            // slot uses the one it knows.
+            std::vector<std::vector<std::vector<std::string>>> ways;
+            ways.push_back(called_any);
+            if (operation.writes && called_any.size() == 3 &&
+                operation.output.offset == operation.inputs[0].offset)
+                ways.push_back({called_any[0], called_any[2]});
 
             const catalogue::Form *best = nullptr;
             std::vector<uint8_t> written;
@@ -140,9 +142,10 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     continue;
                 std::vector<uint8_t> bytes;
                 std::string refused;
+                std::vector<std::string> used;
                 bool made = false;
-                for (const std::vector<std::string> &way : ways) {
-                    if (catalogue::Catalogue::write(*form, way, bytes, refused)) {
+                for (const std::vector<std::vector<std::string>> &way : ways) {
+                    if (catalogue::Catalogue::write_any(*form, way, bytes, used, refused)) {
                         made = true;
                         break;
                     }
@@ -166,8 +169,10 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 // Every register asked for has to be named in what comes back,
                 // or the bytes are some other instruction that happens to be
                 // readable.
+                // Checked against the names actually written, not against some
+                // other name the same register goes by.
                 bool mentions_all = true;
-                for (const std::string &named : wanted)
+                for (const std::string &named : used)
                     mentions_all = mentions_all && reads.find(named) != std::string::npos;
                 if (!mentions_all) {
                     last_refusal = "the bytes it would write read back as: " + reads;

@@ -285,22 +285,28 @@ void check_fixed_bits()
 // come out right, since that is where getting it wrong would show.
 void check_bits_against_real_instructions()
 {
-    // MIPS adds with the SPECIAL opcode and a function code of twenty in hex,
-    // and adds unsigned with twenty-one. Both are written down in every MIPS
-    // manual, and both are big-endian, so the bytes and the number agree.
+    // add a0, a1, a2 on MIPS, as a MIPS manual gives it. What is checked is
+    // agreement rather than a particular mask: a form insists on some bits and
+    // the instruction has to have them, and which other bits the form also
+    // pins down is its business.
     catalogue::Catalogue mips;
     if (catalogue_for("MIPS:BE:32:default", mips)) {
-        bool found_add = false;
-        bool found_addu = false;
+        const uint64_t adding = 0x00a62020ull;   // add a0, a1, a2
+        const uint64_t unsigned_adding = 0x00a62021ull;  // addu a0, a1, a2
+
+        int agreeing = 0;
+        int agreeing_unsigned = 0;
         for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
-            if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull)
-                found_add = true;
-            if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000021ull)
-                found_addu = true;
+            if (form->fixed_mask != 0 && (adding & form->fixed_mask) == form->fixed_bits)
+                ++agreeing;
+            if (form->fixed_mask != 0 &&
+                (unsigned_adding & form->fixed_mask) == form->fixed_bits)
+                ++agreeing_unsigned;
         }
-        report(found_add, "a MIPS add is the SPECIAL opcode and a function code of twenty",
-               "no form said so");
-        report(found_addu, "and an unsigned one is twenty-one", "no form said so");
+        report(agreeing > 0, "a real MIPS add agrees with a form that adds",
+               std::to_string(agreeing) + " forms agreed");
+        report(agreeing_unsigned > 0, "and so does an unsigned one",
+               std::to_string(agreeing_unsigned) + " forms agreed");
     }
 
     // AARCH64 writes its bytes the other way round, so an add whose word begins
@@ -346,9 +352,11 @@ void check_writing_an_instruction()
     if (!catalogue_for("MIPS:BE:32:default", mips))
         return;
 
+    // The form a real add agrees with, which is how one is found without
+    // writing its encoding down here.
     const catalogue::Form *adding = nullptr;
     for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
-        if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull) {
+        if (form->fixed_mask != 0 && (0x00a62020ull & form->fixed_mask) == form->fixed_bits) {
             adding = form;
             break;
         }

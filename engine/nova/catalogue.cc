@@ -105,6 +105,16 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
             continue;
         Constraint whole = sofar;
         if (const ghidra::DisjointPattern *pattern = node->getPattern(i)) {
+            // Both counts are in bits, and only the first few are asked for on
+            // purpose.
+            //
+            // A pattern at the bottom of the tree holds what was left to
+            // distinguish once everything above it had been decided, and read
+            // in full it disagrees with instructions that exist - it pins down
+            // bits a real one does not have. What the way down decided is the
+            // part that holds up, checked against MIPS and AARCH64 encodings
+            // that are written down elsewhere, so that is what is used and this
+            // contributes only where it is certain.
             whole.leaf_mask |= pattern->getMask(0, 4, false);
             whole.leaf_bits |= pattern->getValue(0, 4, false);
         }
@@ -319,6 +329,27 @@ Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
     }
 
     resolve_registers(symbol, length, by_offset, 0, 0, 0, slot);
+
+    // Which bits actually choose between registers, as opposed to bits the
+    // table happened to insist on along the way.
+    //
+    // Reaching a register through a table means passing decisions that are part
+    // of the instruction's own identity - its opcode, among others - and those
+    // came back mixed in with the register's bits. Clearing them before writing
+    // a register would erase the opcode and write some other instruction
+    // entirely, which is exactly what it did.
+    //
+    // What varies between the choices is what chooses, so that is the mask: the
+    // bits where the answers differ from one another.
+    if (!slot.registers.empty()) {
+        uint64_t either = 0;
+        uint64_t both = ~static_cast<uint64_t>(0);
+        for (const auto &one : slot.registers) {
+            either |= one.second;
+            both &= one.second;
+        }
+        slot.register_mask = either ^ both;
+    }
     return slot;
 }
 
@@ -405,6 +436,7 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
 
         for (int slot = 0; slot < made->getNumOperands(); ++slot)
             form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
+
         forms_.push_back(std::move(form));
     }
 
@@ -448,6 +480,19 @@ const std::vector<const Form *> &Catalogue::doing(ghidra::OpCode opcode) const
 bool Catalogue::write(const Form &form, const std::vector<std::string> &registers,
                       std::vector<uint8_t> &bytes, std::string &error)
 {
+    std::vector<std::vector<std::string>> only;
+    for (const std::string &one : registers)
+        only.push_back({one});
+    std::vector<std::string> used;
+    return write_any(form, only, bytes, used, error);
+}
+
+bool Catalogue::write_any(const Form &form,
+                          const std::vector<std::vector<std::string>> &registers,
+                          std::vector<uint8_t> &bytes, std::vector<std::string> &used,
+                          std::string &error)
+{
+    used.clear();
     bytes.clear();
     if (form.shortest <= 0 || form.shortest > 8) {
         error = "this form is not a length an instruction can be written in";
@@ -465,14 +510,36 @@ bool Catalogue::write(const Form &form, const std::vector<std::string> &register
             continue;
         if (next >= registers.size())
             break;
-        auto found = slot.registers.find(registers[next]);
+
+        // Whichever of this register's names the slot knows.
+        auto found = slot.registers.end();
+        for (const std::string &name : registers[next]) {
+            found = slot.registers.find(name);
+            if (found != slot.registers.end()) {
+                used.push_back(name);
+                break;
+            }
+        }
         if (found == slot.registers.end()) {
-            error = "this instruction cannot put " + registers[next] + " where it was asked to";
+            error = "this instruction cannot put " +
+                    (registers[next].empty() ? std::string("that") : registers[next].front()) +
+                    " where it was asked to";
             return false;
         }
-        // Clearing before setting, because a slot's bits may have been left
-        // holding whichever register the form happened to be written with.
-        word = (word & ~slot.register_mask) | found->second;
+        // The form's own bits win.
+        //
+        // A register is reached through a table, and the way there passes
+        // decisions that belong to the instruction rather than to the register -
+        // its opcode among them. Those came back mixed into the register's bits,
+        // so writing one without care erases the opcode and writes some other
+        // instruction entirely. Which it did: a RISC-V add came out as a
+        // compressed floating-point store.
+        //
+        // So a slot may only touch bits the form did not insist on. What it
+        // insisted on is what makes the instruction that instruction.
+        const uint64_t may_touch = ~form.fixed_mask;
+        word = (word & ~(slot.register_mask & may_touch)) | (found->second & may_touch);
+        word = (word & ~form.fixed_mask) | form.fixed_bits;
         ++next;
     }
     if (next < registers.size()) {
