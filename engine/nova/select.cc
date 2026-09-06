@@ -124,6 +124,48 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 continue;
             }
 
+            // A return has to go back where the caller came from.
+            //
+            // Several instructions go somewhere an address in a register names,
+            // and a specification calls all of them returns because that is
+            // what they are. Only one of them is how a function goes back:
+            // MIPS's `deret` returns from a debug exception and reads DEPC, and
+            // nothing about its bytes or its meaning distinguishes it from `jr
+            // ra` except which register the address is in. The compiler
+            // specification names that register, so this asks it, and takes
+            // only the forms that read it.
+            //
+            // A processor whose specification names none - or that keeps the
+            // address on the stack, as x86 does - is not filtered, because
+            // there is nothing to filter by and inventing an answer is worse
+            // than leaving the question to the reading-back below.
+            std::vector<const catalogue::Form *> going_back;
+            const std::vector<const catalogue::Form *> *choose_from = &forms;
+            if (operation.opcode == ghidra::CPUI_RETURN) {
+                std::string address_name;
+                ir::Target::RegisterPlace address;
+                std::string missing;
+                if (target.return_address(address_name, address, missing)) {
+                    for (const catalogue::Form *form : forms) {
+                        bool reads_it = false;
+                        for (const catalogue::Form::Piece &piece : form->reads)
+                            reads_it = reads_it || (piece.is_fixed && piece.fixed_is_register &&
+                                                    piece.fixed == address.offset);
+                        if (reads_it)
+                            going_back.push_back(form);
+                    }
+                    if (going_back.empty()) {
+                        problems.push_back(
+                            "this processor's way of returning is not one instruction doing one "
+                            "thing, so none of the ones that are can be used: every form that "
+                            "would go back through " + address_name +
+                            " does more than return");
+                        continue;
+                    }
+                    choose_from = &going_back;
+                }
+            }
+
             // Of those that can hold what was asked for, the shortest whose
             // bytes the processor reads back as the instruction meant.
             //
@@ -151,7 +193,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             const catalogue::Form *best = nullptr;
             std::vector<uint8_t> written;
             std::string last_refusal;
-            for (const catalogue::Form *form : forms) {
+            for (const catalogue::Form *form : *choose_from) {
                 if (best != nullptr && form->shortest >= best->shortest)
                     continue;
                 std::vector<uint8_t> bytes;

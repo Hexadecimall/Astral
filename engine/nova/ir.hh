@@ -168,6 +168,20 @@ struct Target {
     // everything else here is read from.
     bool frame(Frame &out, std::string &error) const;
 
+    // The register a function's return address is in, and its name.
+    //
+    // This is what tells a return apart from the instructions that look like
+    // one. A processor has several ways of going back somewhere and only one of
+    // them is how a function returns: MIPS has `deret`, which goes back to
+    // wherever a debug exception came from, and its specification says it is a
+    // return in exactly the words `jr ra` is. The difference is which register
+    // holds the address, and the compiler specification names it. Choosing the
+    // shorter or the earlier of the two without asking writes a privileged
+    // instruction in place of a return, which reads back cleanly and faults.
+    //
+    // Returns false when the specification names none, which some do not.
+    bool return_address(std::string &name, RegisterPlace &out, std::string &error) const;
+
     // Where a call puts its arguments and its answer, according to this
     // processor's own compiler specification.
     //

@@ -47,8 +47,14 @@ struct Form {
     struct Piece {
         bool is_slot = false;  // one of the form's operands, to be filled in
         int slot = -1;         // which one
-        bool is_fixed = false; // a number the form always uses
+        bool is_fixed = false; // a place or a number the form always uses
         uint64_t fixed = 0;
+
+        // Whether that fixed thing is a register rather than a number, since
+        // the offset alone cannot say: a register a hundred and twenty-four
+        // bytes into the register file and the number a hundred and
+        // twenty-four are the same offset with nothing to tell them apart.
+        bool fixed_is_register = false;
     };
 
     // What the one operation writes to and reads from, when the form does

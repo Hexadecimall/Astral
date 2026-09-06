@@ -49,10 +49,17 @@ Form::Piece read_piece(const ghidra::VarnodeTpl *value)
         piece.is_slot = true;
         piece.slot = offset.getHandleIndex();
         break;
-    case ghidra::ConstTpl::real:
+    case ghidra::ConstTpl::real: {
         piece.is_fixed = true;
         piece.fixed = offset.getReal();
+        const ghidra::ConstTpl &space = value->getSpace();
+        if (space.getType() == ghidra::ConstTpl::spaceid) {
+            const ghidra::AddrSpace *which = space.getSpace();
+            piece.fixed_is_register =
+                which != nullptr && which->getType() == ghidra::IPTR_PROCESSOR;
+        }
         break;
+    }
     default:
         // Something worked out while decoding - where the instruction is, or
         // where it goes next. Neither is a slot to fill nor a fixed number, and
@@ -486,12 +493,28 @@ std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int in
         // it does not produce.
         if (form->writes && !form->writes_to.is_slot)
             continue;
-        if (static_cast<int>(form->reads.size()) != inputs)
-            continue;
-        bool all_slots = true;
-        for (const Form::Piece &piece : form->reads)
-            all_slots = all_slots && piece.is_slot;
-        if (all_slots)
+        // A form reads two kinds of thing, and only one of them is asked for.
+        //
+        // A slot is a place the form leaves open, and something has to be put in
+        // it. A fixed read is a register or a number the form names outright,
+        // because the instruction has no operand for it: a return reads the
+        // register the return address is in and takes no argument saying so.
+        // Counting those as things to supply asked for one value too many and
+        // threw every return away; requiring them to be slots threw the same
+        // ones away for a second reason.
+        //
+        // So a fixed read is part of what the instruction is rather than part of
+        // what is put into it, and whether the form really is the instruction
+        // meant is settled where it always is, by reading the bytes back.
+        int to_fill = 0;
+        bool all_known = true;
+        for (const Form::Piece &piece : form->reads) {
+            if (piece.is_slot)
+                ++to_fill;
+            else if (!piece.is_fixed)
+                all_known = false;  // worked out while decoding: nothing to name
+        }
+        if (all_known && to_fill == inputs)
             plain.push_back(form);
     }
     return plain;

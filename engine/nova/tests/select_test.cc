@@ -208,6 +208,105 @@ void check_a_value_with_no_home()
            "and the reason says so", problems.empty() ? "" : problems.front());
 }
 
+// One operation on its own, written for a processor.
+bool write_one(const std::string &language_id, const pcode::Operation &operation,
+               std::vector<uint8_t> &bytes, std::string &why)
+{
+    ir::Target target;
+    if (!ir::Target::from_language_id(language_id, target, why) ||
+        !target.read_specification(why))
+        return false;
+    catalogue::Catalogue catalogue;
+    if (!catalogue.read(target, why))
+        return false;
+
+    pcode::Block block;
+    block.identifier = 1;
+    block.operations.push_back(operation);
+    pcode::Sequence sequence;
+    sequence.name = "one";
+    sequence.entry = 1;
+    sequence.blocks.push_back(block);
+
+    std::vector<select::Chosen> chosen;
+    std::vector<std::string> problems;
+    select::write(sequence, target, catalogue, chosen, problems);
+    if (chosen.empty()) {
+        why = problems.empty() ? "nothing came out" : problems.front();
+        return false;
+    }
+    bytes = chosen.front().bytes;
+    return true;
+}
+
+// Going back from a function is not the only thing a processor calls a return,
+// and the others are not interchangeable with it. MIPS has `deret`, which goes
+// back to wherever a debug exception came from; its specification says it is a
+// return in the same words `jr ra` is, it is the same four bytes long, and it
+// is the only one of the two that does exactly one thing - so everything that
+// sorts forms by shape or by size picks it. What tells them apart is the
+// register the address is in, which the compiler specification names.
+void check_a_return_goes_back_through_the_return_address()
+{
+    pcode::Operation leaving;
+    leaving.opcode = ghidra::CPUI_RETURN;
+
+    std::vector<uint8_t> bytes;
+    std::string why;
+    const bool wrote = write_one("MIPS:BE:32:default", leaving, bytes, why);
+
+    // Whatever comes out, it must not be the debug-exception return: that
+    // instruction is privileged, and a function ending in one does not go back
+    // to its caller.
+    std::string trouble;
+    const std::string reads =
+        wrote ? reads_as("MIPS:BE:32:default", bytes, trouble) : std::string();
+    report(!wrote || reads.find("deret") == std::string::npos,
+           "a return is not written as the instruction that returns from a debug exception",
+           "it was written as: " + reads);
+
+    // And when it cannot be written, the reason says which register a return
+    // would have had to go back through rather than only that nothing fitted.
+    report(wrote || why.find("ra") != std::string::npos,
+           "and when none can be written the reason names the register a return goes back "
+           "through",
+           why);
+}
+
+// A form that names a register outright is still a form.
+//
+// A return reads the register the return address is in, and the instruction has
+// no operand saying so - the form names it. Counting that as something the
+// caller has to supply asked for one value too many, and requiring every read
+// to be a slot threw the same forms away for a second reason. Either way every
+// return on every processor was discarded.
+void check_a_form_that_names_its_own_register_is_offered()
+{
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("RISCV:LE:64:RV64GC", target, why) ||
+        !target.read_specification(why))
+        return;
+    catalogue::Catalogue catalogue;
+    if (!catalogue.read(target, why))
+        return;
+
+    const std::vector<const catalogue::Form *> forms =
+        catalogue.plainly_doing(ghidra::CPUI_RETURN, 0, true);
+    report(!forms.empty(), "a return that reads no operand is offered a form to be written as",
+           "none of this processor's returns can be chosen");
+
+    // And what those forms read is a register rather than a number, since the
+    // offset alone cannot say which.
+    bool any_register = false;
+    for (const catalogue::Form *form : forms) {
+        for (const catalogue::Form::Piece &piece : form->reads)
+            any_register = any_register || (piece.is_fixed && piece.fixed_is_register);
+    }
+    report(any_register, "and the register it names is known to be a register",
+           "the form's fixed read was not recognised as a place");
+}
+
 } // namespace
 
 int main()
@@ -221,6 +320,8 @@ int main()
     check_shorter_is_not_taken_when_it_means_something_else();
     check_a_register_it_has_not_got();
     check_a_value_with_no_home();
+    check_a_return_goes_back_through_the_return_address();
+    check_a_form_that_names_its_own_register_is_offered();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

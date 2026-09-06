@@ -233,6 +233,43 @@ bool Target::frame(Frame &out, std::string &error) const
     }
 }
 
+bool Target::return_address(std::string &name, RegisterPlace &out, std::string &error) const
+{
+    name.clear();
+    out = RegisterPlace();
+    try {
+        // The compiler specification, not the processor's: where a return
+        // address is kept is a question about how functions are called, and the
+        // answer differs between conventions on the same machine.
+        ghidra::SleighArchitecture *held = specification_for(
+            compiler.empty() ? language_id : language_id + ":" + compiler, error);
+        if (held == nullptr)
+            return false;
+
+        const ghidra::VarnodeData &where = held->defaultReturnAddr;
+        if (where.space == nullptr) {
+            error = "this processor's specification does not say where a return address is kept";
+            return false;
+        }
+        name = register_named_at(held->translate, where.getAddr(), static_cast<int>(where.size));
+        if (name.empty()) {
+            // On several processors the return address is on the stack rather
+            // than in a register, which is not a place a form can name.
+            error = "this processor keeps a return address somewhere that has no register name";
+            return false;
+        }
+        out.offset = where.offset;
+        out.width = static_cast<int>(where.size);
+        return true;
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return false;
+    } catch (ghidra::DecoderError &failure) {
+        error = failure.explain;
+        return false;
+    }
+}
+
 bool Target::calling_convention(const std::vector<int> &widths, int result_width,
                                 std::vector<Storage> &parameters, Storage &result,
                                 std::string &error) const

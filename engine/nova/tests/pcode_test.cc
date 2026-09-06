@@ -887,6 +887,67 @@ void check_the_frame_is_taken_and_given_back()
 
 } // namespace
 
+// Leaving is two things, and the second one carries nothing.
+//
+// A processor's return instruction says nothing whatever about a value: it
+// reads the register the return address is in and goes there. A caller finds an
+// answer only because the convention agreed beforehand where one would be
+// sitting, so what a function does on the way out is put the answer in that
+// place and then go. Handing the value to the return instead asked every
+// processor for a return that takes an argument, and none has one.
+void check_leaving_puts_the_answer_in_its_place()
+{
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("MIPS:BE:32:default", target, why) ||
+        !target.read_specification(why)) {
+        report(false, "the processor is read", why);
+        return;
+    }
+
+    ir::Builder builder("answers");
+    builder.block();
+    builder.ret(builder.constant(42, 4));
+
+    ir::Function function;
+    std::vector<std::string> problems;
+    if (!builder.finish(function, problems)) {
+        report(false, "a function that answers with something is built",
+               problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    pcode::Sequence sequence;
+    if (!pcode::to_pcode(function, target, sequence, problems)) {
+        report(false, "and written as p-code", problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    // Where the answer goes is what this processor's convention says, not
+    // anything chosen here: v0 is where a MIPS function leaves one.
+    const ir::Target::RegisterPlace *expected = target.register_place("v0");
+    report(expected != nullptr && sequence.answer.where == pcode::Where::Register &&
+               sequence.answer.offset == expected->offset,
+           "a function knows where it leaves its answer", "it named no place");
+
+    // And the return itself reads nothing at all.
+    bool leaves_empty_handed = false;
+    for (const pcode::Block &block : sequence.blocks) {
+        for (const pcode::Operation &operation : block.operations) {
+            if (operation.opcode == ghidra::CPUI_RETURN)
+                leaves_empty_handed = operation.inputs.empty();
+        }
+    }
+    report(leaves_empty_handed, "and going back reads nothing, the way an instruction that goes "
+                                "back does",
+           "the return was handed a value no processor's return instruction takes");
+
+    // What it answers with is still forty-two, read from where it was put.
+    const pcode::Answer ran = pcode::run(sequence, pcode::Machine());
+    report(ran.ok && ran.value == 42, "and the answer is still what the function said it was",
+           ran.ok ? "got " + std::to_string(ran.value) : ran.error);
+}
+
 int main()
 {
     if (initialize(nullptr) != ASTRAL_OK) {
@@ -906,6 +967,7 @@ int main()
     check_calling();
     check_frames_become_addresses();
     check_the_frame_is_taken_and_given_back();
+    check_leaving_puts_the_answer_in_its_place();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

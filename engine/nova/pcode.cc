@@ -298,9 +298,17 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
         made.callee = instruction.callee;
         break;
     case ir::Operation::Return:
+        // Nothing is read to leave.
+        //
+        // The representation says what a function answers with, because that is
+        // what the function means. A processor's return instruction says none of
+        // it: the answer was put in its agreed place by the copy just before
+        // this, and what is left to do is go back, which reads the register the
+        // return address is in - a register the instruction names itself rather
+        // than takes as an operand. Handing it the answer as an input asked
+        // every processor for a return that takes one, and none has one.
         made.opcode = ghidra::CPUI_RETURN;
         made.writes = false;
-        made.inputs = arguments;
         break;
     case ir::Operation::Jump:
         made.opcode = ghidra::CPUI_BRANCH;
@@ -349,6 +357,43 @@ bool Writer::write(const ir::Function &function, Sequence &out)
     std::string unused;
     target_.frame(frame_, unused);
 
+    // Where this function will have left its answer by the time it goes back.
+    //
+    // A processor's return instruction carries no value. It reads the register
+    // the return address is in and goes there, and a caller finds an answer
+    // only because the convention agreed beforehand where one would be sitting.
+    // So the place is settled once, here, and every way out puts the answer in
+    // it before leaving.
+    for (const ir::Block &block : function.blocks) {
+        bool found = false;
+        for (const ir::Instruction &instruction : block.instructions) {
+            if (instruction.operation != ir::Operation::Return || instruction.arguments.empty())
+                continue;
+            std::vector<Storage> nowhere;
+            Storage answer;
+            std::string trouble;
+            const int wide = instruction.width > 0 ? instruction.width : target_.word_bytes;
+            if (!target_.calling_convention({}, wide, nowhere, answer, trouble)) {
+                complain("this processor's specification does not say where a function leaves "
+                         "its answer: " + trouble);
+                return false;
+            }
+            if (answer.kind == Storage::Kind::Register) {
+                const ir::Target::RegisterPlace *where =
+                    target_.register_place(answer.register_name);
+                if (where != nullptr) {
+                    out.answer.where = Where::Register;
+                    out.answer.offset = where->offset;
+                    out.answer.size = where->width;
+                }
+            }
+            found = true;
+            break;
+        }
+        if (found)
+            break;
+    }
+
     // A parameter is already somewhere before anything runs, so its place is
     // decided before the body is written and not when it is first read.
     for (const ir::Value &parameter : function.parameters)
@@ -366,11 +411,24 @@ bool Writer::write(const ir::Function &function, Sequence &out)
         }
 
         for (const ir::Instruction &instruction : block.instructions) {
-            // And giving it back before leaving, at every way out rather than
-            // at one of them: a function with two returns gives it back twice
-            // or not at all, and not at all is a stack that never comes back.
-            if (instruction.operation == ir::Operation::Return && function.frame_bytes != 0) {
-                if (!move_stack(function.frame_bytes, true, written))
+            if (instruction.operation == ir::Operation::Return) {
+                // The answer goes where the caller will look, before anything
+                // else about leaving happens - while the frame is still there,
+                // since the answer may be in it.
+                if (!instruction.arguments.empty() && out.answer.size != 0) {
+                    Operation put;
+                    put.opcode = ghidra::CPUI_COPY;
+                    put.writes = true;
+                    put.output = out.answer;
+                    put.inputs.push_back(place(instruction.arguments.front(), out.answer.size));
+                    written.operations.push_back(std::move(put));
+                }
+
+                // And giving the room back before leaving, at every way out
+                // rather than at one of them: a function with two returns gives
+                // it back twice or not at all, and not at all is a stack that
+                // never comes back.
+                if (function.frame_bytes != 0 && !move_stack(function.frame_bytes, true, written))
                     return false;
             }
             if (!operation(instruction, written))
@@ -679,9 +737,11 @@ Answer run(const Sequence &sequence, const Machine &machine)
                 break;
             }
             case ghidra::CPUI_RETURN:
+                // Leaving reads nothing. What the function answered with is
+                // wherever it agreed to leave it, which the sequence says.
                 answer.ok = true;
                 answer.returned = true;
-                answer.value = operation.inputs.empty() ? 0 : input(0);
+                answer.value = sequence.answer.size != 0 ? running.read(sequence.answer) : 0;
                 answer.registers = running.registers();
                 return answer;
 

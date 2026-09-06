@@ -77,6 +77,18 @@ struct Sequence {
     std::string name;
     std::vector<Block> blocks;
     uint32_t entry = 0;
+
+    // Where this function leaves its answer.
+    //
+    // A processor's return instruction carries no value. It reads the register
+    // the return address is in and goes there, and the answer is expected to be
+    // sitting where the calling convention said it would be by the time that
+    // happens. So leaving is two things - put the answer in that place, then go
+    // - and this is the place, taken from the specification when the sequence
+    // was written.
+    //
+    // Zero-sized when the function answers with nothing.
+    Varnode answer;
 };
 
 // Writes `function` as p-code for `target`. Returns false and says what could
