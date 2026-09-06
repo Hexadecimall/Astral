@@ -480,7 +480,11 @@ std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int in
     for (const Form *form : doing(opcode)) {
         if (form->needs_context && !including_context)
             continue;
-        if (!form->writes || !form->writes_to.is_slot)
+        // A form that writes something has to write it somewhere that can be
+        // chosen. One that writes nothing - leaving a function, going
+        // somewhere - is not disqualified by having nowhere to put an answer
+        // it does not produce.
+        if (form->writes && !form->writes_to.is_slot)
             continue;
         if (static_cast<int>(form->reads.size()) != inputs)
             continue;
