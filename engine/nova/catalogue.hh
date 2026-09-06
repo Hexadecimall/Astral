@@ -86,14 +86,21 @@ struct Form {
     // could not be worked out, which is said rather than passed off as a form
     // that insists on nothing.
     //
-    // What these are good for today is telling forms apart: two forms of the
-    // same operation differ here, and that is what makes them two forms. What
-    // they are NOT yet good for is being written into a program. The order the
-    // bits are in has not been checked against instructions anybody has seen,
-    // and until it has, treating them as an encoding would be trusting a
-    // convention nobody confirmed. Checking it is the next thing: build bytes
-    // from a form, hand them back to the same specification to read, and see
-    // whether the same form comes out.
+    // These are the instruction's BYTES in the order they are written, packed
+    // with the first byte most significant - not the instruction read as a
+    // number. On a big-endian processor those are the same thing and on a
+    // little-endian one they are reversed, which is the difference between
+    // these agreeing with a real instruction and agreeing with nothing.
+    //
+    // That was checked rather than assumed. A MIPS add comes out as
+    // mask fc00003f over bits 00000020, which is what a MIPS add is; the one
+    // beside it ends 21, which is what an unsigned MIPS add is. An AARCH64 add
+    // ends 8b, which is what an AARCH64 add begins with, because AARCH64 writes
+    // its bytes the other way round.
+    //
+    // What they are good for is narrowing: a real instruction agrees with very
+    // few forms. Narrowing to exactly one, and filling the slots around these
+    // bits, is what is still to do.
     uint64_t fixed_mask = 0;
     uint64_t fixed_bits = 0;
 

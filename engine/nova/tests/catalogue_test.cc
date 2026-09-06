@@ -9,6 +9,7 @@
 
 #include "session.hh"
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -271,6 +272,62 @@ void check_fixed_bits()
     }
 }
 
+
+// The bits, against instructions that are written down in the world.
+//
+// This is the check that says the reading is right rather than merely
+// self-consistent: a form's bits have to agree with an instruction somebody
+// else wrote, and a big-endian processor and a little-endian one have to both
+// come out right, since that is where getting it wrong would show.
+void check_bits_against_real_instructions()
+{
+    // MIPS adds with the SPECIAL opcode and a function code of twenty in hex,
+    // and adds unsigned with twenty-one. Both are written down in every MIPS
+    // manual, and both are big-endian, so the bytes and the number agree.
+    catalogue::Catalogue mips;
+    if (catalogue_for("MIPS:BE:32:default", mips)) {
+        bool found_add = false;
+        bool found_addu = false;
+        for (const catalogue::Form *form : mips.plainly_doing(ghidra::CPUI_INT_ADD, 2)) {
+            if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000020ull)
+                found_add = true;
+            if (form->fixed_mask == 0xfc00003full && form->fixed_bits == 0x00000021ull)
+                found_addu = true;
+        }
+        report(found_add, "a MIPS add is the SPECIAL opcode and a function code of twenty",
+               "no form said so");
+        report(found_addu, "and an unsigned one is twenty-one", "no form said so");
+    }
+
+    // AARCH64 writes its bytes the other way round, so an add whose word begins
+    // 8b has 8b as its first byte and therefore last in a number read this way.
+    // A real add has to agree with something, and with very few things.
+    catalogue::Catalogue arm;
+    if (catalogue_for("AARCH64:LE:64:AppleSilicon", arm)) {
+        // add x0, x1, x2, as bytes in the order they are written.
+        const uint64_t written = 0x2000028bull;
+        int agreeing = 0;
+        for (const catalogue::Form &form : arm.all()) {
+            if (form.fixed_mask != 0 && (written & form.fixed_mask) == form.fixed_bits)
+                ++agreeing;
+        }
+        report(agreeing > 0 && agreeing < 20,
+               "a real AARCH64 add agrees with a few forms and not with thousands",
+               std::to_string(agreeing) + " forms agreed");
+
+        // And something that is not an instruction at all should agree with
+        // very little, or the bits are not saying anything.
+        int nonsense = 0;
+        for (const catalogue::Form &form : arm.all()) {
+            if (form.fixed_mask != 0 && (0xffffffffull & form.fixed_mask) == form.fixed_bits)
+                ++nonsense;
+        }
+        report(nonsense < agreeing * 40,
+               "and the bits narrow things down rather than agreeing with everything",
+               std::to_string(nonsense) + " agreed with all-ones");
+    }
+}
+
 } // namespace
 
 int main()
@@ -286,6 +343,7 @@ int main()
     check_reading_twice();
     check_shapes();
     check_fixed_bits();
+    check_bits_against_real_instructions();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

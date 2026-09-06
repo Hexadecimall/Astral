@@ -74,9 +74,20 @@ Form::Piece read_piece(const ghidra::VarnodeTpl *value)
 // the tree holds only what was left to distinguish by then. Taking either alone
 // says a form insists on almost nothing, which would make every form look like
 // every other.
+// A decision made on the way down: these bits, this many of them, had to be
+// this. Kept as it was made rather than as a mask, because where those bits sit
+// depends on how long the instruction is, and that is not known until the form
+// at the bottom is reached.
+struct Decided {
+    int start = 0;
+    int size = 0;
+    uint64_t value = 0;
+};
+
 struct Constraint {
-    uint64_t mask = 0;
-    uint64_t bits = 0;
+    std::vector<Decided> decisions;  // from the root down
+    uint64_t leaf_mask = 0;          // and whatever the pattern at the bottom still said
+    uint64_t leaf_bits = 0;
 };
 
 void walk(const ghidra::DecisionNode *node, Constraint sofar,
@@ -91,8 +102,8 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
             continue;
         Constraint whole = sofar;
         if (const ghidra::DisjointPattern *pattern = node->getPattern(i)) {
-            whole.mask |= pattern->getMask(0, 4, false);
-            whole.bits |= pattern->getValue(0, 4, false);
+            whole.leaf_mask |= pattern->getMask(0, 4, false);
+            whole.leaf_bits |= pattern->getValue(0, 4, false);
         }
         found.emplace(made, whole);
     }
@@ -106,19 +117,42 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
         return;
     }
 
-    const int start = node->getStartBit();
-    const int size = node->getBitSize();
     for (int i = 0; i < node->numChildren(); ++i) {
         Constraint below = sofar;
-        // Going to the i-th child is what happens when those bits are i.
-        if (size > 0 && size < 64 && start >= 0 && start + size <= 64) {
-            const uint64_t mask = ((static_cast<uint64_t>(1) << size) - 1)
-                                  << static_cast<unsigned>(start);
-            below.mask |= mask;
-            below.bits |= (static_cast<uint64_t>(i) << static_cast<unsigned>(start)) & mask;
-        }
+        Decided decision;
+        decision.start = node->getStartBit();
+        decision.size = node->getBitSize();
+        decision.value = static_cast<uint64_t>(i);  // going to the i-th child is those bits being i
+        if (decision.size > 0)
+            below.decisions.push_back(decision);
         walk(node->getChild(i), below, found);
     }
+}
+
+// The decisions turned into the bits of an instruction that long.
+//
+// A bit is counted from the top of the instruction rather than the bottom. That
+// is not a guess: counted from the bottom, no form at all agrees with an
+// instruction anybody has seen, and counted from the top exactly one does,
+// which is what it should be - one instruction means one form.
+void settle(const Constraint &constraint, int length, uint64_t &mask, uint64_t &bits)
+{
+    mask = constraint.leaf_mask;
+    bits = constraint.leaf_bits;
+    if (length <= 0 || length > 8)
+        return;
+
+    const int width = length * 8;
+    for (const Decided &decision : constraint.decisions) {
+        const int shift = width - decision.start - decision.size;
+        if (shift < 0 || decision.size <= 0 || decision.size >= 64)
+            continue;
+        const uint64_t here = ((static_cast<uint64_t>(1) << decision.size) - 1)
+                              << static_cast<unsigned>(shift);
+        mask |= here;
+        bits |= (decision.value << static_cast<unsigned>(shift)) & here;
+    }
+    bits &= mask;
 }
 
 } // namespace
@@ -187,10 +221,8 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         }
 
         auto pattern = patterns.find(made);
-        if (pattern != patterns.end()) {
-            form.fixed_mask = pattern->second.mask;
-            form.fixed_bits = pattern->second.bits & pattern->second.mask;
-        }
+        if (pattern != patterns.end())
+            settle(pattern->second, form.shortest, form.fixed_mask, form.fixed_bits);
         forms_.push_back(std::move(form));
     }
 
