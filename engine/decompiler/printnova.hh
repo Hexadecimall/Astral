@@ -49,7 +49,11 @@ public:
   virtual void emitVarDecl(const Symbol *sym);
   virtual void emitPrototypeInputs(const FuncProto *proto);
   virtual void emitFunctionDeclaration(const Funcdata *fd);
-  virtual void opCast(const PcodeOp *op);
+  virtual void opTypeCast(const PcodeOp *op);
+  virtual void pushConstant(uintb val,const Datatype *ct,tagtype tag,
+			    const Varnode *vn,const PcodeOp *op,uint4 displayFormat);
+  virtual void opBranchind(const PcodeOp *op);
+  virtual void emitBlockSwitch(const BlockSwitch *bl);
   virtual string genericFunctionName(const Address &addr);
   virtual string genericTypeName(const Datatype *ct);
 };

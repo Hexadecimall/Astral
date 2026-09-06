@@ -197,7 +197,7 @@ protected:
   void emitCommentFuncHeader(const Funcdata *fd);	///< Emit comments in the given function's header
   void emitForLoop(const BlockWhileDo *bl);		///< Emit block as a \e for loop
   void opFunc(const PcodeOp *op);			///< Push a \e functional expression based on the given p-code op to the RPN stack
-  void opTypeCast(const PcodeOp *op);			///< Push the given p-code op using type-cast syntax to the RPN stack
+  virtual void opTypeCast(const PcodeOp *op);		///< Push the given p-code op using type-cast syntax to the RPN stack
   void opHiddenFunc(const PcodeOp *op);			///< Push the given p-code op as a hidden token
   static void printCharHexEscape(ostream &s,int4 val);	///< Print value as an escaped hex sequence
   bool printCharacterConstant(ostream &s,const Address &addr,Datatype *charType) const;

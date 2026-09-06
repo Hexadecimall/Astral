@@ -268,6 +268,22 @@ std::string Knowledge::constant_name(const std::string &context, uint64_t value)
     return entry == anywhere->second.end() ? std::string() : entry->second;
 }
 
+// Names are unique across contexts in practice, and a name that did appear in
+// two would stand for the same thing in both: the point of naming a constant
+// is that the name says what the number means.
+bool Knowledge::constant_value(const std::string &name, uint64_t &value) const
+{
+    if (name.empty())
+        return false;
+    for (const auto &scope : constants_)
+        for (const auto &entry : scope.second)
+            if (entry.second == name) {
+                value = entry.first;
+                return true;
+            }
+    return false;
+}
+
 std::string Knowledge::verb_for(const std::string &callee) const
 {
     auto it = verbs_.find(callee);

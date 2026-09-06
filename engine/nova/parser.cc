@@ -59,6 +59,11 @@ private:
     StatementPtr parse_statement();
     StatementPtr parse_statement_body();
     StatementPtr parse_block();
+    // The body of an if, a loop or an arm. Braces are how Nova is written and
+    // what the formatter puts back, but a single statement is accepted so that
+    // `if (done) goto end;` reads, which is how a recovered branch out of a
+    // structure comes across.
+    StatementPtr parse_body();
     StatementPtr parse_declaration(bool is_stack);
     StatementPtr parse_if();
     StatementPtr parse_while();
@@ -619,6 +624,20 @@ StatementPtr Parser::parse_block()
     return block;
 }
 
+StatementPtr Parser::parse_body()
+{
+    if (peek().is_punctuation("{"))
+        return parse_block();
+    StatementPtr one = parse_statement();
+    if (!one)
+        return nullptr;
+    auto block = std::make_unique<Statement>();
+    block->kind = Statement::Kind::Compound;
+    block->where = one->where;
+    block->body.push_back(std::move(one));
+    return block;
+}
+
 StatementPtr Parser::parse_statement()
 {
     std::string documentation = take_documentation();
@@ -764,14 +783,14 @@ StatementPtr Parser::parse_if()
     statement->value = parse_expression();
     if (!statement->value || !expect(")", "to close the condition"))
         return nullptr;
-    statement->then_branch = parse_block();
+    statement->then_branch = parse_body();
     if (!statement->then_branch)
         return nullptr;
     if (accept_word("else")) {
         if (peek().is_name("if"))
             statement->else_branch = parse_if();
         else
-            statement->else_branch = parse_block();
+            statement->else_branch = parse_body();
         if (!statement->else_branch)
             return nullptr;
     }
@@ -788,7 +807,7 @@ StatementPtr Parser::parse_while()
     statement->value = parse_expression();
     if (!statement->value || !expect(")", "to close the condition"))
         return nullptr;
-    statement->then_branch = parse_block();
+    statement->then_branch = parse_body();
     return statement->then_branch ? std::move(statement) : nullptr;
 }
 
@@ -797,7 +816,7 @@ StatementPtr Parser::parse_do_while()
     auto statement = std::make_unique<Statement>();
     statement->kind = Statement::Kind::DoWhile;
     statement->where = take().where;
-    statement->then_branch = parse_block();
+    statement->then_branch = parse_body();
     if (!statement->then_branch)
         return nullptr;
     if (!expect_word("while", "after the do block") || !expect("(", "after while"))
@@ -814,7 +833,7 @@ StatementPtr Parser::parse_loop()
     auto statement = std::make_unique<Statement>();
     statement->kind = Statement::Kind::Loop;
     statement->where = take().where;
-    statement->then_branch = parse_block();
+    statement->then_branch = parse_body();
     return statement->then_branch ? std::move(statement) : nullptr;
 }
 
@@ -836,7 +855,7 @@ StatementPtr Parser::parse_for()
     statement->subject = parse_expression();
     if (!statement->subject || !expect(")", "to close the for"))
         return nullptr;
-    statement->then_branch = parse_block();
+    statement->then_branch = parse_body();
     return statement->then_branch ? std::move(statement) : nullptr;
 }
 
@@ -959,9 +978,28 @@ ExpressionPtr Parser::make(Expression::Kind kind, const Where &where)
     return expression;
 }
 
+// A comma joins two things done in order and answers with the second. The
+// decompiler writes conditions like `(x = f(a), x == 0)` constantly, so this
+// is not a corner of the language but most of what a recovered branch looks
+// like. Call arguments are read by parse_assignment and never reach here, so
+// a comma between them still separates rather than joins.
 ExpressionPtr Parser::parse_expression()
 {
-    return parse_assignment();
+    ExpressionPtr left = parse_assignment();
+    if (!left)
+        return nullptr;
+    while (peek().is_punctuation(",")) {
+        Where where = take().where;
+        ExpressionPtr right = parse_assignment();
+        if (!right)
+            return nullptr;
+        ExpressionPtr joined = make(Expression::Kind::Binary, where);
+        joined->binary_op = BinaryOp::Comma;
+        joined->left = std::move(left);
+        joined->right = std::move(right);
+        left = std::move(joined);
+    }
+    return left;
 }
 
 ExpressionPtr Parser::parse_assignment()

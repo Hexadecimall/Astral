@@ -1,6 +1,7 @@
 // The Nova back-end. See printnova.hh for what separates it from PrintAstral.
 #include "printnova.hh"
 
+#include "blockaction.hh"
 #include "funcdata.hh"
 
 #include <cctype>
@@ -287,35 +288,145 @@ void PrintNova::emitFunctionDeclaration(const Funcdata *fd)
   emit->endFuncProto(id);
 }
 
-void PrintNova::opCast(const PcodeOp *op)
+// A cast reads left to right in Nova. Every path that widens, narrows or
+// reinterprets a value comes through here, so one spelling covers them all
+// rather than `as` appearing only where the decompiler happened to call it a
+// cast and C's parentheses surviving everywhere else.
+void PrintNova::opTypeCast(const PcodeOp *op)
 
 {
-  // A cast that only takes the address of a frame slot, and one that says
-  // nothing a reader needs, are both handled by the readable printer already.
-  int8 off;
-  if (frameSlot(op->getIn(0),off)) {
-    PrintAstral::opCast(op);
-    return;
-  }
   const Varnode *in = op->getIn(0);
   const Varnode *out = op->getOut();
   if (in == (const Varnode *)0 || out == (const Varnode *)0) {
-    PrintAstral::opCast(op);
+    PrintC::opTypeCast(op);
     return;
   }
-  if (castIsSilent(in->getHighTypeReadFacing(op),out->getHighTypeDefFacing())) {
-    PrintAstral::opCast(op);
-    return;
-  }
-  if (option_nocasts) {
-    pushVn(in,op,mods);
-    return;
-  }
-  // Nova reads left to right: the value, then what it is being read as.
   Datatype *dt = out->getHighTypeDefFacing();
-  pushOp(&as_cast,op);
-  pushVn(in,op,mods);
-  pushAtom(Atom(novaType(dt),typetoken,EmitMarkup::type_color,dt));
+  if (option_nocasts || castIsSilent(in->getHighTypeReadFacing(op), dt)) {
+    pushVn(in, op, mods);
+    return;
+  }
+  pushOp(&as_cast, op);
+  pushVn(in, op, mods);
+  pushAtom(Atom(novaType(dt), typetoken, EmitMarkup::type_color, dt));
+}
+
+// A number standing where a pointer belongs still says what it is being read
+// as, and says it the way every other cast in Nova does. The readable printer
+// only ever claims integers, so nothing it does is stepped over here.
+void PrintNova::pushConstant(uintb val,const Datatype *ct,tagtype tag,
+			     const Varnode *vn,const PcodeOp *op,uint4 displayFormat)
+
+{
+  const bool plain_pointer = ct != (const Datatype *)0 && ct->getMetatype() == TYPE_PTR
+			     && !option_nocasts && !(val == 0 && option_NULL);
+  if (!plain_pointer) {
+    PrintAstral::pushConstant(val, ct, tag, vn, op, displayFormat);
+    return;
+  }
+  // A pointer into text is the text, and a pointer at a function is its name.
+  // Both say far more than the number does, so both are tried first, in the
+  // order the base printer tries them. Only what it would have fallen back to
+  // spelling as a cast is Nova's business here.
+  const Datatype *pointed = ((const TypePointer *)ct)->getPtrTo();
+  if (pointed != (const Datatype *)0) {
+    if (pointed->isCharPrint()
+	&& pushPtrCharConstant(val, (const TypePointer *)ct, vn, op))
+      return;
+    if (pointed->getMetatype() == TYPE_CODE
+	&& pushPtrCodeConstant(val, (const TypePointer *)ct, vn, op))
+      return;
+  }
+  pushOp(&as_cast, op);
+  pushMod();
+  if (!isSet(force_dec))
+    setMod(force_hex);
+  push_integer(val, ct->getSize(), false, tag, vn, op, displayFormat);
+  popMod();
+  pushAtom(Atom(novaType(ct), typetoken, EmitMarkup::type_color, ct));
+}
+
+// Nova chooses with `match`, and its arms are blocks rather than labels to
+// fall through. Choosing on a value is the same idea in both languages; only
+// the shape of writing it down differs.
+void PrintNova::opBranchind(const PcodeOp *op)
+
+{
+  emit->tagOp("match", EmitMarkup::keyword_color, op);
+  emit->spaces(1);
+  int4 id = emit->openParen(OPEN_PAREN);
+  pushVn(op->getIn(0), op, mods);
+  recurse();
+  emit->closeParen(CLOSE_PAREN, id);
+}
+
+void PrintNova::emitBlockSwitch(const BlockSwitch *bl)
+
+{
+  pushMod();
+  unsetMod(no_branch | only_branch);
+
+  // Whatever the block does before it chooses.
+  pushMod();
+  setMod(no_branch);
+  bl->getSwitchBlock()->emit(this);
+  popMod();
+
+  emit->tagLine();
+  pushMod();
+  setMod(only_branch | comma_separate);
+  bl->getSwitchBlock()->emit(this);	// prints `match (value)`
+  popMod();
+  emit->spaces(1);
+  emit->print(OPEN_CURLY);
+
+  for (int4 i = 0; i < bl->getNumCaseBlocks(); ++i) {
+    int4 indent = emit->startIndent();
+    emit->tagLine();
+    if (bl->isDefaultCase(i)) {
+      emit->print(KEYWORD_ELSE, EmitMarkup::keyword_color);
+    }
+    else {
+      // Several values answered by one body are written on one arm, which is
+      // the only place Nova lets two labels share a block.
+      const Datatype *ct = bl->getSwitchType();
+      const PcodeOp *op = bl->getCaseBlock(i)->firstOp();
+      uint4 displayFormat = bl->getDisplayFormat();
+      if (displayFormat == 0)
+        displayFormat = ct->getDisplayFormat();
+      int4 num = bl->getNumLabels(i);
+      for (int4 j = 0; j < num; ++j) {
+        if (j != 0) {
+          emit->spaces(1);
+          emit->print("or", EmitMarkup::keyword_color);
+          emit->spaces(1);
+        }
+        pushConstant(bl->getLabel(i, j), ct, casetoken, (Varnode *)0, op, displayFormat);
+        recurse();
+      }
+    }
+    emit->spaces(1);
+    emit->print(OPEN_CURLY);
+    int4 body = emit->startIndent();
+    if (bl->getGotoType(i) != 0) {
+      emit->tagLine();
+      emitGotoStatement(bl->getBlock(0), bl->getCaseBlock(i), bl->getGotoType(i));
+    }
+    else {
+      FlowBlock *arm = bl->getCaseBlock(i);
+      int4 id = emit->beginBlock(arm);
+      arm->emit(this);
+      emit->endBlock(id);
+    }
+    emit->stopIndent(body);
+    emit->tagLine();
+    emit->print(CLOSE_CURLY);
+    emit->stopIndent(indent);
+  }
+
+  emit->tagLine();
+  emit->print(CLOSE_CURLY);
+  popMod();
 }
 
 } // End namespace ghidra

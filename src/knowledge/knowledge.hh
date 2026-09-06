@@ -80,6 +80,11 @@ public:
     // over one recorded for every context, so 0x40087468 is TIOCGWINSZ in an
     // ioctl request slot and stays a number everywhere else.
     std::string constant_name(const std::string &context, uint64_t value) const;
+    // The value a named constant stands for, which is the same question the
+    // other way round. The emitter writes these names into the listing, so
+    // whatever reads that listing back has to be able to resolve them.
+    // Returns false when nothing here goes by that name.
+    bool constant_value(const std::string &name, uint64_t &value) const;
     const std::map<std::string, std::string> &prototypes() const { return protos_; }
 
     // A comment to attach where `text` appears in a function body.

@@ -1,9 +1,11 @@
 #include "lower.hh"
 
 #include "format.hh"
+#include "knowledge.hh"
 #include "lexer.hh"
 
 #include <cctype>
+#include <cstdlib>
 #include <set>
 #include <utility>
 
@@ -22,6 +24,27 @@ struct Binding {
     bool is_constant = false;
     bool is_function = false;
 };
+
+// `_2_6_` names six bytes starting two bytes in. The emitter writes these
+// whenever the decompiler read part of a value without knowing what the whole
+// was, so refusing them would mean refusing Astral's own output. Returns how
+// wide the piece is, rounded up to a width a register holds.
+bool byte_slice_width(const std::string &name, int &width)
+{
+    if (name.size() < 5 || name.front() != '_' || name.back() != '_')
+        return false;
+    size_t middle = name.find('_', 1);
+    if (middle == std::string::npos || middle + 1 >= name.size() - 1)
+        return false;
+    for (size_t i = 1; i < name.size() - 1; ++i)
+        if (i != middle && (name[i] < '0' || name[i] > '9'))
+            return false;
+    unsigned long bytes = std::strtoul(name.c_str() + middle + 1, nullptr, 10);
+    if (bytes == 0)
+        return false;
+    width = bytes <= 1 ? 1 : bytes <= 2 ? 2 : bytes <= 4 ? 4 : 8;
+    return true;
+}
 
 // x5 and w5 are one register seen at two widths; d3 and s3 likewise. The
 // canonical spelling is the wide one, and a narrow mention is a cast.
@@ -655,10 +678,14 @@ bool Lowerer::fold_constant(const Expression &expression, uint64_t &value)
         return true;
     case Expression::Kind::Name: {
         auto found = enum_constants_.find(expression.name);
-        if (found == enum_constants_.end())
-            return false;
-        value = found->second;
-        return true;
+        if (found != enum_constants_.end()) {
+            value = found->second;
+            return true;
+        }
+        // A constant the emitter named rather than left as a number. The
+        // listing says TIOCGWINSZ or INT8_MAX because that is what the value
+        // means; reading it back has to undo exactly that.
+        return Knowledge::instance().constant_value(expression.name, value);
     }
     case Expression::Kind::Member: {
         if (!expression.left || expression.left->kind != Expression::Kind::Name)
@@ -1104,14 +1131,27 @@ c::ExpressionPtr Lowerer::member(const Expression &e, TypePtr &type)
         through_pointer = false;
     }
     result->through_pointer = through_pointer;
+    int slice = 0;
     if (record && record->kind == c::Type::Kind::Struct) {
         for (const c::Type::Member &member : record->members)
             if (member.name == e.name) {
                 type = member.type;
                 return result;
             }
+        if (byte_slice_width(e.name, slice)) {
+            warn(e.where, e.name + " names bytes inside " + record->name
+                              + " rather than a member of it");
+            type = types_.unknown(slice);
+            return result;
+        }
         say(e.where, record->name + " has no member called " + e.name);
         return nullptr;
+    }
+    // Reached through something whose shape was never recovered. A slice still
+    // says how wide it is, which is all the generator needs.
+    if (byte_slice_width(e.name, slice)) {
+        type = types_.unknown(slice);
+        return result;
     }
     type = nullptr;
     return result;

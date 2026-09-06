@@ -3,12 +3,30 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <utility>
 
 namespace astral_internal {
 namespace compiler {
 namespace {
+
+// `_2_6_` is the decompiler's name for six bytes starting two bytes in. Fills
+// `offset` with where the piece begins and returns false when the name is not
+// one of these.
+bool byte_slice_offset(const std::string &name, uint64_t &offset)
+{
+    if (name.size() < 5 || name.front() != '_' || name.back() != '_')
+        return false;
+    const size_t middle = name.find('_', 1);
+    if (middle == std::string::npos || middle == 1 || middle + 1 >= name.size() - 1)
+        return false;
+    for (size_t i = 1; i < name.size() - 1; ++i)
+        if (i != middle && (name[i] < '0' || name[i] > '9'))
+            return false;
+    offset = std::strtoull(name.c_str() + 1, nullptr, 10);
+    return true;
+}
 
 // Where a named thing lives while the body runs.
 struct Slot {
@@ -333,6 +351,17 @@ void Generator::address(const Expression &expression)
                     known = true;
                     break;
                 }
+        }
+        if (!known) {
+            // `_2_6_` names six bytes starting two bytes in. The emitter writes
+            // this wherever a value was used at more than one width, and the
+            // name carries the offset, so it can be reached like any other
+            // member rather than refused.
+            uint64_t slice = 0;
+            if (byte_slice_offset(expression.name, slice)) {
+                offset = slice;
+                known = true;
+            }
         }
         if (!known) {
             say(expression.where, "there is no member called " + expression.name + " here");
