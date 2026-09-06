@@ -90,6 +90,15 @@ struct Form {
     // recorded here and asked there.
     std::vector<uint64_t> also_writes;
 
+    // And the slots it writes to besides the one it writes its answer to.
+    //
+    // An instruction that writes back changes the register it was given: `ldr
+    // x6, [x7]!` reads through x7 and leaves x7 somewhere else. Which register
+    // that is, is not known until one is put in the slot, so what is recorded
+    // is the slot - and whether anything was relying on whatever went in it is
+    // a question about the function, asked where the choosing happens.
+    std::vector<int> also_writes_slots;
+
     // Slots that have to hold nought for the form to mean what it says.
     //
     // A load or a store does not take an address, it takes the pieces an
@@ -99,6 +108,16 @@ struct Form {
     // nothing - so the register is the operand and the rest are noughts, and
     // saying which is what lets the form be chosen at all.
     std::vector<int> zeroed;
+
+    // The question a branch asks, when it asks one itself.
+    //
+    // No processor computes a truth into a register in one instruction and none
+    // needs to: the instruction that acts on a comparison is the comparison.
+    // MIPS writes `beq rs, rt, somewhere`, whose template compares and then
+    // branches on the answer, so what the form is choosable for is that
+    // comparison rather than a branch on a truth somebody else worked out.
+    // CPUI_COPY means it branches on a value it was given.
+    ghidra::OpCode compares = ghidra::CPUI_COPY;
 
     // One of the places a form leaves open, and what can go in it.
     struct Slot {

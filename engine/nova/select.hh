@@ -36,6 +36,15 @@ struct Chosen {
     std::vector<uint8_t> bytes;
     // Which form was used, for anyone asking why these bytes and not others.
     const catalogue::Form *form = nullptr;
+
+    // Where the block this instruction belongs to starts, and where it goes if
+    // it goes anywhere. A branch cannot be written until it is known how far it
+    // has to reach, and that is not known until everything before it has been
+    // written - so instructions are chosen first and the ones that go somewhere
+    // are written again once the distances are settled.
+    uint32_t in_block = 0;
+    bool goes_somewhere = false;
+    uint32_t goes_to = 0;
 };
 
 // Writes what it can of `sequence` for `target`.

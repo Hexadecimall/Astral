@@ -65,6 +65,13 @@ struct Operation {
     // Who is being called, for a call. A call names an address once there is
     // one; until then the name is what there is to go on.
     std::string callee;
+
+    // The question a branch is asking, when the comparison that asks it was
+    // folded into the branch itself. No processor computes a truth into a
+    // register in one instruction and none needs to: the instruction that acts
+    // on a comparison is the comparison, which is what `beq` is. CPUI_COPY
+    // means nothing was folded and the branch reads a value already worked out.
+    ghidra::OpCode compares = ghidra::CPUI_COPY;
 };
 
 // A block of operations, still in the order and shape the representation had.

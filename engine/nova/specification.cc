@@ -148,7 +148,7 @@ std::string reads_as(const std::string &target, const std::vector<uint8_t> &byte
 }
 
 std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                              std::string &error)
+                              std::string &error, uint64_t *at)
 {
     static std::mutex lock;
     static uint64_t next = 0x40000;
@@ -187,6 +187,8 @@ std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8
     next += 0x100;
     image->serving_at = next;
     image->serving = bytes;
+    if (at != nullptr)
+        *at = next;
 
     Collected collected;
     collected.into = &meant;

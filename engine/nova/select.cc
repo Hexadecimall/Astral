@@ -126,8 +126,17 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
         }
     }
 
+    // A branch that carries its own question is checked on the question.
+    //
+    // When the comparison was folded into the branch, what the bytes have to
+    // mean is that comparison over those places - the branch itself reads a
+    // truth the instruction worked out for itself, and looking for the branch's
+    // input among the places asked for would find nothing.
+    const ghidra::OpCode looking_for =
+        wanted.compares != ghidra::CPUI_COPY ? wanted.compares : wanted.opcode;
+
     for (const Meaning &doing : meant) {
-        if (doing.opcode != wanted.opcode)
+        if (doing.opcode != looking_for)
             continue;
 
         // Everywhere its inputs came from, taken together, because an
@@ -158,6 +167,8 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
 
         if (!wanted.writes)
             return true;
+        if (wanted.compares != ghidra::CPUI_COPY)
+            return true;  // the answer stays inside the instruction
 
         // And the answer gets to where it was asked to go, whether the
         // operation wrote it there or something after it moved it.
@@ -178,6 +189,41 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
                 }
             }
         }
+    }
+    return false;
+}
+
+// The operations that answer a question with a truth.
+bool is_a_comparison(ghidra::OpCode opcode)
+{
+    switch (opcode) {
+    case ghidra::CPUI_INT_EQUAL:
+    case ghidra::CPUI_INT_NOTEQUAL:
+    case ghidra::CPUI_INT_LESS:
+    case ghidra::CPUI_INT_SLESS:
+    case ghidra::CPUI_INT_LESSEQUAL:
+    case ghidra::CPUI_INT_SLESSEQUAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Where an instruction goes, as the processor works it out. Not a number in the
+// const space: a destination is an address in the code, so it is read off the
+// operation that goes there rather than out of the numbers.
+bool goes_to_in(const std::vector<Meaning> &meant, uint64_t &where)
+{
+    for (const Meaning &one : meant) {
+        const bool transfers = one.opcode == ghidra::CPUI_BRANCH ||
+                               one.opcode == ghidra::CPUI_CBRANCH ||
+                               one.opcode == ghidra::CPUI_CALL;
+        if (!transfers || one.inputs.empty() || one.inputs.front().space == nullptr)
+            continue;
+        if (one.inputs.front().space->getType() == ghidra::IPTR_CONSTANT)
+            continue;  // a relative jump inside the instruction's own p-code
+        where = one.inputs.front().offset;
+        return true;
     }
     return false;
 }
@@ -307,6 +353,116 @@ bool solve(const catalogue::Form &form,
     return false;
 }
 
+// Writes a branch again, now that it is known how far it has to reach.
+//
+// A branch says how far, not where, so its bytes depend on where it is - which
+// is not known until everything before it has been written. The field that
+// carries the distance is not one of the operation's values and so was never
+// filled: it is solved here the same way any other field is, by writing a
+// nought and a one and asking the processor where the instruction would go each
+// time. The difference is what one step of the field reaches, and the rest is
+// arithmetic, checked by asking again.
+//
+// Everything is measured from where the reading happened, because the reading
+// happens somewhere else each time and a distance is the only part of the
+// answer that does not move.
+bool aim(const catalogue::Form &form, const std::vector<catalogue::Catalogue::Wanted> &places,
+         const std::vector<int> &roles, const ir::Target &target, int64_t reaches,
+         std::vector<uint8_t> &bytes, std::string &refused)
+{
+    const std::string spoken = target.compiler.empty()
+                                   ? target.language_id
+                                   : target.language_id + ":" + target.compiler;
+
+    for (size_t slot = 0; slot < form.slots.size(); ++slot) {
+        bool spoken_for = false;
+        for (int role : roles)
+            spoken_for = spoken_for || role == static_cast<int>(slot);
+        for (int zeroed : form.zeroed)
+            spoken_for = spoken_for || zeroed == static_cast<int>(slot);
+        if (spoken_for || !form.slots[slot].is_placed() || form.slots[slot].is_register())
+            continue;
+
+        for (size_t way = 0; way < form.slots[slot].numbers.size() && way < 8; ++way) {
+            std::vector<catalogue::Catalogue::Wanted> asking = places;
+            std::vector<int> where = roles;
+            catalogue::Catalogue::Wanted field;
+            field.is_number = true;
+            field.is_raw_field = true;
+            field.way = static_cast<int>(way);
+            asking.push_back(field);
+            where.push_back(static_cast<int>(slot));
+
+            int64_t reading[2] = {0, 0};
+            bool answered = true;
+            for (int step = 0; step < 2 && answered; ++step) {
+                asking.back().number = static_cast<uint64_t>(step);
+                std::vector<uint8_t> probe;
+                std::vector<std::string> spent;
+                std::string trouble;
+                if (!catalogue::Catalogue::write_mixed(form, asking, probe, spent, trouble,
+                                                       where)) {
+                    answered = false;
+                    break;
+                }
+                uint64_t stood_at = 0;
+                std::string unreadable;
+                uint64_t lands = 0;
+                if (!goes_to_in(means_as(spoken, probe, unreadable, &stood_at), lands)) {
+                    answered = false;
+                    break;
+                }
+                reading[step] = static_cast<int64_t>(lands) - static_cast<int64_t>(stood_at);
+            }
+            if (!answered)
+                continue;
+
+            const int64_t step_reaches = reading[1] - reading[0];
+            if (step_reaches == 0)
+                continue;
+            const int64_t away = reaches - reading[0];
+            if (away % step_reaches != 0)
+                continue;
+            const int64_t steps = away / step_reaches;
+
+            // A branch that goes backwards reaches a negative distance, and a
+            // field holds that the way a field holds anything negative: as the
+            // bits that mean it. Whether those bits really reach back that far
+            // is settled below by asking, the same as everything else.
+            const int width = form.slots[slot].numbers[way].field.width;
+            uint64_t held = static_cast<uint64_t>(steps);
+            if (steps < 0) {
+                if (width <= 0 || width >= 64)
+                    continue;
+                held = static_cast<uint64_t>(steps) &
+                       ((static_cast<uint64_t>(1) << width) - 1);
+            }
+
+            asking.back().number = held;
+            std::vector<uint8_t> candidate;
+            std::vector<std::string> spent;
+            std::string trouble;
+            if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble,
+                                                   where))
+                continue;
+
+            uint64_t stood_at = 0;
+            std::string unreadable;
+            uint64_t lands = 0;
+            if (!goes_to_in(means_as(spoken, candidate, unreadable, &stood_at), lands))
+                continue;
+            if (static_cast<int64_t>(lands) - static_cast<int64_t>(stood_at) != reaches)
+                continue;
+
+            bytes = std::move(candidate);
+            return true;
+        }
+    }
+
+    refused = "no field in this instruction can reach that far";
+    return false;
+}
+
 std::string where_it_is(const pcode::Varnode &node)
 {
     std::ostringstream out;
@@ -327,6 +483,16 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
            std::vector<std::string> &problems)
 {
     const size_t before = problems.size();
+
+    // A branch, put aside until it is known how far it reaches.
+    struct Aiming {
+        size_t which = 0;  // where in `out` the instruction sits
+        const catalogue::Form *form = nullptr;
+        std::vector<catalogue::Catalogue::Wanted> places;
+        std::vector<int> roles;
+        uint32_t to = 0;
+    };
+    std::vector<Aiming> aiming;
 
     // The registers this function keeps things in.
     //
@@ -377,6 +543,50 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                                               block.operations.end());
         std::set<size_t> already_split;   // an operand put in a register
         std::set<size_t> already_built;   // a number made out of smaller ones
+
+        // A comparison whose answer only a branch ever reads is part of that
+        // branch.
+        //
+        // No processor computes a truth into a register in one instruction -
+        // not one of the three has a form that does - and none needs to,
+        // because the instruction that acts on a comparison is the comparison:
+        // MIPS writes `beq rs, rt, somewhere` and has thirty-eight ways to do
+        // it. So a comparison followed by a branch on its answer is one
+        // instruction, and the comparison on its own is not written at all.
+        {
+            for (size_t at = 0; at + 1 < pending.size(); ++at) {
+                const pcode::Operation &comparing = pending[at];
+                const pcode::Operation &going = pending[at + 1];
+                if (!is_a_comparison(comparing.opcode) || !comparing.writes ||
+                    going.opcode != ghidra::CPUI_CBRANCH || going.inputs.empty())
+                    continue;
+                if (going.inputs.front().where != comparing.output.where ||
+                    going.inputs.front().offset != comparing.output.offset)
+                    continue;
+
+                // Only when nothing else reads it, since writing the branch
+                // instead of the comparison leaves the answer nowhere.
+                bool read_elsewhere = false;
+                for (size_t other = 0; other < pending.size(); ++other) {
+                    if (other == at || other == at + 1)
+                        continue;
+                    for (const pcode::Varnode &input : pending[other].inputs)
+                        read_elsewhere = read_elsewhere ||
+                                         (input.where == comparing.output.where &&
+                                          input.offset == comparing.output.offset);
+                }
+                if (read_elsewhere)
+                    continue;
+
+                pcode::Operation fused = going;
+                fused.opcode = ghidra::CPUI_CBRANCH;
+                fused.inputs = comparing.inputs;
+                fused.compares = comparing.opcode;
+                pending[at + 1] = fused;
+                pending.erase(pending.begin() + static_cast<long>(at));
+                --at;
+            }
+        }
 
         for (size_t step = 0; step < pending.size() && step < 4096; ++step) {
             const pcode::Operation operation = pending[step];
@@ -431,9 +641,33 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // reads from, and the choice is in which instruction it is rather
             // than in a field of one. Asking a form to hold it asked for a
             // place too many and nothing matched.
+            // A branch's destination is not a value either. p-code names where
+            // it goes first, and where it goes is settled by laying the
+            // function out rather than by putting anything in a slot - so it is
+            // passed over here and filled in once the distances are known.
+            //
+            // A fused branch is the exception: its inputs are the comparison's,
+            // and the comparison has no destination among them.
             const bool names_a_space = operation.opcode == ghidra::CPUI_LOAD ||
-                                       operation.opcode == ghidra::CPUI_STORE;
-            const size_t first_input = names_a_space ? 1 : 0;
+                                       operation.opcode == ghidra::CPUI_STORE ||
+                                       ((operation.opcode == ghidra::CPUI_BRANCH ||
+                                         operation.opcode == ghidra::CPUI_CBRANCH ||
+                                         operation.opcode == ghidra::CPUI_CALL) &&
+                                        operation.compares == ghidra::CPUI_COPY);
+            const size_t first_input =
+                names_a_space && !operation.inputs.empty() ? 1 : 0;
+
+            // The form counts differently from the operation when a comparison
+            // was folded in. p-code's branch names where it goes and then what
+            // decides it; the operation left standing is the comparison, which
+            // names neither. So the form's first read is passed over whether or
+            // not the operation's was.
+            const size_t first_read =
+                (operation.opcode == ghidra::CPUI_LOAD || operation.opcode == ghidra::CPUI_STORE ||
+                 operation.opcode == ghidra::CPUI_BRANCH ||
+                 operation.opcode == ghidra::CPUI_CBRANCH || operation.opcode == ghidra::CPUI_CALL)
+                    ? 1
+                    : 0;
 
             if (operation.writes)
                 want(operation.output, "writes to");
@@ -447,15 +681,25 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // included, because on several processors every form is one - and
             // whether a candidate is really the instruction wanted is settled
             // by reading it back rather than by leaving it out.
-            const std::vector<const catalogue::Form *> forms =
-                catalogue.plainly_doing(
-                    operation.opcode,
-                    static_cast<int>(operation.inputs.size() - first_input), true);
+            // How many values the instruction is being asked to name. A branch
+            // that compares something against nothing needs only the something:
+            // that is what `cbz` is, and a processor that has it has no
+            // two-register form to offer instead.
+            int asking_for = static_cast<int>(operation.inputs.size() - first_input);
+            std::vector<const catalogue::Form *> forms =
+                catalogue.plainly_doing(operation.opcode, asking_for, true);
+            if (forms.empty() && operation.compares != ghidra::CPUI_COPY &&
+                operation.inputs.size() == 2 && operation.inputs[1].is_constant() &&
+                operation.inputs[1].offset == 0) {
+                forms = catalogue.plainly_doing(operation.opcode, 1, true);
+                if (!forms.empty()) {
+                    asking_for = 1;
+                    called_any.pop_back();
+                }
+            }
             if (forms.empty()) {
                 problems.push_back(std::string("this processor has no instruction that is only a ") +
-                                   called + " over " +
-                                   std::to_string(operation.inputs.size() - first_input) +
-                                   " things");
+                                   called + " over " + std::to_string(asking_for) + " things");
                 continue;
             }
 
@@ -474,8 +718,20 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             // address on the stack, as x86 does - is not filtered, because
             // there is nothing to filter by and inventing an answer is worse
             // than leaving the question to the reading-back below.
+            // A branch that carries its own comparison is only the same
+            // instruction when it carries the same one: `beq` and `bne` do the
+            // same thing over the same registers and go opposite ways.
+            std::vector<const catalogue::Form *> asking_the_same;
+            if (operation.compares != ghidra::CPUI_COPY) {
+                for (const catalogue::Form *form : forms) {
+                    if (form->compares == operation.compares)
+                        asking_the_same.push_back(form);
+                }
+            }
+
             std::vector<const catalogue::Form *> going_back;
-            const std::vector<const catalogue::Form *> *choose_from = &forms;
+            const std::vector<const catalogue::Form *> *choose_from =
+                asking_the_same.empty() ? &forms : &asking_the_same;
             bool must_mean_a_return = false;
             uint64_t back_through = 0;
             if (operation.opcode == ghidra::CPUI_RETURN) {
@@ -531,6 +787,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
 
             const catalogue::Form *best = nullptr;
             std::vector<uint8_t> written;
+            std::vector<int> best_roles;
+            const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
             std::string last_refusal;
             for (const catalogue::Form *form : *choose_from) {
                 if (best != nullptr && form->shortest >= best->shortest)
@@ -539,18 +797,26 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 std::string refused;
                 std::vector<std::string> used;
                 bool made = false;
-                const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
+                taken = nullptr;
 
                 // Which slot each place belongs in, taken from the form. The
                 // answer goes where the form writes and each value goes where
                 // the form reads it, in the order the operation named them.
                 std::vector<int> roles;
-                if (operation.writes)
+                // And which of the operation's own values each of those is, so
+                // that a form which disturbs a slot can be asked what it would
+                // be disturbing.
+                std::vector<const pcode::Varnode *> stands_for;
+                if (operation.writes) {
                     roles.push_back(form->writes_to.is_slot ? form->writes_to.slot : -1);
+                    stands_for.push_back(&operation.output);
+                }
+                for (size_t at = first_input; at < operation.inputs.size(); ++at)
+                    stands_for.push_back(&operation.inputs[at]);
                 // The space a load or a store names is passed over here for the
                 // same reason it was passed over above: it is which memory,
                 // not a value, and nothing is put into it.
-                for (size_t at = first_input; at < form->reads.size(); ++at)
+                for (size_t at = first_read; at < form->reads.size(); ++at)
                     roles.push_back(form->reads[at].is_slot ? form->reads[at].slot : -1);
 
                 const std::vector<int> none;
@@ -641,6 +907,34 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     }
                 }
 
+                // And nothing it does on the side writes over something being
+                // kept.
+                //
+                // A form says which registers it disturbs, but only the ones
+                // its own template names: an addressing mode that writes back
+                // does it inside a table of its own, and `ldr x6, [x7]!` reads
+                // through x7 and leaves x7 somewhere else with nothing at the
+                // top of the instruction saying so. What the bytes were decoded
+                // to says everything, so that is what is asked - every register
+                // the instruction writes, other than the one it was asked to
+                // write, has to be one this function is not keeping anything
+                // in.
+                bool writes_over_something = false;
+                for (const Meaning &one : meant) {
+                    if (!one.writes || one.output.space == nullptr ||
+                        one.output.space->getType() != ghidra::IPTR_PROCESSOR)
+                        continue;
+                    if (operation.writes && one.output.offset == operation.output.offset)
+                        continue;
+                    if (in_use.count(one.output.offset) != 0)
+                        writes_over_something = true;
+                }
+                if (writes_over_something) {
+                    last_refusal = "it writes over a register this function is keeping "
+                                   "something in";
+                    continue;
+                }
+
                 // And it does not disturb anything this function is relying on.
                 //
                 // A real instruction has effects beyond the one wanted: an add
@@ -653,6 +947,24 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     clobbers = clobbers || (in_use.count(disturbed) != 0 &&
                                             !(operation.writes &&
                                               disturbed == operation.output.offset));
+
+                // And an instruction that writes back changes the register it
+                // was handed: `ldr x6, [x7]!` reads through x7 and leaves x7
+                // somewhere else. Which register that is depends on what went
+                // in the slot, so the slot is looked up in what was actually
+                // put there.
+                for (int disturbed : form->also_writes_slots) {
+                    for (size_t k = 0; k < roles.size() && k < stands_for.size(); ++k) {
+                        if (roles[k] != disturbed)
+                            continue;
+                        const pcode::Varnode *value = stands_for[k];
+                        if (value == nullptr || value->where != pcode::Where::Register)
+                            continue;
+                        if (in_use.count(value->offset) != 0 &&
+                            !(operation.writes && value->offset == operation.output.offset))
+                            clobbers = true;
+                    }
+                }
                 if (clobbers) {
                     last_refusal = "it would write over a register this function is keeping "
                                    "something in";
@@ -660,6 +972,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 }
 
                 best = form;
+                best_roles = roles;
                 written = std::move(bytes);
             }
 
@@ -806,7 +1119,61 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             Chosen chosen;
             chosen.bytes = std::move(written);
             chosen.form = best;
+            chosen.in_block = block.identifier;
+            if (!operation.successors.empty() &&
+                (operation.opcode == ghidra::CPUI_BRANCH ||
+                 operation.opcode == ghidra::CPUI_CBRANCH)) {
+                chosen.goes_somewhere = true;
+                chosen.goes_to = operation.successors.front();
+                Aiming later;
+                later.which = out.size();
+                later.form = best;
+                later.places = taken != nullptr ? *taken : called_any;
+                later.roles = best_roles;
+                later.to = operation.successors.front();
+                aiming.push_back(std::move(later));
+            }
             out.push_back(std::move(chosen));
+        }
+    }
+
+    // Where everything ended up, and then where the branches have to reach.
+    //
+    // A branch says how far rather than where, so it cannot be written until
+    // everything before it has been. The instructions were chosen first with
+    // the field left alone; now that each one's length is known, every block
+    // has a place and each branch is written again to reach its own.
+    if (!aiming.empty()) {
+        std::map<uint32_t, uint64_t> starts;
+        std::vector<uint64_t> at(out.size(), 0);
+        uint64_t running = 0;
+        uint32_t last_block = out.empty() ? 0 : out.front().in_block;
+        for (size_t i = 0; i < out.size(); ++i) {
+            if (i == 0 || out[i].in_block != last_block) {
+                starts.emplace(out[i].in_block, running);
+                last_block = out[i].in_block;
+            }
+            at[i] = running;
+            running += out[i].bytes.size();
+        }
+        // A block nothing was written for still has a place: whatever comes
+        // after it.
+        for (const pcode::Block &block : sequence.blocks)
+            starts.emplace(block.identifier, running);
+
+        for (const Aiming &one : aiming) {
+            auto lands = starts.find(one.to);
+            if (lands == starts.end())
+                continue;
+            const int64_t reaches = static_cast<int64_t>(lands->second) -
+                                    static_cast<int64_t>(at[one.which]);
+            std::vector<uint8_t> aimed;
+            std::string refused;
+            if (aim(*one.form, one.places, one.roles, target, reaches, aimed, refused)) {
+                out[one.which].bytes = std::move(aimed);
+                continue;
+            }
+            problems.push_back("a branch cannot reach where it goes: " + refused);
         }
     }
 

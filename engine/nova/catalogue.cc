@@ -819,19 +819,58 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 // every one of them. What they read is what they read, with the
                 // moves that carried it followed through.
                 const std::vector<ghidra::OpTpl *> &all = templ->getOpvec();
+                const bool asks_a_question = only->getOpcode() == ghidra::CPUI_CBRANCH;
+
                 std::vector<Form::Piece> reads;
                 std::vector<int> zeroed;
                 bool nameable = true;
                 for (int input = 0; input < only->numInput(); ++input) {
                     Form::Piece piece = through_moves(all, only_at, only->getIn(input));
-                    if (!piece.is_slot && !piece.is_fixed &&
-                        !address_of(all, only_at, only->getIn(input), form.slots, piece, zeroed))
+                    if (piece.is_slot || piece.is_fixed) {
+                        reads.push_back(piece);
+                        continue;
+                    }
+
+                    // A branch works its own answer out. `beq rs, rt` compares
+                    // and then goes if it liked the answer, so what it reads is
+                    // the two registers and what it asks is the comparison -
+                    // and both come off the template rather than from anything
+                    // put in a slot.
+                    if (asks_a_question && input == 1) {
+                        std::vector<Form::Piece> asked;
+                        sources_of(all, only_at, only->getIn(input), asked);
+                        bool all_slots = !asked.empty();
+                        for (const Form::Piece &one : asked)
+                            all_slots = all_slots && one.is_slot;
+                        if (all_slots) {
+                            for (size_t back = asked.size(); back > 0; --back)
+                                reads.push_back(asked[back - 1]);
+                            // Which question, taken from whatever worked the
+                            // answer out on the way.
+                            for (size_t k = 0; k < all.size() && k < only_at; ++k) {
+                                if (all[k] == nullptr)
+                                    continue;
+                                const ghidra::OpCode what = all[k]->getOpcode();
+                                if (what == ghidra::CPUI_INT_EQUAL ||
+                                    what == ghidra::CPUI_INT_NOTEQUAL ||
+                                    what == ghidra::CPUI_INT_LESS ||
+                                    what == ghidra::CPUI_INT_SLESS ||
+                                    what == ghidra::CPUI_INT_LESSEQUAL ||
+                                    what == ghidra::CPUI_INT_SLESSEQUAL)
+                                    form.compares = what;
+                            }
+                            continue;
+                        }
+                    }
+
+                    if (!address_of(all, only_at, only->getIn(input), form.slots, piece, zeroed))
                         nameable = false;
                     reads.push_back(piece);
                 }
                 if (nameable) {
                     form.zeroed = std::move(zeroed);
                     std::vector<uint64_t> disturbed;
+                    std::vector<int> disturbed_slots;
                     for (const ghidra::OpTpl *operation : all) {
                         if (operation == nullptr || operation == only ||
                             is_bookkeeping(operation->getOpcode()))
@@ -839,11 +878,14 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                         const Form::Piece wrote = read_piece(operation->getOut());
                         if (wrote.is_fixed && wrote.fixed_is_register)
                             disturbed.push_back(wrote.fixed);
+                        else if (wrote.is_slot)
+                            disturbed_slots.push_back(wrote.slot);
                     }
                     form.does.assign(1, only->getOpcode());
                     form.writes = false;
                     form.reads = std::move(reads);
                     form.also_writes = std::move(disturbed);
+                    form.also_writes_slots = std::move(disturbed_slots);
                 }
             } else if (ends_at != nullptr && ends_at->numInput() > 0) {
                 // What produced the answer, with the moves followed through.
@@ -875,6 +917,7 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                     // The registers the rest of the template disturbs, so that
                     // choosing this form is a decision somebody can make.
                     std::vector<uint64_t> disturbed;
+                    std::vector<int> disturbed_slots;
                     for (size_t at = 0; at < operations.size(); ++at) {
                         const ghidra::OpTpl *operation = operations[at];
                         if (operation == nullptr || operation == doing ||
@@ -883,6 +926,8 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                         const Form::Piece wrote = read_piece(operation->getOut());
                         if (wrote.is_fixed && wrote.fixed_is_register)
                             disturbed.push_back(wrote.fixed);
+                        else if (wrote.is_slot)
+                            disturbed_slots.push_back(wrote.slot);
                     }
 
                     form.does.assign(1, doing->getOpcode());
@@ -890,6 +935,7 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                     form.writes_to = read_piece(ends_at->getOut());
                     form.reads = std::move(reads);
                     form.also_writes = std::move(disturbed);
+                    form.also_writes_slots = std::move(disturbed_slots);
                 }
             }
         } else if (form.does.size() > 1 && only != nullptr && templ != nullptr &&
@@ -995,8 +1041,13 @@ std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int in
         // in it. An instruction does not name a memory - the choice is in which
         // instruction it is - so it is passed over here as it is everywhere
         // else.
+        // A branch's destination is not one of its values either. p-code
+        // names where it goes first, and where it goes is settled by laying the
+        // function out rather than by anything being put in a slot.
         const bool names_a_space =
-            opcode == ghidra::CPUI_LOAD || opcode == ghidra::CPUI_STORE;
+            opcode == ghidra::CPUI_LOAD || opcode == ghidra::CPUI_STORE ||
+            opcode == ghidra::CPUI_BRANCH || opcode == ghidra::CPUI_CBRANCH ||
+            opcode == ghidra::CPUI_CALL;
 
         int to_fill = 0;
         bool all_known = true;

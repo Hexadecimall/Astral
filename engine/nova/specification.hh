@@ -61,8 +61,12 @@ struct Meaning {
 //
 // Empty when the bytes are not an instruction. Asked at an address of its own,
 // for the same reason as above.
+// `at`, when given, is told which address the bytes were read at. A branch is
+// written as how far it reaches from where it is, so what the processor makes
+// of one depends on where it was standing - and solving for a field that holds
+// a distance needs to know where that was.
 std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                              std::string &error);
+                              std::string &error, uint64_t *at = nullptr);
 
 } // namespace nova
 } // namespace astral_internal
