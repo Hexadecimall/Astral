@@ -12,9 +12,9 @@ namespace {
 // Every word Nova reserves. Fusion's vocabulary, plus the words the machine
 // needs: `stack` for a frame slot, `asm` for instructions, `call` for a call
 // whose result nobody named yet.
-const std::array<const char *, 32> kKeywords = {
+const std::array<const char *, 33> kKeywords = {
     "func",  "var",    "val",    "return", "if",     "else",  "while", "for",
-    "in",    "loop",   "break",  "continue", "match", "enum", "struct", "stack",
+    "in",    "loop",   "break",  "continue", "match", "enum", "struct", "class", "stack",
     "asm",   "call",   "import", "true",   "false",  "null",  "goto",  "label",
     "sizeof", "cast",  "do",     "switch", "case",   "default", "extern", "as",
 };

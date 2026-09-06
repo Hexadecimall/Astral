@@ -205,7 +205,7 @@ bool Parser::parse_item()
         return parse_function(documentation);
     if (token.is_name("var") || token.is_name("val"))
         return parse_global(documentation);
-    if (token.is_name("struct"))
+    if (token.is_name("struct") || token.is_name("class"))
         return parse_record(documentation);
     if (token.is_name("enum"))
         return parse_enumeration(documentation);
@@ -357,10 +357,12 @@ bool Parser::parse_global(const std::string &documentation)
 bool Parser::parse_record(const std::string &documentation)
 {
     Record record;
+    record.is_class = peek().is_name("class");
+    const std::string kind = record.is_class ? "class" : "struct";
     record.where = take().where;
     record.documentation = documentation;
     if (!peek().is(Token::Kind::Name)) {
-        complain(peek().where, "struct needs a name");
+        complain(peek().where, kind + " needs a name");
         return false;
     }
     record.name = take().text;
@@ -369,7 +371,7 @@ bool Parser::parse_record(const std::string &documentation)
         record.has_address = true;
         record.address = take().integer_value;
     }
-    if (!expect("{", "to begin the struct"))
+    if (!expect("{", record.is_class ? "to begin the class" : "to begin the struct"))
         return false;
 
     // The name has to exist before the members are read, or a member that
@@ -381,17 +383,40 @@ bool Parser::parse_record(const std::string &documentation)
     uint64_t next_offset = 0;
     while (!accept("}")) {
         if (at_end()) {
-            complain(record.where, "struct " + record.name + " was never closed");
+            complain(record.where, kind + " " + record.name + " was never closed");
             return false;
         }
-        take_documentation();
+        const std::string inner = take_documentation();
+        // A function written inside a class belongs to it. It is lifted out
+        // under `Class::name` and compiled like any other function, so nothing
+        // downstream has to know classes exist; and its first parameter, when
+        // it is called self and given no type, is a pointer to the class.
+        if (peek().is_name("func")) {
+            if (!record.is_class) {
+                complain(peek().where,
+                         "a struct holds data; write it as a class to give it functions");
+                return false;
+            }
+            const size_t before = unit_.functions.size();
+            if (!parse_function(inner))
+                return false;
+            if (unit_.functions.size() != before + 1)
+                return false;
+            Function &method = unit_.functions.back();
+            if (!method.parameters.empty() && method.parameters.front().name == "self" &&
+                method.parameters.front().type == nullptr)
+                method.parameters.front().type = types_.store().pointer_to(placeholder);
+            method.name = record.name + "::" + method.name;
+            record.methods.push_back(method.name);
+            continue;
+        }
         Record::Member member;
         member.where = peek().where;
         // `var` is what Fusion writes; a bare name is allowed too.
         accept_word("var");
         accept_word("val");
         if (!peek().is(Token::Kind::Name)) {
-            complain(peek().where, "expected a member name in struct " + record.name);
+            complain(peek().where, "expected a member name in " + kind + " " + record.name);
             return false;
         }
         member.name = take().text;
@@ -1321,6 +1346,12 @@ ExpressionPtr Parser::parse_primary()
         ExpressionPtr name = make(Expression::Kind::Name, token.where);
         name->name = token.text;
         take();
+        // `Parser::peek` is one name, spelled to say where it came from. The
+        // function it refers to is the one the class wrote under that name.
+        while (peek().is_punctuation("::") && peek(1).is(Token::Kind::Name)) {
+            take();
+            name->name += "::" + take().text;
+        }
         return name;
     }
     case Token::Kind::Punctuation:

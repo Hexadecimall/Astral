@@ -240,6 +240,15 @@ struct Record {
         Where where;
     };
     std::vector<Member> members;
+    // A class is a struct that owns functions. Nothing else about it differs:
+    // the members are laid out the same way, it is passed the same way, and
+    // the functions it owns are functions. What it buys is that the code
+    // belonging to a thing is written where the thing is.
+    bool is_class = false;
+    // The names of the functions written inside it, already lifted into the
+    // unit under `Class::name`. Kept here so a reader of the tree can still
+    // tell which functions the class owns.
+    std::vector<std::string> methods;
     bool has_address = false;
     uint64_t address = 0;
     std::string documentation;
