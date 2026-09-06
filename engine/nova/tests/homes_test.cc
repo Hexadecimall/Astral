@@ -133,27 +133,24 @@ void check_only_ordinary_registers_are_used()
     if (!homes::give(sequence, target, problems))
         return;
 
-    // What a call passes things in, which is what a register for holding things
-    // looks like on any processor.
-    std::vector<Storage> convention;
-    Storage answer;
+    // The registers this processor keeps values in, which is every one the
+    // calling convention has an opinion about. Not the ones a call passes
+    // arguments in - that is four, and a recovered function has more alive at
+    // once than that.
+    std::vector<std::string> named;
     std::string trouble;
-    if (!target.calling_convention({4, 4, 4, 4, 4, 4, 4, 4}, 4, convention, answer, trouble))
+    if (!target.value_registers(4, named, trouble))
         return;
 
     std::set<uint64_t> ordinary;
-    if (answer.kind == Storage::Kind::Register) {
-        const ir::Target::RegisterPlace *place = target.register_place(answer.register_name);
+    for (const std::string &one : named) {
+        const ir::Target::RegisterPlace *place = target.register_place(one);
         if (place != nullptr)
             ordinary.insert(place->offset);
     }
-    for (const Storage &one : convention) {
-        if (one.kind != Storage::Kind::Register)
-            continue;
-        const ir::Target::RegisterPlace *place = target.register_place(one.register_name);
-        if (place != nullptr)
-            ordinary.insert(place->offset);
-    }
+    report(ordinary.size() > 8,
+           "a processor keeps values in more registers than a call passes arguments in",
+           std::to_string(ordinary.size()) + " of them");
 
     bool all_ordinary = true;
     for (const pcode::Block &block : sequence.blocks) {
@@ -165,7 +162,7 @@ void check_only_ordinary_registers_are_used()
         }
     }
     report(all_ordinary,
-           "and they are registers a call would use rather than ones the processor keeps for "
+           "and they are registers for holding values rather than ones the processor keeps for "
            "itself",
            "something landed in a register that is not for holding values");
 }

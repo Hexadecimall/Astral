@@ -182,6 +182,24 @@ struct Target {
     // Returns false when the specification names none, which some do not.
     bool return_address(std::string &name, RegisterPlace &out, std::string &error) const;
 
+    // The registers a function may keep its own values in.
+    //
+    // Not the ones a call passes arguments in - that is four on most machines
+    // and a recovered function has more live at once than that, so a function
+    // housed only in those ran out of registers on a processor with thirty. And
+    // not every register either: a processor has a thread pointer, a status
+    // word, a floating-point control setting, and an instruction written over
+    // one of those is not one anybody meant.
+    //
+    // What separates them is that the calling convention has an opinion. A
+    // register a call preserves or destroys is a register for holding values -
+    // that is what the opinion is about - and one it says nothing about is the
+    // processor's own business. So the specification is asked, per register.
+    //
+    // The stack pointer and the register a return address is in are left out:
+    // both are spoken for by things that are not this function's values.
+    bool value_registers(int width, std::vector<std::string> &out, std::string &error) const;
+
     // Where a call puts its arguments and its answer, according to this
     // processor's own compiler specification.
     //

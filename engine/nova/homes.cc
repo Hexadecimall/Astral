@@ -50,18 +50,27 @@ std::vector<std::string> free_registers(const ir::Target &target, int size,
     // over one of them is not an instruction anybody meant. The calling
     // convention already names the ones that carry ordinary values, since that
     // is what it is for, so those are asked for and used.
+    // Every register the convention has an opinion about, which is every one
+    // the processor keeps values in. Asking a call where it puts things names
+    // four on most machines, and a recovered function has more alive at once
+    // than that: on MIPS, a function of any size ran out of registers on a
+    // processor with thirty.
     std::vector<std::string> ordinary;
     {
-        std::vector<int> asking(8, size);
-        std::vector<Storage> places;
-        Storage answer;
         std::string trouble;
-        if (target.calling_convention(asking, size, places, answer, trouble)) {
-            if (answer.kind == Storage::Kind::Register)
-                ordinary.push_back(answer.register_name);
-            for (const Storage &where : places) {
-                if (where.kind == Storage::Kind::Register)
-                    ordinary.push_back(where.register_name);
+        if (!target.value_registers(size, ordinary, trouble)) {
+            // A processor whose specification says nothing either way still has
+            // the registers a call passes things in.
+            std::vector<int> asking(8, size);
+            std::vector<Storage> places;
+            Storage answer;
+            if (target.calling_convention(asking, size, places, answer, trouble)) {
+                if (answer.kind == Storage::Kind::Register)
+                    ordinary.push_back(answer.register_name);
+                for (const Storage &where : places) {
+                    if (where.kind == Storage::Kind::Register)
+                        ordinary.push_back(where.register_name);
+                }
             }
         }
     }

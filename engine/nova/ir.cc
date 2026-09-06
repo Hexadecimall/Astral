@@ -270,6 +270,59 @@ bool Target::return_address(std::string &name, RegisterPlace &out, std::string &
     }
 }
 
+bool Target::value_registers(int width, std::vector<std::string> &out, std::string &error) const
+{
+    out.clear();
+    try {
+        ghidra::SleighArchitecture *held = specification_for(
+            compiler.empty() ? language_id : language_id + ":" + compiler, error);
+        if (held == nullptr)
+            return false;
+        ghidra::ProtoModel *model = held->defaultfp;
+        if (model == nullptr) {
+            error = "this processor's specification says nothing about how a call is made";
+            return false;
+        }
+
+        // What is spoken for by something other than this function's values.
+        std::set<uint64_t> spoken_for;
+        Frame frame;
+        std::string unused;
+        if (this->frame(frame, unused) && frame.known) {
+            const RegisterPlace *place = register_place(frame.pointer);
+            if (place != nullptr)
+                spoken_for.insert(place->offset);
+        }
+        std::string address_name;
+        RegisterPlace address;
+        std::string missing;
+        if (return_address(address_name, address, missing))
+            spoken_for.insert(address.offset);
+
+        ghidra::AddrSpace *registers = held->translate->getSpaceByName("register");
+        if (registers == nullptr) {
+            error = "this processor keeps its registers somewhere with no name";
+            return false;
+        }
+
+        std::set<uint64_t> already;
+        for (const auto &one : register_places) {
+            if (one.second.width != width || spoken_for.count(one.second.offset) != 0)
+                continue;
+            const ghidra::Address at(registers, one.second.offset);
+            if (model->hasEffect(at, one.second.width) == ghidra::EffectRecord::unknown_effect)
+                continue;  // the convention has no opinion, so it is not for values
+            if (!already.insert(one.second.offset).second)
+                continue;
+            out.push_back(one.first);
+        }
+        return !out.empty();
+    } catch (ghidra::LowlevelError &failure) {
+        error = failure.explain;
+        return false;
+    }
+}
+
 bool Target::calling_convention(const std::vector<int> &widths, int result_width,
                                 std::vector<Storage> &parameters, Storage &result,
                                 std::string &error) const
