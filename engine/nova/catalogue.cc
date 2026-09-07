@@ -298,6 +298,14 @@ bool address_of(const std::vector<ghidra::OpTpl *> &operations, size_t before,
 
     bool found = false;
     for (const Form::Piece &piece : pieces) {
+        // A number the instruction uses on its own account is not one of the
+        // pieces being supplied. A shift by a register masks the amount to the
+        // width of the thing being shifted before shifting by it, and refusing
+        // any form that mentions a constant on the way refused every
+        // register-amount shift on AARCH64 - which left only the shifts by a
+        // written-in amount, whose field this cannot solve.
+        if (piece.is_fixed && !piece.fixed_is_register)
+            continue;
         if (!piece.is_slot || piece.slot < 0 ||
             static_cast<size_t>(piece.slot) >= slots.size())
             return false;
@@ -919,15 +927,24 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                                                      doing->getOpcode() != ghidra::CPUI_INT_ZEXT &&
                                                      doing->getOpcode() != ghidra::CPUI_INT_SEXT);
                 std::vector<Form::Piece> reads;
+                std::vector<int> zeroed;
                 for (int input = 0; input < doing->numInput(); ++input) {
-                    const Form::Piece piece =
-                        through_moves(operations, doing_at, doing->getIn(input));
-                    if (!piece.is_slot && !piece.is_fixed)
+                    Form::Piece piece = through_moves(operations, doing_at, doing->getIn(input));
+                    // Or worked out from the form's own pieces, the way an
+                    // address is. A shift by a register masks the amount to the
+                    // width of what is being shifted before shifting by it, so
+                    // following the moves back stops at the mask - and every
+                    // register-amount shift was refused, leaving only the ones
+                    // whose amount is written in, whose field cannot be solved.
+                    if (!piece.is_slot && !piece.is_fixed &&
+                        !address_of(operations, doing_at, doing->getIn(input), form.slots, piece,
+                                    zeroed))
                         nameable = false;
                     reads.push_back(piece);
                 }
 
                 if (nameable) {
+                    form.zeroed = zeroed;
                     // The registers the rest of the template disturbs, so that
                     // choosing this form is a decision somebody can make.
                     std::vector<uint64_t> disturbed;
@@ -1184,9 +1201,20 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
         // slot it writes to and which it reads from, so an answer and its
         // operands go where they mean rather than wherever they fit.
         size_t only = form.slots.size();
-        if (next < roles.size() && roles[next] >= 0 &&
-            static_cast<size_t>(roles[next]) < form.slots.size())
+        if (next < roles.size()) {
+            // A place the form does not read from a slot cannot be given one.
+            //
+            // Saying nothing about where it goes meant it went wherever it
+            // would fit, so a register asked for as a shift amount was written
+            // into whatever field was still free - and the instruction that
+            // came out shifted by sixty-three. A form that has nowhere for a
+            // value is a form that cannot be used for it.
+            if (roles[next] < 0 || static_cast<size_t>(roles[next]) >= form.slots.size()) {
+                error = "this instruction has nowhere for one of those values";
+                return false;
+            }
             only = static_cast<size_t>(roles[next]);
+        }
 
         for (size_t which = 0; which < form.slots.size() && !placed; ++which) {
             if (only < form.slots.size() && which != only)

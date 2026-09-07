@@ -1249,17 +1249,44 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     top.output = held;
                     top.inputs.push_back(number);
 
-                    pcode::Varnode sixteen;
-                    sixteen.where = pcode::Where::Constant;
-                    sixteen.offset = 16;
-                    sixteen.size = width;
+                    // How far to move it, in a register of its own.
+                    //
+                    // A processor may spell a shift by a written-in amount with
+                    // a field this cannot solve: AARCH64 builds one out of two
+                    // fields that do not step evenly, so what the solving finds
+                    // is a shift by sixty-three. The shift whose amount is in a
+                    // register has no such field, and the shift's own place
+                    // cannot hold the amount because that is where the thing
+                    // being shifted is - so it needs one more.
+                    pcode::Varnode by;
+                    by.where = pcode::Where::Constant;
+                    by.offset = 16;
+                    by.size = width;
+                    pcode::Operation how_far;
+                    bool put_it_somewhere = false;
+                    for (uint64_t candidate : scratch) {
+                        if (candidate == held.offset || candidate == operation.output.offset)
+                            continue;
+                        pcode::Varnode place;
+                        place.where = pcode::Where::Register;
+                        place.offset = candidate;
+                        place.size = width;
+                        how_far.opcode = ghidra::CPUI_COPY;
+                        how_far.writes = true;
+                        how_far.output = place;
+                        how_far.inputs.push_back(by);
+                        how_far.made_while_writing = true;
+                        by = place;
+                        put_it_somewhere = true;
+                        break;
+                    }
 
                     pcode::Operation shifted;   // moved up out of the way
                     shifted.opcode = ghidra::CPUI_INT_LEFT;
                     shifted.writes = true;
                     shifted.output = held;
                     shifted.inputs.push_back(held);
-                    shifted.inputs.push_back(sixteen);
+                    shifted.inputs.push_back(by);
 
                     pcode::Varnode bottom;
                     bottom.where = pcode::Where::Constant;
@@ -1283,6 +1310,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     pending[step] = top;
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, joined);
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, shifted);
+                    if (put_it_somewhere)
+                        pending.insert(pending.begin() + static_cast<long>(step) + 1, how_far);
                     --step;
                     continue;
                 }
