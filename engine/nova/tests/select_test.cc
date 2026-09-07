@@ -462,6 +462,89 @@ void check_a_branch_on_a_truth_goes_the_right_way()
            "and it goes when the truth holds rather than when it does not", reads);
 }
 
+// A small negative number is one instruction, not seven.
+//
+// How big a number an instruction may carry is the processor's business, and
+// assuming it - anything over sixteen bits is built out of pieces - is wrong
+// twice over. A frame offset is a small negative number, which carried as
+// sixty-four bits is enormous, so every one of them was built from four
+// sixteen-bit pieces shifted and combined. Four hundred and forty-two of them
+// on RISC-V, whose `addi` holds -4 in twelve signed bits.
+//
+// So the forms are asked whether any field can hold it, and a field that counts
+// downwards is allowed to, and what comes out is checked by asking the
+// processor what number the instruction ended up holding.
+void check_a_negative_number_goes_in_one_instruction()
+{
+    for (const std::string &language :
+         {std::string("RISCV:LE:64:RV64GC"), std::string("AARCH64:LE:64:v8A"),
+          std::string("MIPS:BE:32:default")}) {
+        ir::Target target;
+        std::string why;
+        if (!ir::Target::from_language_id(language, target, why) ||
+            !target.read_specification(why)) {
+            report(false, "the processor is read", why);
+            continue;
+        }
+        std::vector<std::string> named;
+        if (!target.value_registers(target.word_bytes, named, why) || named.empty()) {
+            report(false, language + " has a register to put a number in", why);
+            continue;
+        }
+        const ir::Target::RegisterPlace *place = target.register_place(named.front());
+        if (place == nullptr)
+            continue;
+
+        pcode::Operation copy;
+        copy.opcode = ghidra::CPUI_COPY;
+        copy.writes = true;
+        copy.output.where = pcode::Where::Register;
+        copy.output.offset = place->offset;
+        copy.output.size = place->width;
+        pcode::Varnode number;
+        number.where = pcode::Where::Constant;
+        number.size = place->width;
+        // Spelled at the width it is, which is what a constant in the
+        // representation carries: minus four in four bytes is 0xfffffffc, and
+        // the eight-byte spelling of it is a different number there.
+        number.offset = number.size < 8
+                            ? static_cast<uint64_t>(-4) &
+                                  ((static_cast<uint64_t>(1) << (number.size * 8)) - 1)
+                            : static_cast<uint64_t>(-4);
+        copy.inputs.push_back(number);
+
+        std::vector<uint8_t> bytes;
+        if (!write_one(language, copy, bytes, why)) {
+            report(false, language + " puts -4 in a register", why);
+            continue;
+        }
+        std::string trouble;
+        const std::string reads = reads_as(language, bytes, trouble);
+        report(!reads.empty(), language + " puts -4 in a register",
+               trouble.empty() ? "it was not an instruction" : trouble);
+
+        // And it is the number asked for, which is the only thing that settles
+        // it - the spelling of a negative number differs by processor.
+        bool holds_it = false;
+        for (const Meaning &one : means_as(language, bytes, trouble)) {
+            for (const ghidra::VarnodeData &input : one.inputs) {
+                if (input.space == nullptr ||
+                    input.space->getType() != ghidra::IPTR_CONSTANT)
+                    continue;
+                // Read at the width the instruction works in, for the same
+                // reason it was written at that width.
+                const int size = input.size > 0 && input.size < 8 ? input.size : 8;
+                const uint64_t within = size < 8
+                                            ? (static_cast<uint64_t>(1) << (size * 8)) - 1
+                                            : ~static_cast<uint64_t>(0);
+                if ((input.offset & within) == (static_cast<uint64_t>(-4) & within))
+                    holds_it = true;
+            }
+        }
+        report(holds_it, "  and the number it holds is -4", reads);
+    }
+}
+
 } // namespace
 
 int main()
@@ -473,6 +556,7 @@ int main()
 
     check_an_instruction_is_written();
     check_a_branch_on_a_truth_goes_the_right_way();
+    check_a_negative_number_goes_in_one_instruction();
     check_shorter_is_not_taken_when_it_means_something_else();
     check_a_register_it_has_not_got();
     check_a_value_with_no_home();

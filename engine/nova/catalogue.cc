@@ -80,6 +80,7 @@ Form::Slot::Field field_of(const ghidra::TokenField *field)
     out.shift = field->getShift();
     out.width = field->getBitEnd() - field->getBitStart() + 1;
     out.big_endian = field->isBigEndian();
+    out.is_signed = field->isSigned();
     return out;
 }
 
@@ -94,7 +95,7 @@ Form::Slot::Field field_of(const ghidra::TokenField *field)
 // why this is done a byte at a time rather than as a shift. Treating a field as
 // a range of bits put every AARCH64 register one swap away from where it goes.
 bool place_in_field(const Form::Slot::Field &field, int length, uint64_t value, uint64_t &mask,
-                    uint64_t &bits)
+                    uint64_t &bits, int value_bytes = 8)
 {
     mask = 0;
     bits = 0;
@@ -103,8 +104,25 @@ bool place_in_field(const Form::Slot::Field &field, int length, uint64_t value, 
         return false;
 
     const uint64_t room = (static_cast<uint64_t>(1) << field.width) - 1;
-    if ((value & room) != value)
-        return false;  // too big for the field: not this instruction's number
+    if ((value & room) != value) {
+        // A field the processor reads as signed holds negative numbers, and a
+        // negative number has every bit above it set - as far up as the number
+        // is wide, and no further. So what has to fit is the number at its own
+        // width: sign-extending what would be stored, and comparing within
+        // those bytes, because minus four is 0xfffffffc in four of them and
+        // 0xfffffffffffffffc in eight.
+        if (!field.is_signed)
+            return false;  // too big for the field: not this instruction's number
+        const unsigned spare = static_cast<unsigned>(64 - field.width);
+        const uint64_t back =
+            static_cast<uint64_t>(static_cast<int64_t>(value << spare) >> spare);
+        const uint64_t within = value_bytes > 0 && value_bytes < 8
+                                    ? (static_cast<uint64_t>(1) << (value_bytes * 8)) - 1
+                                    : ~static_cast<uint64_t>(0);
+        if ((back & within) != (value & within))
+            return false;
+    }
+    value &= room;
 
     const uint64_t assembled_mask = room << static_cast<unsigned>(field.shift);
     const uint64_t assembled_bits = value << static_cast<unsigned>(field.shift);
@@ -1111,6 +1129,23 @@ std::set<uint64_t> Catalogue::registers_for_values(const ir::Target &target) con
     return where;
 }
 
+bool Catalogue::can_carry(ghidra::OpCode what, uint64_t number, int bytes) const
+{
+    for (const Form *form : doing(what)) {
+        for (const Form::Slot &slot : form->slots) {
+            if (slot.is_register())
+                continue;
+            for (const Form::Slot::Way &way : slot.numbers) {
+                uint64_t room = 0;
+                uint64_t sitting = 0;
+                if (place_in_field(way.field, form->shortest, number, room, sitting, bytes))
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Catalogue::return_through(const ir::Target &target, uint64_t &offset) const
 {
     // What the compiler specification says, when it says anything. MIPS and
@@ -1325,7 +1360,8 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
                 const Form::Slot::Way &way = slot.numbers[which_way];
                 uint64_t room = 0;
                 uint64_t sitting = 0;
-                if (!place_in_field(way.field, form.shortest, places[next].number, room, sitting))
+                if (!place_in_field(way.field, form.shortest, places[next].number, room, sitting,
+                                    places[next].bytes))
                     continue;
 
                 word = (word & ~(room & may_touch)) | (sitting & may_touch);

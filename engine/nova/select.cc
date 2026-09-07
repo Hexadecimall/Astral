@@ -474,9 +474,16 @@ bool solve(const catalogue::Form &form,
         if (away % step_is_worth != 0)
             continue;
         const int64_t steps = away / step_is_worth;
-        if (steps < 0)
-            continue;  // a field holds what it holds, and it does not hold that
 
+        // A field counting downwards is asked for a negative number of steps,
+        // and whether it holds one is the field's own business: a field the
+        // processor reads as signed does, in two's complement, and one it reads
+        // as unsigned does not. Refusing every negative here refused every frame
+        // offset on RISC-V, whose `addi` holds -4 in twelve signed bits.
+        //
+        // Nothing is taken on trust for it. What is put in the field is checked
+        // by asking the processor what number the instruction now holds, below,
+        // so a field that cannot hold it fails there rather than here.
         asking[which].number = static_cast<uint64_t>(steps);
         std::vector<uint8_t> candidate;
         std::vector<std::string> spent;
@@ -966,6 +973,9 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     catalogue::Catalogue::Wanted number;
                     number.is_number = true;
                     number.number = node.offset;
+                    // How wide it is, because a negative number means nothing
+                    // without it: minus four is 0xfffffffc in four bytes.
+                    number.bytes = node.size > 0 ? node.size : 8;
                     called_any.push_back(std::move(number));
                     return;
                 }
@@ -1354,8 +1364,10 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 // smaller one is still too big it is made the same way again.
                 if (operation.opcode == ghidra::CPUI_COPY && operation.writes &&
                     operation.inputs.size() == 1 && operation.inputs[0].is_constant() &&
-                    operation.inputs[0].offset > 0xffff && !scratch.empty() &&
-                    !operation.made_while_writing) {
+                    !catalogue.can_carry(ghidra::CPUI_COPY, operation.inputs[0].offset,
+                                         operation.inputs[0].size > 0 ? operation.inputs[0].size
+                                                                      : 8) &&
+                    !scratch.empty() && !operation.made_while_writing) {
                     const uint64_t whole = operation.inputs[0].offset;
                     const int width = operation.output.size > 0 ? operation.output.size : 8;
                     const uint64_t low = whole & 0xffff;

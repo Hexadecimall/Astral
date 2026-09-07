@@ -143,6 +143,16 @@ struct Form {
             int width = 0;            // how many bits of value
             bool big_endian = false;  // how those bytes assemble
 
+            // Whether the processor reads what is in it as a signed number.
+            //
+            // It decides what fits, and nothing else does. A frame offset is a
+            // small negative number, which as sixty-four bits is enormous, and
+            // asking whether that enormous number fits in twelve bits says no
+            // for every offset on every downward-growing stack - four hundred
+            // and forty-two of them on RISC-V, whose `addi` holds -4 in twelve
+            // signed bits perfectly well.
+            bool is_signed = false;
+
             bool is_placed() const { return first_byte >= 0 && width > 0; }
         };
 
@@ -327,6 +337,17 @@ public:
     // specification that is asked first.
     bool return_through(const ir::Target &target, uint64_t &offset) const;
 
+    // Whether any way of doing `what` has somewhere to put this number.
+    //
+    // How big a number an instruction may carry is the processor's business and
+    // differs by every form it has, so it is asked rather than assumed. Assuming
+    // it - anything over sixteen bits gets built in pieces - is wrong twice
+    // over: it builds numbers that would have fitted, and on a field the
+    // processor reads as signed it builds every negative number there is,
+    // because a small negative number carried as sixty-four bits is enormous.
+    // RISC-V's `addi` holds -4 perfectly well in twelve signed bits.
+    bool can_carry(ghidra::OpCode what, uint64_t number, int bytes = 8) const;
+
     // Writes one instruction: the form's own bits, with the named registers put
     // in the slots that hold registers, in the order those slots come.
     //
@@ -370,6 +391,15 @@ public:
         // give the value by asking the processor.
         bool is_raw_field = false;
         int way = 0;  // which of the slot's ways to use, when there are several
+
+        // How many bytes wide the number is, when it is one.
+        //
+        // A negative number means nothing without it. Minus four is 0xfffffffc
+        // in four bytes and 0xfffffffffffffffc in eight, and asking whether a
+        // sixteen-bit signed field holds the four-byte spelling by sign-
+        // extending to sixty-four says no - so every frame offset on a
+        // thirty-two-bit processor was refused by a field that holds it.
+        int bytes = 8;
     };
 
     // Writes an instruction whose places may be registers or numbers.
