@@ -617,6 +617,53 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             }
         }
 
+        // Taking part of a value out of it is a shift and a narrower read.
+        //
+        // No processor has an instruction for it - none of the three has a
+        // single form that does - because none needs one: the low bytes of a
+        // register are read by naming the register's narrower half, and the
+        // higher bytes are the same thing after moving them down. So that is
+        // what is written, and both halves go through the same choosing as
+        // everything else.
+        for (size_t at = 0; at < pending.size(); ++at) {
+            const pcode::Operation taking = pending[at];
+            if (taking.opcode != ghidra::CPUI_SUBPIECE || !taking.writes ||
+                taking.inputs.size() != 2 || !taking.inputs[1].is_constant())
+                continue;
+
+            pcode::Operation reading;
+            reading.opcode = ghidra::CPUI_COPY;
+            reading.writes = true;
+            reading.output = taking.output;
+            reading.made_while_writing = true;
+
+            if (taking.inputs[1].offset == 0) {
+                // The bottom of it, which is the register read narrowly.
+                reading.inputs.push_back(taking.inputs[0]);
+                pending[at] = reading;
+                continue;
+            }
+
+            pcode::Varnode moved = taking.inputs[0];
+            pcode::Varnode down;
+            down.where = pcode::Where::Constant;
+            down.offset = taking.inputs[1].offset * 8;
+            down.size = taking.inputs[0].size;
+
+            pcode::Operation shifting;
+            shifting.opcode = ghidra::CPUI_INT_RIGHT;
+            shifting.writes = true;
+            shifting.output = moved;
+            shifting.inputs.push_back(taking.inputs[0]);
+            shifting.inputs.push_back(down);
+            shifting.made_while_writing = true;
+
+            reading.inputs.push_back(moved);
+            pending[at] = shifting;
+            pending.insert(pending.begin() + static_cast<long>(at) + 1, reading);
+            ++at;
+        }
+
         for (size_t step = 0; step < pending.size() && step < 4096; ++step) {
             const pcode::Operation operation = pending[step];
             const char *called = pcode::opcode_name(operation.opcode);
@@ -677,12 +724,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             //
             // A fused branch is the exception: its inputs are the comparison's,
             // and the comparison has no destination among them.
-            const bool names_a_space = operation.opcode == ghidra::CPUI_LOAD ||
-                                       operation.opcode == ghidra::CPUI_STORE ||
-                                       ((operation.opcode == ghidra::CPUI_BRANCH ||
-                                         operation.opcode == ghidra::CPUI_CBRANCH ||
-                                         operation.opcode == ghidra::CPUI_CALL) &&
-                                        operation.compares == ghidra::CPUI_COPY);
+            const bool names_a_space =
+                operation.opcode == ghidra::CPUI_LOAD || operation.opcode == ghidra::CPUI_STORE;
             const size_t first_input =
                 names_a_space && !operation.inputs.empty() ? 1 : 0;
 
