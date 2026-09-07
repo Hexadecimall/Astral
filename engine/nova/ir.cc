@@ -342,7 +342,12 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
 
         std::set<uint64_t> already;
         for (const auto &one : register_places) {
-            if (one.second.width != width || spoken_for.count(one.second.offset) != 0 ||
+            // Wide enough, not exactly that wide. A processor's registers come
+            // in the sizes it has and a program's values do not: asking for
+            // somewhere to put one byte on AARCH64 returned only the one-byte
+            // registers, which are a byte of the floating-point file and
+            // nothing else, so a byte-wide value had nowhere to go but there.
+            if (one.second.width < width || spoken_for.count(one.second.offset) != 0 ||
                 for_floats.count(one.second.offset) != 0)
                 continue;
             const ghidra::Address at(registers, one.second.offset);

@@ -524,18 +524,20 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
         // about includes the floating-point file, and an integer instruction
         // cannot name one of those - a value put in d10 and then added to
         // something was every form refusing at once.
-        std::vector<Storage> places;
-        Storage answer;
+        const int wide = target.word_bytes > 0 ? target.word_bytes : 8;
+        const std::set<uint64_t> for_values = catalogue.registers_for_values(target);
+        std::vector<std::string> named;
         std::string trouble;
-        if (target.calling_convention({8, 8, 8, 8, 8, 8, 8, 8}, 8, places, answer, trouble)) {
-            for (const Storage &where : places) {
-                if (where.kind != Storage::Kind::Register)
-                    continue;
-                const ir::Target::RegisterPlace *place =
-                    target.register_place(where.register_name);
-                if (place != nullptr && in_use.count(place->offset) == 0)
-                    scratch.push_back(place->offset);
-            }
+        target.value_registers(wide, named, trouble);
+        std::set<uint64_t> already;
+        for (const std::string &one : named) {
+            const ir::Target::RegisterPlace *place = target.register_place(one);
+            if (place == nullptr || in_use.count(place->offset) != 0)
+                continue;
+            if (!for_values.empty() && for_values.count(place->offset) == 0)
+                continue;
+            if (already.insert(place->offset).second)
+                scratch.push_back(place->offset);
         }
     }
 

@@ -36,7 +36,8 @@ struct Life {
 // is anything this function was already told to use, since a value pinned to a
 // register is pinned precisely so that nothing else goes there.
 std::vector<std::string> free_registers(const ir::Target &target, int size,
-                                        const std::set<uint64_t> &taken)
+                                        const std::set<uint64_t> &taken,
+                                        const std::set<uint64_t> *for_values)
 {
     ir::Target::Frame frame;
     std::string unused;
@@ -100,6 +101,8 @@ std::vector<std::string> free_registers(const ir::Target &target, int size,
             continue;
         if (!already.insert(place->offset).second)
             continue;
+        if (for_values != nullptr && for_values->count(place->offset) == 0)
+            continue;  // nothing that adds can name it, so nothing can live there
         (place->width == size ? free : roomier).push_back(name);
     }
 
@@ -111,8 +114,12 @@ std::vector<std::string> free_registers(const ir::Target &target, int size,
 } // namespace
 
 bool give(pcode::Sequence &sequence, const ir::Target &target,
-          std::vector<std::string> &problems)
+          std::vector<std::string> &problems, const catalogue::Catalogue *catalogue)
 {
+    std::set<uint64_t> for_values;
+    if (catalogue != nullptr)
+        for_values = catalogue->registers_for_values(target);
+
     const size_t before = problems.size();
 
     // Where each value with no home lives and dies, and which places are
@@ -222,7 +229,8 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
 
         auto &free = free_by_size[value.size];
         if (free.empty()) {
-            free = free_registers(target, value.size, taken);
+            free = free_registers(target, value.size, taken,
+                                  for_values.empty() ? nullptr : &for_values);
             for (const auto &already : given) {
                 auto used = std::find(free.begin(), free.end(), already.second);
                 if (used != free.end())

@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -293,6 +294,19 @@ public:
     // What was read, said the way a person would want to be told: how many
     // forms there are, and how many of them do exactly one thing.
     std::string summary() const;
+
+    // The registers this processor keeps ordinary values in.
+    //
+    // A calling convention has an opinion about the floating-point file too -
+    // it says which of those are preserved and which are destroyed - so asking
+    // it put d10 among the places a value might live, and nothing that adds can
+    // name d10. Which registers it passes floats in does not settle it either:
+    // the ones a call preserves are never named there, and d10 is one of those.
+    //
+    // The instruction set is the thing that knows. A register something can be
+    // added into, or copied into, is a register a value can live in, and that
+    // is read off the same specification as everything else here.
+    std::set<uint64_t> registers_for_values(const ir::Target &target) const;
 
     // Writes one instruction: the form's own bits, with the named registers put
     // in the slots that hold registers, in the order those slots come.

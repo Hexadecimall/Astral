@@ -1006,6 +1006,25 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
     return true;
 }
 
+std::set<uint64_t> Catalogue::registers_for_values(const ir::Target &target) const
+{
+    std::set<uint64_t> where;
+    for (ghidra::OpCode what : {ghidra::CPUI_INT_ADD, ghidra::CPUI_COPY, ghidra::CPUI_INT_OR,
+                                ghidra::CPUI_INT_AND, ghidra::CPUI_INT_SUB}) {
+        for (const Form *form : doing(what)) {
+            if (!form->writes || !form->writes_to.is_slot || form->writes_to.slot < 0 ||
+                static_cast<size_t>(form->writes_to.slot) >= form->slots.size())
+                continue;
+            for (const auto &one : form->slots[form->writes_to.slot].registers) {
+                const ir::Target::RegisterPlace *place = target.register_place(one.first);
+                if (place != nullptr)
+                    where.insert(place->offset);
+            }
+        }
+    }
+    return where;
+}
+
 std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int inputs,
                                                   bool including_context) const
 {
