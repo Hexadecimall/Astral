@@ -47,8 +47,57 @@ std::vector<std::string> names_at(const ir::Target &target, uint64_t offset, int
 // way, so the trail is two operations long and neither of them is a copy.
 using Place = std::pair<const ghidra::AddrSpace *, uint64_t>;
 
+// Whether an operation only carries a value rather than changing it.
+//
+// A move is a copy or a widening. An addition of nothing is also a move, and
+// so is an or or an exclusive-or of nothing, because an instruction that reads
+// through a register with no displacement says so that way.
+bool only_carries(const Meaning &one)
+{
+    if (one.opcode == ghidra::CPUI_COPY || one.opcode == ghidra::CPUI_INT_ZEXT ||
+        one.opcode == ghidra::CPUI_INT_SEXT || one.opcode == ghidra::CPUI_SUBPIECE ||
+        one.opcode == ghidra::CPUI_PIECE || one.opcode == ghidra::CPUI_CAST)
+        return true;
+    if (one.opcode != ghidra::CPUI_INT_ADD && one.opcode != ghidra::CPUI_INT_OR &&
+        one.opcode != ghidra::CPUI_INT_XOR && one.opcode != ghidra::CPUI_INT_SUB &&
+        one.opcode != ghidra::CPUI_INT_AND && one.opcode != ghidra::CPUI_INT_MULT)
+        return false;
+
+    // Everything but one of its inputs leaves the value as it was: adding
+    // nothing, or-ing nothing, multiplying by one, and-ing with every bit. A
+    // narrower view of a register is taken by masking, so that last one is how
+    // an instruction says "the low half of this" and is a carrying, not a
+    // change.
+    int carrying = 0;
+    for (const ghidra::VarnodeData &input : one.inputs) {
+        if (input.space == nullptr || input.space->getType() != ghidra::IPTR_CONSTANT) {
+            ++carrying;
+            continue;
+        }
+        const bool idle =
+            (input.offset == 0 && one.opcode != ghidra::CPUI_INT_AND &&
+             one.opcode != ghidra::CPUI_INT_MULT) ||
+            (input.offset == 1 && one.opcode == ghidra::CPUI_INT_MULT) ||
+            (one.opcode == ghidra::CPUI_INT_AND && input.size > 0 && input.size < 8 &&
+             input.offset == (~static_cast<uint64_t>(0) >>
+                              static_cast<unsigned>(64 - 8 * input.size))) ||
+            (one.opcode == ghidra::CPUI_INT_AND && input.size >= 8 &&
+             input.offset == ~static_cast<uint64_t>(0));
+        if (!idle)
+            ++carrying;
+    }
+    return carrying <= 1;
+}
+
 // Every place a value came from, following what the instruction did backwards.
-std::set<Place> came_from(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from)
+//
+// `only_moves` follows only the operations that carry a value rather than
+// change it. That is what the check on an operation's inputs needs: AARCH64's
+// `eon` is an exclusive-or of the negation of its second operand, so the
+// exclusive-or is there and both registers are reachable from it, and a
+// candidate for an exclusive-or was accepted that inverts one side first.
+std::set<Place> came_from(const std::vector<Meaning> &meant, const ghidra::VarnodeData &from,
+                          bool only_moves = false)
 {
     std::vector<ghidra::VarnodeData> waiting;
     waiting.push_back(from);
@@ -70,6 +119,8 @@ std::set<Place> came_from(const std::vector<Meaning> &meant, const ghidra::Varno
                 wrote = &one;
         }
         if (wrote == nullptr)
+            continue;
+        if (only_moves && !only_carries(*wrote))
             continue;
         for (const ghidra::VarnodeData &input : wrote->inputs)
             waiting.push_back(input);
@@ -141,11 +192,15 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
 
         // Everywhere its inputs came from, taken together, because an
         // instruction is free to name its operands in whatever order it likes.
-        std::set<Place> sources;
-        for (const ghidra::VarnodeData &input : doing.inputs) {
-            const std::set<Place> from = came_from(meant, input);
-            sources.insert(from.begin(), from.end());
-        }
+        // Where each of the instruction's own inputs came from, kept apart.
+        //
+        // Taking them together asks only whether every wanted place appears
+        // somewhere, and an operation over the same register twice is then met
+        // by an instruction that reads it once and does something else with the
+        // other side. So each wanted value must be met by an input of its own.
+        std::vector<std::set<Place>> sources;
+        for (const ghidra::VarnodeData &input : doing.inputs)
+            sources.push_back(came_from(meant, input, true));
 
         // Which memory it touches is not one of the values, here either. The
         // decoded instruction names a real space; what was asked for names the
@@ -159,19 +214,28 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
                 ? 1
                 : 0;
 
+        std::vector<bool> spoken(sources.size(), false);
         bool reads_them_all = true;
         for (size_t at = first; at < wanted.inputs.size(); ++at) {
             const pcode::Varnode &node = wanted.inputs[at];
             bool found = false;
-            for (const Place &one : sources) {
-                if (one.first == nullptr)
+            for (size_t which = 0; which < sources.size() && !found; ++which) {
+                if (spoken[which])
                     continue;
-                const bool is_register = one.first->getType() == ghidra::IPTR_PROCESSOR;
-                const bool is_number = one.first->getType() == ghidra::IPTR_CONSTANT;
-                if (node.is_constant())
-                    found = found || (is_number && one.second == node.offset);
-                else
-                    found = found || (is_register && one.second == node.offset);
+                for (const Place &one : sources[which]) {
+                    if (one.first == nullptr)
+                        continue;
+                    const bool is_register = one.first->getType() == ghidra::IPTR_PROCESSOR;
+                    const bool is_number = one.first->getType() == ghidra::IPTR_CONSTANT;
+                    const bool matches = node.is_constant()
+                                             ? (is_number && one.second == node.offset)
+                                             : (is_register && one.second == node.offset);
+                    if (matches) {
+                        spoken[which] = true;
+                        found = true;
+                        break;
+                    }
+                }
             }
             reads_them_all = reads_them_all && found;
         }
