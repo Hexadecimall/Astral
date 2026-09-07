@@ -147,8 +147,21 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
             sources.insert(from.begin(), from.end());
         }
 
+        // Which memory it touches is not one of the values, here either. The
+        // decoded instruction names a real space; what was asked for names the
+        // representation's own idea of one, and the two are different numbers
+        // that were never going to match. Looking for it rejected every load
+        // and every store that was otherwise exactly right - `ldur x9, [x9]`
+        // among them.
+        const size_t first =
+            (wanted.opcode == ghidra::CPUI_LOAD || wanted.opcode == ghidra::CPUI_STORE) &&
+                    !wanted.inputs.empty()
+                ? 1
+                : 0;
+
         bool reads_them_all = true;
-        for (const pcode::Varnode &node : wanted.inputs) {
+        for (size_t at = first; at < wanted.inputs.size(); ++at) {
+            const pcode::Varnode &node = wanted.inputs[at];
             bool found = false;
             for (const Place &one : sources) {
                 if (one.first == nullptr)
