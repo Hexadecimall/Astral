@@ -862,11 +862,20 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                             for (size_t back = asked.size(); back > 0; --back)
                                 reads.push_back(asked[back - 1]);
                             // Which question, taken from whatever worked the
-                            // answer out on the way.
+                            // answer out on the way - and which way round it is
+                            // asked, since a branch that goes when a register
+                            // is nothing and one that goes when it is not are
+                            // the same comparison and opposite instructions.
+                            // Taking only the comparison made them
+                            // indistinguishable, so neither could be chosen and
+                            // every branch of that shape was refused.
+                            bool the_other_way = false;
                             for (size_t k = 0; k < all.size() && k < only_at; ++k) {
                                 if (all[k] == nullptr)
                                     continue;
                                 const ghidra::OpCode what = all[k]->getOpcode();
+                                if (what == ghidra::CPUI_BOOL_NEGATE)
+                                    the_other_way = !the_other_way;
                                 if (what == ghidra::CPUI_INT_EQUAL ||
                                     what == ghidra::CPUI_INT_NOTEQUAL ||
                                     what == ghidra::CPUI_INT_LESS ||
@@ -874,6 +883,24 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                                     what == ghidra::CPUI_INT_LESSEQUAL ||
                                     what == ghidra::CPUI_INT_SLESSEQUAL)
                                     form.compares = what;
+                            }
+                            if (the_other_way) {
+                                switch (form.compares) {
+                                case ghidra::CPUI_INT_EQUAL:
+                                    form.compares = ghidra::CPUI_INT_NOTEQUAL;
+                                    break;
+                                case ghidra::CPUI_INT_NOTEQUAL:
+                                    form.compares = ghidra::CPUI_INT_EQUAL;
+                                    break;
+                                default:
+                                    // The opposite of a comparison of size is
+                                    // another comparison of size with its sides
+                                    // the other way round, which is not a thing
+                                    // this can say - so it says nothing rather
+                                    // than something wrong.
+                                    form.compares = ghidra::CPUI_COPY;
+                                    break;
+                                }
                             }
                             continue;
                         }

@@ -963,8 +963,13 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             //
             // A fused branch is the exception: its inputs are the comparison's,
             // and the comparison has no destination among them.
-            const bool names_a_space =
-                operation.opcode == ghidra::CPUI_LOAD || operation.opcode == ghidra::CPUI_STORE;
+            // A call names where it goes and nothing else, and that name is
+            // its first input here as it is in the form - so both count from
+            // the same place. A branch keeps where it goes in its list of
+            // successors instead, which is why the two are not the same rule.
+            const bool names_a_space = operation.opcode == ghidra::CPUI_LOAD ||
+                                       operation.opcode == ghidra::CPUI_STORE ||
+                                       operation.opcode == ghidra::CPUI_CALL;
             const size_t first_input =
                 names_a_space && !operation.inputs.empty() ? 1 : 0;
 
@@ -1530,6 +1535,16 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 }
                 if (!carrying.empty())
                     carrying += ")";
+
+                if (operation.opcode == ghidra::CPUI_CALL) {
+                    problems.push_back(
+                        "a call to " +
+                        (operation.callee.empty() ? std::string("something unnamed")
+                                                  : operation.callee) +
+                        " cannot be written until it is known where that is, which is "
+                        "settled by laying the program out");
+                    continue;
+                }
 
                 problems.push_back(std::string("no way of doing a ") + called +
                                    " on this processor writes those registers" + carrying +
