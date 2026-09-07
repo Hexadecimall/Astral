@@ -372,6 +372,110 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
         return false;
     }
 
+    // What an operation works on has to be all one width.
+    //
+    // p-code says so: adding a four-byte value to an eight-byte one is not an
+    // operation, it is two operations with the widening left out. It arises
+    // because width belongs to the instruction here and not to the value, and a
+    // value is placed once - so one made by a four-byte instruction and read by
+    // an eight-byte one came back four bytes wide, and what was written was an
+    // eight-byte add over an eight-byte and a four-byte operand.
+    //
+    // The widening that was left out is put in. Which one it is, is the reading
+    // instruction's business, because that is what knows whether the value it is
+    // reading is a signed one.
+    switch (made.opcode) {
+    case ghidra::CPUI_INT_ADD:
+    case ghidra::CPUI_INT_SUB:
+    case ghidra::CPUI_INT_MULT:
+    case ghidra::CPUI_INT_DIV:
+    case ghidra::CPUI_INT_SDIV:
+    case ghidra::CPUI_INT_REM:
+    case ghidra::CPUI_INT_SREM:
+    case ghidra::CPUI_INT_AND:
+    case ghidra::CPUI_INT_OR:
+    case ghidra::CPUI_INT_XOR:
+    case ghidra::CPUI_INT_EQUAL:
+    case ghidra::CPUI_INT_NOTEQUAL:
+    case ghidra::CPUI_INT_LESS:
+    case ghidra::CPUI_INT_SLESS:
+    case ghidra::CPUI_INT_LESSEQUAL:
+    case ghidra::CPUI_INT_SLESSEQUAL: {
+        // A comparison answers in one byte, so its width is the width of what it
+        // asks about rather than of its answer.
+        const bool answers_yes_or_no = made.output.size == 1 && made.writes &&
+                                       made.opcode >= ghidra::CPUI_INT_EQUAL &&
+                                       made.opcode <= ghidra::CPUI_INT_SLESSEQUAL;
+        int want = made.writes && !answers_yes_or_no ? made.output.size : 0;
+        for (const Varnode &input : made.inputs) {
+            if (!input.is_constant() && input.size > want)
+                want = input.size;
+        }
+        if (want <= 0)
+            break;
+        for (Varnode &input : made.inputs) {
+            if (input.size == want)
+                continue;
+            if (input.is_constant()) {
+                // A number has no place of its own, so it is simply asked for at
+                // the width it is being read at.
+                input.size = want;
+                continue;
+            }
+            Varnode wider;
+            wider.where = Where::Unique;
+            wider.offset = next_unique_;
+            wider.size = want;
+            next_unique_ += static_cast<uint64_t>(want);
+
+            Operation widening;
+            widening.opcode =
+                input.size < want ? signed_or_not(is_signed, ghidra::CPUI_INT_SEXT,
+                                                  ghidra::CPUI_INT_ZEXT)
+                                  : ghidra::CPUI_SUBPIECE;
+            widening.writes = true;
+            widening.output = wider;
+            widening.inputs.push_back(input);
+            if (widening.opcode == ghidra::CPUI_SUBPIECE)
+                widening.inputs.push_back(constant(0, 4));
+            into.operations.push_back(std::move(widening));
+            input = wider;
+        }
+
+        // And where the answer goes is that width too. An operation whose
+        // operands are wider than the place its answer was going works at the
+        // wider width and the answer is narrowed afterwards, which is what the
+        // narrowing is for and is again a thing p-code says outright rather
+        // than leaves to be inferred.
+        if (made.writes && !answers_yes_or_no && made.output.size != want) {
+            Varnode room;
+            room.where = Where::Unique;
+            room.offset = next_unique_;
+            room.size = want;
+            next_unique_ += static_cast<uint64_t>(want);
+
+            Operation narrowing;
+            narrowing.opcode = made.output.size < want
+                                   ? ghidra::CPUI_SUBPIECE
+                                   : signed_or_not(is_signed, ghidra::CPUI_INT_SEXT,
+                                                   ghidra::CPUI_INT_ZEXT);
+            narrowing.writes = true;
+            narrowing.output = made.output;
+            narrowing.inputs.push_back(room);
+            if (narrowing.opcode == ghidra::CPUI_SUBPIECE)
+                narrowing.inputs.push_back(constant(0, 4));
+
+            made.output = room;
+            into.operations.push_back(std::move(made));
+            into.operations.push_back(std::move(narrowing));
+            return true;
+        }
+        break;
+    }
+    default:
+        break;
+    }
+
     into.operations.push_back(std::move(made));
     return true;
 }
@@ -498,6 +602,330 @@ bool to_pcode(const ir::Function &function, const ir::Target &target, Sequence &
 {
     Writer writer(target, problems);
     return writer.write(function, out);
+}
+
+namespace {
+
+// Carrying a value in two registers, when one will not hold it.
+class Splitter {
+public:
+    Splitter(Sequence &sequence, const ir::Target &target, int half,
+             std::vector<std::string> &problems)
+        : sequence_(sequence), target_(target), half_(half), problems_(problems)
+    {
+        // Somewhere to put the halves that nothing else is using. Values with no
+        // home are told apart by where they sit, so a new one sits past
+        // everything already there.
+        for (const Block &block : sequence_.blocks) {
+            for (const Operation &operation : block.operations) {
+                auto past = [&](const Varnode &node) {
+                    if (node.where != Where::Unique)
+                        return;
+                    const uint64_t ends = node.offset + static_cast<uint64_t>(node.size);
+                    if (ends > next_)
+                        next_ = ends;
+                };
+                if (operation.writes)
+                    past(operation.output);
+                for (const Varnode &input : operation.inputs)
+                    past(input);
+            }
+        }
+    }
+
+    bool run();
+
+private:
+    struct Pair {
+        Varnode low;
+        Varnode high;
+    };
+
+    bool too_wide(const Varnode &node) const
+    {
+        return node.size > half_ &&
+               (node.where == Where::Unique || node.where == Where::Register);
+    }
+
+    Varnode fresh(int size)
+    {
+        Varnode node;
+        node.where = Where::Unique;
+        node.offset = next_;
+        node.size = size;
+        next_ += static_cast<uint64_t>(half_);
+        return node;
+    }
+
+    Varnode number(uint64_t value, int size) const
+    {
+        Varnode node;
+        node.where = Where::Constant;
+        node.offset = value;
+        node.size = size;
+        return node;
+    }
+
+    // The two halves a wide value is carried in, remembered so that every
+    // mention of it means the same two.
+    Pair halves_of(const Varnode &node)
+    {
+        const std::pair<uint64_t, int> key{node.offset, node.size};
+        auto already = known_.find(key);
+        if (already != known_.end())
+            return already->second;
+        Pair pair;
+        pair.low = fresh(half_);
+        pair.high = fresh(half_);
+        known_.emplace(key, pair);
+        return pair;
+    }
+
+    void emit(ghidra::OpCode opcode, const Varnode &into, const std::vector<Varnode> &from)
+    {
+        Operation made;
+        made.opcode = opcode;
+        made.writes = true;
+        made.output = into;
+        made.inputs = from;
+        out_.push_back(std::move(made));
+    }
+
+    bool split(const Operation &operation);
+    bool split_memory(const Operation &operation);
+
+    Sequence &sequence_;
+    const ir::Target &target_;
+    const int half_;
+    std::vector<std::string> &problems_;
+    uint64_t next_ = 0;
+    std::map<std::pair<uint64_t, int>, Pair> known_;
+    std::vector<Operation> out_;
+};
+
+// A load or a store goes twice, at addresses a half apart. Which half sits at
+// the lower address is the processor's business: one that writes its biggest
+// byte first puts the high half there.
+bool Splitter::split_memory(const Operation &operation)
+{
+    const bool storing = operation.opcode == ghidra::CPUI_STORE;
+    if (operation.inputs.size() < (storing ? 3u : 2u))
+        return false;
+
+    const Varnode space = operation.inputs[0];
+    const Varnode address = operation.inputs[1];
+    if (too_wide(address))
+        return false;  // an address that itself needs two is not done here
+
+    const Varnode far = fresh(address.size);
+    emit(ghidra::CPUI_INT_ADD, far,
+         {address, number(static_cast<uint64_t>(half_), address.size)});
+
+    const Varnode first = target_.data_big_endian ? address : far;
+    const Varnode second = target_.data_big_endian ? far : address;
+
+    if (storing) {
+        if (!too_wide(operation.inputs[2]))
+            return false;
+        const Pair value = halves_of(operation.inputs[2]);
+        for (int which = 0; which < 2; ++which) {
+            Operation made;
+            made.opcode = ghidra::CPUI_STORE;
+            made.writes = false;
+            made.inputs = {space, which == 0 ? first : second,
+                           which == 0 ? value.high : value.low};
+            out_.push_back(std::move(made));
+        }
+        return true;
+    }
+
+    const Pair into = halves_of(operation.output);
+    emit(ghidra::CPUI_LOAD, into.high, {space, first});
+    emit(ghidra::CPUI_LOAD, into.low, {space, second});
+    return true;
+}
+
+bool Splitter::split(const Operation &operation)
+{
+    switch (operation.opcode) {
+    case ghidra::CPUI_COPY: {
+        if (operation.inputs.size() != 1 || !operation.writes)
+            return false;
+        const Pair into = halves_of(operation.output);
+        const Varnode from = operation.inputs[0];
+        if (from.is_constant()) {
+            // A number too wide to carry is two numbers: the low half, and what
+            // was above it.
+            const uint64_t mask = half_ >= 8 ? ~static_cast<uint64_t>(0)
+                                             : (static_cast<uint64_t>(1) << (half_ * 8)) - 1;
+            emit(ghidra::CPUI_COPY, into.low, {number(from.offset & mask, half_)});
+            emit(ghidra::CPUI_COPY, into.high,
+                 {number(half_ >= 8 ? 0 : (from.offset >> (half_ * 8)) & mask, half_)});
+            return true;
+        }
+        if (!too_wide(from))
+            return false;
+        const Pair source = halves_of(from);
+        emit(ghidra::CPUI_COPY, into.low, {source.low});
+        emit(ghidra::CPUI_COPY, into.high, {source.high});
+        return true;
+    }
+
+    case ghidra::CPUI_INT_ADD:
+    case ghidra::CPUI_INT_SUB: {
+        if (operation.inputs.size() != 2 || !operation.writes)
+            return false;
+        if (!too_wide(operation.inputs[0]) || !too_wide(operation.inputs[1]))
+            return false;
+        const bool adding = operation.opcode == ghidra::CPUI_INT_ADD;
+        const Pair left = halves_of(operation.inputs[0]);
+        const Pair right = halves_of(operation.inputs[1]);
+        const Pair into = halves_of(operation.output);
+
+        // The low half, and then what it carried into the high one. What comes
+        // out of an addition is what the processor calls a carry; what comes out
+        // of a subtraction is the low half of the first being below the low half
+        // of the second, which is that same question asked the way p-code asks
+        // it.
+        emit(operation.opcode, into.low, {left.low, right.low});
+        const Varnode said = fresh(1);
+        emit(adding ? ghidra::CPUI_INT_CARRY : ghidra::CPUI_INT_LESS, said,
+             {left.low, right.low});
+        const Varnode carried = fresh(half_);
+        emit(ghidra::CPUI_INT_ZEXT, carried, {said});
+        const Varnode tops = fresh(half_);
+        emit(operation.opcode, tops, {left.high, right.high});
+        emit(operation.opcode, into.high, {tops, carried});
+        return true;
+    }
+
+    case ghidra::CPUI_INT_AND:
+    case ghidra::CPUI_INT_OR:
+    case ghidra::CPUI_INT_XOR: {
+        if (operation.inputs.size() != 2 || !operation.writes)
+            return false;
+        if (!too_wide(operation.inputs[0]) || !too_wide(operation.inputs[1]))
+            return false;
+        const Pair left = halves_of(operation.inputs[0]);
+        const Pair right = halves_of(operation.inputs[1]);
+        const Pair into = halves_of(operation.output);
+        emit(operation.opcode, into.low, {left.low, right.low});
+        emit(operation.opcode, into.high, {left.high, right.high});
+        return true;
+    }
+
+    case ghidra::CPUI_INT_EQUAL:
+    case ghidra::CPUI_INT_NOTEQUAL: {
+        if (operation.inputs.size() != 2 || !operation.writes)
+            return false;
+        if (!too_wide(operation.inputs[0]) || !too_wide(operation.inputs[1]))
+            return false;
+        const Pair left = halves_of(operation.inputs[0]);
+        const Pair right = halves_of(operation.inputs[1]);
+
+        // Two long values are equal when both halves are, and differ when
+        // either half does.
+        const Varnode low_says = fresh(1);
+        const Varnode high_says = fresh(1);
+        emit(operation.opcode, low_says, {left.low, right.low});
+        emit(operation.opcode, high_says, {left.high, right.high});
+        emit(operation.opcode == ghidra::CPUI_INT_EQUAL ? ghidra::CPUI_BOOL_AND
+                                                        : ghidra::CPUI_BOOL_OR,
+             operation.output, {low_says, high_says});
+        return true;
+    }
+
+    case ghidra::CPUI_INT_ZEXT:
+    case ghidra::CPUI_INT_SEXT: {
+        if (operation.inputs.size() != 1 || !operation.writes ||
+            too_wide(operation.inputs[0]) || operation.inputs[0].size > half_)
+            return false;
+        const Pair into = halves_of(operation.output);
+        emit(ghidra::CPUI_COPY, into.low, {operation.inputs[0]});
+        if (operation.opcode == ghidra::CPUI_INT_ZEXT) {
+            emit(ghidra::CPUI_COPY, into.high, {number(0, half_)});
+            return true;
+        }
+        // Widening a signed value fills the high half with its sign, which is
+        // the value shifted down until only that is left.
+        emit(ghidra::CPUI_INT_SRIGHT, into.high,
+             {operation.inputs[0], number(static_cast<uint64_t>(half_ * 8 - 1), 4)});
+        return true;
+    }
+
+    case ghidra::CPUI_SUBPIECE: {
+        // Taking the low bytes of a long value is taking the half they are in.
+        if (operation.inputs.size() != 2 || !operation.writes ||
+            !operation.inputs[1].is_constant() || operation.inputs[1].offset != 0 ||
+            operation.output.size > half_ || !too_wide(operation.inputs[0]))
+            return false;
+        const Pair from = halves_of(operation.inputs[0]);
+        emit(ghidra::CPUI_COPY, operation.output, {from.low});
+        return true;
+    }
+
+    case ghidra::CPUI_LOAD:
+    case ghidra::CPUI_STORE:
+        return split_memory(operation);
+
+    default:
+        return false;
+    }
+}
+
+bool Splitter::run()
+{
+    const size_t before = problems_.size();
+    for (Block &block : sequence_.blocks) {
+        out_.clear();
+        for (const Operation &operation : block.operations) {
+            bool wide = operation.writes && too_wide(operation.output);
+            for (const Varnode &input : operation.inputs)
+                wide = wide || too_wide(input);
+            if (!wide) {
+                out_.push_back(operation);
+                continue;
+            }
+            if (split(operation))
+                continue;
+            const int how_wide =
+                operation.writes && operation.output.size > half_ ? operation.output.size : 0;
+            problems_.push_back(
+                std::string("a value wider than any register this processor has cannot be ") +
+                opcode_name(operation.opcode) + "ed a half at a time here" +
+                (how_wide > 0 ? " (" + std::to_string(how_wide) + " bytes)" : ""));
+            out_.push_back(operation);
+        }
+        block.operations = out_;
+    }
+    return problems_.size() == before;
+}
+
+} // namespace
+
+bool split_wide(Sequence &sequence, const ir::Target &target, int widest,
+                std::vector<std::string> &problems)
+{
+    if (widest <= 0)
+        return true;  // nothing known about its registers, so nothing to say
+
+    bool any_wider = false;
+    for (const Block &block : sequence.blocks) {
+        for (const Operation &operation : block.operations) {
+            if (operation.writes && operation.output.size > widest &&
+                operation.output.where != Where::Constant)
+                any_wider = true;
+            for (const Varnode &input : operation.inputs) {
+                if (input.size > widest && input.where != Where::Constant)
+                    any_wider = true;
+            }
+        }
+    }
+    if (!any_wider)
+        return true;
+
+    Splitter splitter(sequence, target, widest, problems);
+    return splitter.run();
 }
 
 std::string to_text(const Sequence &sequence)

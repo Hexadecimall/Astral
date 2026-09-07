@@ -348,6 +348,14 @@ public:
     // RISC-V's `addi` holds -4 perfectly well in twelve signed bits.
     bool can_carry(ghidra::OpCode what, uint64_t number, int bytes = 8) const;
 
+    // The widest value this processor can keep in one register.
+    //
+    // Anything wider has to be carried in two, and knowing where that line is
+    // is the first thing anyone splitting a value needs. Zero means the
+    // specification said nothing about which registers hold values, in which
+    // case nothing here is in a position to say a value is too wide.
+    int widest_for_values(const ir::Target &target) const;
+
     // Writes one instruction: the form's own bits, with the named registers put
     // in the slots that hold registers, in the order those slots come.
     //

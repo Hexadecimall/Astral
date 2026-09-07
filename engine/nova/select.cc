@@ -1021,6 +1021,60 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             ++at;
         }
 
+        // Widening a value, where the processor has no instruction that does.
+        //
+        // Making a narrow value wide is clearing what is above it, and a
+        // processor with a wider register than the value has nothing in that
+        // register that says how far the value goes - so it is shifted up until
+        // only it is left, and back down again. Which way it comes back decides
+        // whether the bits above it are the value's sign or nothing, which is
+        // exactly the difference between the two widenings.
+        //
+        // Only when nothing does it directly. AARCH64 and MIPS both have an
+        // instruction; RISC-V has none in its base set, and every widening the
+        // representation asks for there was refused - a hundred and sixty-five
+        // of them, once the widenings that were being left out were put in.
+        for (size_t at = 0; at < pending.size(); ++at) {
+            const pcode::Operation widening = pending[at];
+            const bool signed_one = widening.opcode == ghidra::CPUI_INT_SEXT;
+            if ((widening.opcode != ghidra::CPUI_INT_ZEXT && !signed_one) || !widening.writes ||
+                widening.inputs.size() != 1 || widening.made_while_writing)
+                continue;
+            if (!catalogue.doing(widening.opcode).empty())
+                continue;  // this processor says how, so let it
+            const int from = widening.inputs[0].size;
+            const int into = widening.output.size;
+            if (from <= 0 || into <= from || into > 8)
+                continue;
+
+            pcode::Varnode room = widening.output;
+            pcode::Varnode by;
+            by.where = pcode::Where::Constant;
+            by.offset = static_cast<uint64_t>((into - from) * 8);
+            by.size = into;
+
+            pcode::Operation up;
+            up.opcode = ghidra::CPUI_INT_LEFT;
+            up.writes = true;
+            up.output = room;
+            up.inputs.push_back(widening.inputs[0]);
+            up.inputs.push_back(by);
+            up.made_while_writing = true;
+
+            pcode::Operation down;
+            down.opcode =
+                signed_one ? ghidra::CPUI_INT_SRIGHT : ghidra::CPUI_INT_RIGHT;
+            down.writes = true;
+            down.output = widening.output;
+            down.inputs.push_back(room);
+            down.inputs.push_back(by);
+            down.made_while_writing = true;
+
+            pending[at] = up;
+            pending.insert(pending.begin() + static_cast<long>(at) + 1, down);
+            ++at;
+        }
+
         for (size_t step = 0; step < pending.size() && step < 4096; ++step) {
             const pcode::Operation operation = pending[step];
             const char *called = pcode::opcode_name(operation.opcode);

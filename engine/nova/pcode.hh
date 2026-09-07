@@ -125,6 +125,30 @@ struct Sequence {
 bool to_pcode(const ir::Function &function, const ir::Target &target, Sequence &out,
               std::vector<std::string> &problems);
 
+// Rewrites `sequence` so that no value is wider than `widest` bytes, which is
+// the widest a register on this processor can hold one in.
+//
+// A thirty-two bit processor has nowhere to put a sixty-four bit value, and
+// recovered code is full of them: a length, an index, anything the source
+// declared as eight bytes. There is no register to name, so every function
+// using one was refused outright - seventeen of twenty on MIPS, which wrote
+// nothing at all for them.
+//
+// What such a machine does is keep the value in two registers and do the work a
+// half at a time, and that is what this does: each operation over a value too
+// wide becomes the operations over halves that mean the same thing. Addition
+// carries out of the low half into the high one; a comparison asks about both
+// halves and combines the answers; a load reads twice, at addresses a half
+// apart, in whichever order this processor keeps its halves.
+//
+// Anything with no such spelling is refused by name. A multiplication of two
+// long values is several multiplications and a widening one, and a shift by an
+// amount nobody knows until it runs is a branch - both are real and neither is
+// here, so they say so rather than being written wrongly. A `widest` of zero, or
+// a sequence with nothing wider, leaves it exactly as it was.
+bool split_wide(Sequence &sequence, const ir::Target &target, int widest,
+                std::vector<std::string> &problems);
+
 // The sequence written out, one operation to a line, for reading and comparing.
 std::string to_text(const Sequence &sequence);
 

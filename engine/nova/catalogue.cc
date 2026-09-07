@@ -1196,6 +1196,34 @@ bool Catalogue::can_carry(ghidra::OpCode what, uint64_t number, int bytes) const
     return false;
 }
 
+int Catalogue::widest_for_values(const ir::Target &target) const
+{
+    // The same pool a value would actually be given a home from, asked at each
+    // width from the widest down.
+    //
+    // Asking the instruction set alone says eight on MIPS, because its
+    // accumulators are eight bytes and an integer adds into them - but the
+    // convention has no opinion about those, so nothing is ever housed there and
+    // a value of eight bytes has nowhere to go. A width this reports is a width
+    // something can be put in, so both have to agree on it.
+    const std::set<uint64_t> ordinary = registers_for_values(target);
+    if (ordinary.empty())
+        return 0;
+    for (int width = 16; width >= 1; width /= 2) {
+        std::vector<std::string> named;
+        std::string unused;
+        if (!target.value_registers(width, named, unused))
+            continue;
+        for (const std::string &one : named) {
+            const ir::Target::RegisterPlace *place = target.register_place(one);
+            if (place != nullptr && place->width >= width &&
+                ordinary.count(place->offset) != 0)
+                return width;
+        }
+    }
+    return 0;
+}
+
 bool Catalogue::return_through(const ir::Target &target, uint64_t &offset) const
 {
     // What the compiler specification says, when it says anything. MIPS and
