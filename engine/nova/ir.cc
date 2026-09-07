@@ -311,34 +311,64 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
         // housed. There is no one-byte float, so asking for one found nothing
         // and left b8 and b9 - which are a byte of a floating-point register -
         // among the places a byte-wide value might live.
-        std::set<uint64_t> for_floats;
-        for (int size : {4, 8}) {
-            ghidra::PrototypePieces proto;
-            proto.model = model;
-            proto.name = "asked";
-            proto.outtype = held->types->getBase(size, ghidra::TYPE_FLOAT);
-            proto.firstVarArgSlot = -1;
-            for (int i = 0; i < 12; ++i) {
-                proto.intypes.push_back(held->types->getBase(size, ghidra::TYPE_FLOAT));
-                proto.innames.push_back(std::string());
-            }
-            std::vector<ghidra::ParameterPieces> places;
-            try {
-                model->assignParameterStorage(proto, places, true);
-                for (const ghidra::ParameterPieces &piece : places) {
-                    if (!piece.addr.isInvalid())
-                        for_floats.insert(piece.addr.getOffset());
-                }
-            } catch (ghidra::LowlevelError &) {
-                // A processor with no floating point has none to leave out.
-            }
-        }
-
         ghidra::AddrSpace *registers = held->translate->getSpaceByName("register");
         if (registers == nullptr) {
             error = "this processor keeps its registers somewhere with no name";
             return false;
         }
+
+        // Only the ones that landed in a register.
+        //
+        // A parameter the convention could not fit goes on the stack, and a
+        // stack place is an offset into another space entirely - so taking the
+        // offset alone and calling it a register made the first stack slot,
+        // at nothing, into the register at nothing. On MIPS that register is
+        // `zero`, which reads as nought however it is written, and a value
+        // housed there is a value thrown away.
+        auto where_they_go = [&](ghidra::type_metatype kind, std::set<uint64_t> &into) {
+            for (int size : {4, 8}) {
+                ghidra::PrototypePieces proto;
+                proto.model = model;
+                proto.name = "asked";
+                proto.outtype = held->types->getBase(size, kind);
+                proto.firstVarArgSlot = -1;
+                for (int i = 0; i < 12; ++i) {
+                    proto.intypes.push_back(held->types->getBase(size, kind));
+                    proto.innames.push_back(std::string());
+                }
+                std::vector<ghidra::ParameterPieces> places;
+                try {
+                    model->assignParameterStorage(proto, places, true);
+                    for (const ghidra::ParameterPieces &piece : places) {
+                        if (!piece.addr.isInvalid() && piece.addr.getSpace() == registers)
+                            into.insert(piece.addr.getOffset());
+                    }
+                } catch (ghidra::LowlevelError &) {
+                    // A processor with no floating point has none to leave out.
+                }
+            }
+        };
+
+        std::set<uint64_t> for_floats;
+        where_they_go(ghidra::TYPE_FLOAT, for_floats);
+
+        // A place an integer can go to is not a floating-point register.
+        //
+        // Asking where twelve floats go finds the floating-point file and then
+        // keeps going: a convention that runs out of float registers carries on
+        // into the general ones, and MIPS and RISC-V both do. Every register
+        // that overflow touched was struck off as somewhere no integer may
+        // live, which on MIPS was thirteen of them - the argument registers, the
+        // even-numbered saved registers, and most of the temporaries - leaving
+        // nine places on a machine with thirty-two, and sixteen of twenty
+        // recovered functions with nowhere to put their values.
+        //
+        // Asking the same question about integers says which of those were
+        // never the floating-point file to begin with.
+        std::set<uint64_t> for_integers;
+        where_they_go(ghidra::TYPE_INT, for_integers);
+        for (uint64_t one : for_integers)
+            for_floats.erase(one);
 
         std::set<uint64_t> already;
         for (const auto &one : register_places) {
@@ -347,13 +377,35 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
             // somewhere to put one byte on AARCH64 returned only the one-byte
             // registers, which are a byte of the floating-point file and
             // nothing else, so a byte-wide value had nowhere to go but there.
-            if (one.second.width < width || spoken_for.count(one.second.offset) != 0 ||
-                for_floats.count(one.second.offset) != 0)
-                continue;
-            const ghidra::Address at(registers, one.second.offset);
-            if (model->hasEffect(at, one.second.width) == ghidra::EffectRecord::unknown_effect)
-                continue;  // the convention has no opinion, so it is not for values
-            if (!already.insert(one.second.offset).second)
+            const char *why = nullptr;
+            if (one.second.width < width)
+                why = "narrower than the value";
+            else if (spoken_for.count(one.second.offset) != 0)
+                why = "spoken for (frame or the way back)";
+            else if (for_floats.count(one.second.offset) != 0)
+                why = "a float could go there";
+            if (why == nullptr && for_integers.count(one.second.offset) == 0) {
+                // What the convention says about it, where it says anything.
+                //
+                // Saying nothing is the right answer for a register that is not
+                // for values at all - one hardwired to zero, or kept for the
+                // kernel - and that is why this rule is here. But a convention
+                // may also say nothing about the registers it destroys: MIPS
+                // records only the ones it preserves, so its argument registers
+                // and every one of its temporaries went unmentioned and were
+                // struck off with them.
+                //
+                // Passing arguments in a register is an opinion about it, so a
+                // place the convention puts integers is kept whatever else it
+                // does or does not say.
+                const ghidra::Address at(registers, one.second.offset);
+                if (model->hasEffect(at, one.second.width) ==
+                    ghidra::EffectRecord::unknown_effect)
+                    why = "the convention has no opinion";
+            }
+            if (why == nullptr && !already.insert(one.second.offset).second)
+                why = "another name already has that place";
+            if (why != nullptr)
                 continue;
             out.push_back(one.first);
         }
