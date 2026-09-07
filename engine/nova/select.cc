@@ -2,6 +2,7 @@
 
 #include "specification.hh"
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <set>
@@ -644,11 +645,21 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
     const size_t before = problems.size();
 
     // A branch, put aside until it is known how far it reaches.
-    struct Aiming {
-        size_t which = 0;  // where in `out` the instruction sits
+    // A branch, and every way this processor has of writing it.
+    //
+    // More than one way is kept because how far a branch reaches is part of
+    // what a form is, and nothing knows how far this one has to reach until
+    // everything is laid out. The shortest form is chosen first, as everywhere
+    // else here, and a shorter branch reaches less far: RISC-V's two-byte
+    // conditional branch reaches a quarter of what its four-byte one does.
+    struct Way {
         const catalogue::Form *form = nullptr;
         std::vector<catalogue::Catalogue::Wanted> places;
         std::vector<int> roles;
+    };
+    struct Aiming {
+        size_t which = 0;  // where in `out` the instruction sits
+        std::vector<Way> ways;  // shortest first
         uint32_t to = 0;      // the block it goes to
         int skips = 0;        // or how many instructions it goes over
     };
@@ -1157,8 +1168,15 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             std::vector<int> best_roles;
             const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
             std::string last_refusal;
+            // Every way that works, for a branch, which cannot be settled until
+            // it is known how far it has to go.
+            const bool goes_somewhere_later =
+                (operation.opcode == ghidra::CPUI_BRANCH ||
+                 operation.opcode == ghidra::CPUI_CBRANCH) &&
+                (!operation.successors.empty() || operation.skips_forward != 0);
+            std::vector<Way> ways_that_work;
             for (const catalogue::Form *form : *choose_from) {
-                if (best != nullptr && form->shortest >= best->shortest)
+                if (!goes_somewhere_later && best != nullptr && form->shortest >= best->shortest)
                     continue;
                 std::vector<uint8_t> bytes;
                 std::string refused;
@@ -1338,9 +1356,24 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     continue;
                 }
 
+                if (goes_somewhere_later) {
+                    Way way;
+                    way.form = form;
+                    way.roles = roles;
+                    way.places = taken != nullptr ? *taken : called_any;
+                    ways_that_work.push_back(std::move(way));
+                }
+                if (best != nullptr && form->shortest >= best->shortest)
+                    continue;
                 best = form;
                 best_roles = roles;
                 written = std::move(bytes);
+            }
+            if (!ways_that_work.empty()) {
+                std::stable_sort(ways_that_work.begin(), ways_that_work.end(),
+                                 [](const Way &one, const Way &two) {
+                                     return one.form->shortest < two.form->shortest;
+                                 });
             }
 
             if (best == nullptr) {
@@ -1618,9 +1651,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     operation.successors.empty() ? 0 : operation.successors.front();
                 Aiming later;
                 later.which = out.size();
-                later.form = best;
-                later.places = taken != nullptr ? *taken : called_any;
-                later.roles = best_roles;
+                later.ways = ways_that_work;
                 later.to = chosen.goes_to;
                 later.skips = operation.skips_forward;
                 aiming.push_back(std::move(later));
@@ -1636,46 +1667,97 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
     // the field left alone; now that each one's length is known, every block
     // has a place and each branch is written again to reach its own.
     if (!aiming.empty()) {
-        std::map<uint32_t, uint64_t> starts;
-        std::vector<uint64_t> at(out.size(), 0);
-        uint64_t running = 0;
-        uint32_t last_block = out.empty() ? 0 : out.front().in_block;
-        for (size_t i = 0; i < out.size(); ++i) {
-            if (i == 0 || out[i].in_block != last_block) {
-                starts.emplace(out[i].in_block, running);
-                last_block = out[i].in_block;
+        // Laid out, aimed, and laid out again while anything is still moving.
+        //
+        // A branch too short to reach is written again as a longer form, and
+        // that pushes everything after it further away - which can put another
+        // branch out of reach that was in reach a moment ago. So this settles
+        // rather than computes: lay out, aim, and if any instruction changed
+        // length, do it again with the new places.
+        //
+        // It ends because a branch only ever moves to a longer form, so the
+        // lengths never fall and there are finitely many forms. The count is a
+        // guard against a processor that surprises that reasoning, not a part
+        // of it.
+        std::vector<size_t> using_way(aiming.size(), 0);
+        std::vector<std::string> could_not(aiming.size());
+        std::string refused;
+        for (int pass = 0; pass < 8; ++pass) {
+            std::map<uint32_t, uint64_t> starts;
+            std::vector<uint64_t> at(out.size(), 0);
+            uint64_t running = 0;
+            uint32_t last_block = out.empty() ? 0 : out.front().in_block;
+            for (size_t i = 0; i < out.size(); ++i) {
+                if (i == 0 || out[i].in_block != last_block) {
+                    starts.emplace(out[i].in_block, running);
+                    last_block = out[i].in_block;
+                }
+                at[i] = running;
+                running += out[i].bytes.size();
             }
-            at[i] = running;
-            running += out[i].bytes.size();
-        }
-        // A block nothing was written for still has a place: whatever comes
-        // after it.
-        for (const pcode::Block &block : sequence.blocks)
-            starts.emplace(block.identifier, running);
+            // A block nothing was written for still has a place: whatever comes
+            // after it.
+            for (const pcode::Block &block : sequence.blocks)
+                starts.emplace(block.identifier, running);
 
-        for (const Aiming &one : aiming) {
-            int64_t lands_at = 0;
-            if (one.skips != 0) {
-                // Over so many instructions from this one, which is how a
-                // question is answered with a truth where nothing answers it
-                // directly.
-                const size_t past = one.which + static_cast<size_t>(one.skips) + 1;
-                lands_at = past < at.size() ? static_cast<int64_t>(at[past])
-                                            : static_cast<int64_t>(running);
-            } else {
-                auto lands = starts.find(one.to);
-                if (lands == starts.end())
+            bool anything_moved = false;
+            refused.clear();
+            for (size_t which = 0; which < aiming.size(); ++which) {
+                const Aiming &one = aiming[which];
+                could_not[which].clear();
+                if (one.ways.empty()) {
+                    could_not[which] = "no way of writing it goes anywhere";
                     continue;
-                lands_at = static_cast<int64_t>(lands->second);
+                }
+                int64_t lands_at = 0;
+                if (one.skips != 0) {
+                    // Over so many instructions from this one, which is how a
+                    // question is answered with a truth where nothing answers
+                    // it directly.
+                    const size_t past = one.which + static_cast<size_t>(one.skips) + 1;
+                    lands_at = past < at.size() ? static_cast<int64_t>(at[past])
+                                                : static_cast<int64_t>(running);
+                } else {
+                    auto lands = starts.find(one.to);
+                    if (lands == starts.end())
+                        continue;
+                    lands_at = static_cast<int64_t>(lands->second);
+                }
+                const int64_t reaches = lands_at - static_cast<int64_t>(at[one.which]);
+
+                // The way it is already using, and then the longer ones. Going
+                // back to a shorter one is not tried: it would let this argue
+                // with itself for ever over a branch that reaches only while
+                // something else is short.
+                bool aimed_it = false;
+                for (size_t way = using_way[which]; way < one.ways.size() && !aimed_it; ++way) {
+                    std::vector<uint8_t> aimed;
+                    std::string why;
+                    if (!aim(*one.ways[way].form, one.ways[way].places, one.ways[way].roles,
+                             target, reaches, aimed, why)) {
+                        if (refused.empty())
+                            refused = why;
+                        continue;
+                    }
+                    anything_moved = anything_moved || aimed.size() != out[one.which].bytes.size();
+                    out[one.which].bytes = std::move(aimed);
+                    out[one.which].form = one.ways[way].form;
+                    using_way[which] = way;
+                    aimed_it = true;
+                }
+                if (!aimed_it)
+                    could_not[which] =
+                        refused.empty() ? std::string("no field in it can reach that far") : refused;
             }
-            const int64_t reaches = lands_at - static_cast<int64_t>(at[one.which]);
-            std::vector<uint8_t> aimed;
-            std::string refused;
-            if (aim(*one.form, one.places, one.roles, target, reaches, aimed, refused)) {
-                out[one.which].bytes = std::move(aimed);
-                continue;
+            if (!anything_moved || pass == 7) {
+                // Settled, or given up on settling. Anything still unaimed
+                // cannot be reached by any way this processor has.
+                for (const std::string &why : could_not) {
+                    if (!why.empty())
+                        problems.push_back("a branch cannot reach where it goes: " + why);
+                }
+                break;
             }
-            problems.push_back("a branch cannot reach where it goes: " + refused);
         }
     }
 
