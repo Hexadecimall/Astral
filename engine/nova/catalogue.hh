@@ -308,6 +308,25 @@ public:
     // is read off the same specification as everything else here.
     std::set<uint64_t> registers_for_values(const ir::Target &target) const;
 
+    // Where this processor keeps the address a function goes back to, when its
+    // compiler specification does not say.
+    //
+    // It has to come from somewhere, because a value put in that register is a
+    // return that goes to whatever the value was. AARCH64 names no return
+    // address in any of its specifications, so nothing stopped x30 being handed
+    // out as somewhere to keep a number, and seventeen of twenty recovered
+    // functions worked out their answer in the register holding the way back
+    // and then went there.
+    //
+    // The instruction set says it. A return reads the register the address is
+    // in and takes no operand saying so, so the register its return forms name
+    // outright is the one - and that is read off the specification rather than
+    // known in advance. Only when they all name the SAME register: `jr` returns
+    // through whichever register it is given, so MIPS and RISC-V name five
+    // between them and mean nothing by it, and both of those say `ra` in the
+    // specification that is asked first.
+    bool return_through(const ir::Target &target, uint64_t &offset) const;
+
     // Writes one instruction: the form's own bits, with the named registers put
     // in the slots that hold registers, in the order those slots come.
     //

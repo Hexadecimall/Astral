@@ -4,6 +4,7 @@
 // instruction, so something has to bridge the two. What is checked here is that
 // it does, that it does not put values in registers that mean something else,
 // and that it leaves alone the ones somebody already placed.
+#include "catalogue.hh"
 #include "homes.hh"
 #include "ir.hh"
 #include "pcode.hh"
@@ -268,6 +269,65 @@ void check_a_value_fits_in_a_bigger_register()
     report(kept_its_width, "and keeps the width the operation works in", "it was widened");
 }
 
+// Nothing is kept in the register holding the way back.
+//
+// A processor that says where a return address lives is easy. AARCH64 says it
+// nowhere - no compiler specification it has names one - so that register was
+// in every pool the instruction set offers, and seventeen of twenty recovered
+// functions worked their answer out in x30 and then returned to it. Every one
+// of those instructions decoded perfectly and named the right registers, which
+// is exactly why only asking what the whole thing does can find it.
+//
+// The instruction set is asked instead: a return reads the register the address
+// is in and takes no operand saying so, so the register its return forms name
+// outright is the one.
+void check_the_way_back_is_kept()
+{
+    for (const std::string &language :
+         {std::string("AARCH64:LE:64:v8A"), std::string("MIPS:BE:32:default"),
+          std::string("RISCV:LE:64:RV64GC")}) {
+        ir::Target target;
+        if (!target_for(language, target))
+            continue;
+        catalogue::Catalogue catalogue;
+        std::string trouble;
+        if (!catalogue.read(target, trouble)) {
+            report(false, language + "'s instructions are read", trouble);
+            continue;
+        }
+
+        uint64_t back_through = 0;
+        if (!catalogue.return_through(target, back_through)) {
+            report(false, language + " says where it keeps the way back",
+                   "nothing said where a return address lives");
+            continue;
+        }
+        report(true, language + " says where it keeps the way back",
+               "at " + std::to_string(back_through));
+
+        pcode::Sequence sequence = adding();
+        std::vector<std::string> problems;
+        if (!homes::give(sequence, target, problems, &catalogue)) {
+            report(false, "  and still houses everything",
+                   problems.empty() ? "" : problems.front());
+            continue;
+        }
+
+        bool kept = true;
+        for (const pcode::Block &block : sequence.blocks) {
+            for (const pcode::Operation &operation : block.operations) {
+                if (operation.writes && operation.output.where == pcode::Where::Register)
+                    kept = kept && operation.output.offset != back_through;
+                for (const pcode::Varnode &input : operation.inputs)
+                    if (input.where == pcode::Where::Register)
+                        kept = kept && input.offset != back_through;
+            }
+        }
+        report(kept, "  and puts nothing in it",
+               "a value was housed in the register the function returns through");
+    }
+}
+
 } // namespace
 
 int main()
@@ -282,6 +342,7 @@ int main()
     check_a_pinned_value_is_left_alone();
     check_nothing_to_do();
     check_a_value_fits_in_a_bigger_register();
+    check_the_way_back_is_kept();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

@@ -126,6 +126,16 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
     // already spoken for.
     std::map<Homeless, Life> lives;
     std::set<uint64_t> taken;
+
+    // The way back is spoken for before anything asks for somewhere to live.
+    //
+    // Nothing else here would stop it: the register holding a return address is
+    // an ordinary register that ordinary instructions can write, so it is in
+    // every pool the instruction set offers. A value put there is a function
+    // that returns to that value.
+    uint64_t back_through = 0;
+    if (catalogue != nullptr && catalogue->return_through(target, back_through))
+        taken.insert(back_through);
     size_t at = 0;
 
     auto note = [&](const pcode::Varnode &node) {

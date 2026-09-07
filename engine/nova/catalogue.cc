@@ -1111,6 +1111,39 @@ std::set<uint64_t> Catalogue::registers_for_values(const ir::Target &target) con
     return where;
 }
 
+bool Catalogue::return_through(const ir::Target &target, uint64_t &offset) const
+{
+    // What the compiler specification says, when it says anything. MIPS and
+    // RISC-V both name `ra` here, and both have return forms naming several
+    // registers, so this is asked first and settles those.
+    std::string name;
+    ir::Target::RegisterPlace place;
+    std::string missing;
+    if (target.return_address(name, place, missing)) {
+        offset = place.offset;
+        return true;
+    }
+
+    // Otherwise the instructions themselves, and only if they agree. A form
+    // that takes the register as an operand says nothing about which one a
+    // function uses, so only the ones naming a register outright are counted.
+    bool found = false;
+    uint64_t agreed = 0;
+    for (const Form *form : doing(ghidra::CPUI_RETURN)) {
+        for (const Form::Piece &piece : form->reads) {
+            if (piece.is_slot || !piece.is_fixed || !piece.fixed_is_register)
+                continue;
+            if (found && piece.fixed != agreed)
+                return false;  // they disagree, so they are not saying it
+            agreed = piece.fixed;
+            found = true;
+        }
+    }
+    if (found)
+        offset = agreed;
+    return found;
+}
+
 std::vector<const Form *> Catalogue::plainly_doing(ghidra::OpCode opcode, int inputs,
                                                   bool including_context) const
 {
