@@ -1308,8 +1308,23 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                         break;
                     }
                 }
+                // Where nothing is free, the answer's own place will do - as
+                // long as it is not also one of the things being read, since
+                // the number would then be sitting where the value was.
+                if (!have_somewhere && operation.writes &&
+                    operation.output.where == pcode::Where::Register) {
+                    bool reads_it = false;
+                    for (const pcode::Varnode &input : operation.inputs)
+                        reads_it = reads_it || (input.where == pcode::Where::Register &&
+                                                input.offset == operation.output.offset);
+                    if (!reads_it) {
+                        where = operation.output.offset;
+                        have_somewhere = true;
+                    }
+                }
+
                 if (too_big < operation.inputs.size() && have_somewhere &&
-                    !operation.made_while_writing) {
+                    !operation.operand_placed) {
                     const int width = operation.inputs[too_big].size > 0
                                           ? operation.inputs[too_big].size
                                           : (target.word_bytes > 0 ? target.word_bytes : 8);
@@ -1326,11 +1341,64 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     again.inputs[too_big] = putting.output;
 
                     putting.made_while_writing = true;
-                    again.made_while_writing = true;
+                    putting.operand_placed = true;
+                    again.made_while_writing = operation.made_while_writing;
+                    again.operand_placed = true;
                     pending[step] = putting;
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, again);
                     --step;  // and the copy is chosen next, like anything else
                     continue;
+                }
+
+                // A branch comparing two things, where nothing compares two.
+                //
+                // What differs between two things is nothing exactly when they
+                // are equal, so a branch on their being equal is a branch on
+                // that difference being nothing - and a branch on whether a
+                // register is nothing is what AARCH64 has. Which forms a
+                // processor has that compare two registers cannot be told from
+                // the count of them: it has four, and none of them is this, so
+                // this is only known once every one has been tried.
+                if (operation.opcode == ghidra::CPUI_CBRANCH && operation.inputs.size() == 2 &&
+                    (operation.compares == ghidra::CPUI_INT_EQUAL ||
+                     operation.compares == ghidra::CPUI_INT_NOTEQUAL) &&
+                    !operation.made_while_writing && !scratch.empty()) {
+                    uint64_t spare = 0;
+                    bool have_spare = false;
+                    for (uint64_t candidate : scratch) {
+                        bool clashes = false;
+                        for (const pcode::Varnode &input : operation.inputs)
+                            clashes = clashes || (input.where == pcode::Where::Register &&
+                                                  input.offset == candidate);
+                        if (!clashes) {
+                            spare = candidate;
+                            have_spare = true;
+                            break;
+                        }
+                    }
+                    if (have_spare) {
+                        pcode::Varnode differing;
+                        differing.where = pcode::Where::Register;
+                        differing.offset = spare;
+                        differing.size =
+                            operation.inputs[0].size > 0 ? operation.inputs[0].size : 4;
+
+                        pcode::Operation what_differs;
+                        what_differs.opcode = ghidra::CPUI_INT_XOR;
+                        what_differs.writes = true;
+                        what_differs.output = differing;
+                        what_differs.inputs = operation.inputs;
+                        what_differs.made_while_writing = true;
+
+                        pcode::Operation asking = operation;
+                        asking.inputs.assign(1, differing);
+                        asking.made_while_writing = true;
+
+                        pending[step] = what_differs;
+                        pending.insert(pending.begin() + static_cast<long>(step) + 1, asking);
+                        --step;
+                        continue;
+                    }
                 }
 
                 // The numbers it was asked to carry, since which one would not

@@ -81,6 +81,12 @@ struct Operation {
     // until the block ran out of room and everything after it went unwritten.
     bool made_while_writing = false;
 
+    // And whether one of its values has already been put in a register on its
+    // behalf, which is a different question from the one above: an operation
+    // made while building a number still needs its own operands placed, and one
+    // mark for both meant it never got them.
+    bool operand_placed = false;
+
     // How many instructions ahead a branch goes, when it goes over some rather
     // than to a block. Answering a question with a truth needs one of these on
     // a processor that has no instruction for it: put one in, jump over putting
