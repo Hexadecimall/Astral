@@ -78,6 +78,74 @@ std::string written(ir::Operation operation, int width, bool is_signed,
     return pcode::to_text(sequence);
 }
 
+// A comparison answers in one byte, however wide the things compared.
+//
+// The width of an operation is the width of what it works on, and for a
+// comparison that is not the width of its answer - comparing two eight-byte
+// values asks an eight-byte question and gets a yes or a no. Giving the answer
+// the operands' width asks for somewhere eight bytes wide to keep a yes in,
+// which a thirty-two bit processor has not got, so every comparison over a long
+// value was refused for want of a register to hold one bit.
+//
+// The value each side reads has to agree, too: a value is placed once and
+// remembered, so narrowing only what was emitted leaves the branch that reads
+// the answer still asking for the wider one, which is a different value.
+void check_a_truth_is_one_byte()
+{
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("MIPS:BE:32:default", target, why) ||
+        !target.read_specification(why)) {
+        report(false, "the processor is read", why);
+        return;
+    }
+
+    ir::Builder builder("asks");
+    builder.block();
+    const ir::Value left = builder.constant(3, 8);
+    const ir::Value right = builder.constant(4, 8);
+    const ir::Value answer = builder.binary(ir::Operation::Equal, left, right, 8, false);
+    builder.ret(answer);
+
+    ir::Function function;
+    std::vector<std::string> problems;
+    pcode::Sequence sequence;
+    if (!builder.finish(function, problems) ||
+        !pcode::to_pcode(function, target, sequence, problems)) {
+        report(false, "a comparison of two eight-byte values is written",
+               problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    // The answer is one byte, and everything that reads it says one byte too.
+    bool answer_is_a_byte = false;
+    bool read_as_a_byte = true;
+    uint64_t truth = 0;
+    for (const pcode::Block &block : sequence.blocks) {
+        for (const pcode::Operation &operation : block.operations) {
+            if (operation.writes && operation.opcode == ghidra::CPUI_INT_EQUAL) {
+                answer_is_a_byte = operation.output.size == 1;
+                truth = operation.output.offset;
+            }
+        }
+    }
+    report(answer_is_a_byte, "a comparison of eight-byte values answers in one byte",
+           "it answered in more");
+
+    for (const pcode::Block &block : sequence.blocks) {
+        for (const pcode::Operation &operation : block.operations) {
+            if (operation.opcode == ghidra::CPUI_INT_EQUAL)
+                continue;
+            for (const pcode::Varnode &input : operation.inputs) {
+                if (input.where == pcode::Where::Unique && input.offset == truth)
+                    read_as_a_byte = read_as_a_byte && input.size == 1;
+            }
+        }
+    }
+    report(read_as_a_byte, "and whatever reads that answer reads one byte",
+           "something read it wider than it was written");
+}
+
 // p-code has no signed values, only signed operations, so the same comparison
 // written twice has to come out as two different opcodes. Getting this wrong is
 // wrong quietly: the bits are the same and only the answer differs.
@@ -955,6 +1023,7 @@ int main()
         return 1;
     }
 
+    check_a_truth_is_one_byte();
     check_signedness_picks_the_opcode();
     check_addition_does_not_care();
     check_the_two_that_read_backwards();

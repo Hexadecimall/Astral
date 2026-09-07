@@ -146,10 +146,28 @@ bool Writer::operation(const ir::Instruction &instruction, Block &into)
     const int width = ir::width_of(instruction, target_);
     const bool is_signed = instruction.is_signed;
 
+    // A truth is one byte, whatever it was worked out from.
+    //
+    // The width of an operation is the width of the things it works on, and for
+    // a comparison that is not the width of its answer: comparing two eight-byte
+    // values asks an eight-byte question and gets a yes or a no. p-code says so
+    // - every processor's own comparisons decode with a one-byte output - and
+    // giving the answer the operands' width asks for somewhere eight bytes wide
+    // to keep a yes in, which a thirty-two bit processor has not got.
+    //
+    // It has to be settled here rather than after the answer is made, because a
+    // value is placed once and remembered: narrowing what was emitted would
+    // leave everything that reads it still asking for the wider one, which is a
+    // different value entirely.
+    const bool answers_yes_or_no = instruction.operation == ir::Operation::Equal ||
+                                   instruction.operation == ir::Operation::NotEqual ||
+                                   instruction.operation == ir::Operation::Less ||
+                                   instruction.operation == ir::Operation::LessOrEqual;
+
     Operation made;
     made.writes = instruction.result.is_valid();
     if (made.writes)
-        made.output = place(instruction.result, width);
+        made.output = place(instruction.result, answers_yes_or_no ? 1 : width);
 
     // The arguments, each in the place it was given.
     std::vector<Varnode> arguments;
