@@ -54,7 +54,46 @@ using Place = std::pair<const ghidra::AddrSpace *, uint64_t>;
 // A move is a copy or a widening. An addition of nothing is also a move, and
 // so is an or or an exclusive-or of nothing, because an instruction that reads
 // through a register with no displacement says so that way.
-bool only_carries(const Meaning &one)
+// Whether a value is nothing, with the moves that carried it followed through.
+//
+// An instruction that reads through a register with no displacement adds
+// nothing to it, and where the nothing is written down differs by processor.
+// RISC-V's `ld rd, 0(rs1)` copies the zero of its displacement field into
+// scratch first and adds the scratch, so the addition's other side is a unique
+// rather than the constant - and testing the input alone said the addition
+// combined two values. That refused every ordinary RISC-V load and store,
+// leaving the hypervisor ones, which take a bare register and so have no
+// displacement to copy.
+bool is_nothing(const std::vector<Meaning> &meant, const ghidra::VarnodeData &value)
+{
+    ghidra::VarnodeData at = value;
+    for (int steps = 0; steps < 8; ++steps) {
+        if (at.space == nullptr)
+            return false;
+        if (at.space->getType() == ghidra::IPTR_CONSTANT)
+            return at.offset == 0;
+        const Meaning *wrote = nullptr;
+        for (const Meaning &one : meant) {
+            if (one.writes && one.output.space == at.space && one.output.offset == at.offset)
+                wrote = &one;
+        }
+        if (wrote == nullptr || wrote->inputs.size() != 1)
+            return false;
+        switch (wrote->opcode) {
+        case ghidra::CPUI_COPY:
+        case ghidra::CPUI_INT_ZEXT:
+        case ghidra::CPUI_INT_SEXT:
+        case ghidra::CPUI_CAST:
+            break;
+        default:
+            return false;
+        }
+        at = wrote->inputs.front();
+    }
+    return false;
+}
+
+bool only_carries(const std::vector<Meaning> &meant, const Meaning &one)
 {
     // A move, or a masking, or an operation with nothing on the other side.
     //
@@ -86,13 +125,13 @@ bool only_carries(const Meaning &one)
     case ghidra::CPUI_INT_SUB:
     case ghidra::CPUI_INT_OR:
     case ghidra::CPUI_INT_XOR: {
-        // Nothing on the other side, so the value is the one side.
+        // Nothing on the other side, so the value is the one side - and the
+        // nothing is looked for through the moves that carried it, since a
+        // displacement of zero reaches the addition by way of scratch on
+        // processors that keep their operands there.
         int carrying = 0;
         for (const ghidra::VarnodeData &input : one.inputs) {
-            const bool nothing = input.space != nullptr &&
-                                 input.space->getType() == ghidra::IPTR_CONSTANT &&
-                                 input.offset == 0;
-            if (!nothing)
+            if (!is_nothing(meant, input))
                 ++carrying;
         }
         return carrying <= 1;
@@ -133,7 +172,7 @@ std::set<Place> came_from(const std::vector<Meaning> &meant, const ghidra::Varno
         }
         if (wrote == nullptr)
             continue;
-        if (only_moves && !only_carries(*wrote))
+        if (only_moves && !only_carries(meant, *wrote))
             continue;
         for (const ghidra::VarnodeData &input : wrote->inputs)
             waiting.push_back(input);
@@ -201,6 +240,26 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
 
     for (const Meaning &doing : meant) {
         if (doing.opcode != looking_for)
+            continue;
+
+        // How much it moves is part of what it is.
+        //
+        // A load of one byte written as a load of eight reads seven bytes that
+        // were not asked for and leaves the wrong value behind, and nothing
+        // about the operation says so - both are a LOAD from the same place
+        // into the same register. RISC-V's two-byte `c.ld` is shorter than its
+        // four-byte `lb`, so it was preferred for every load whose registers it
+        // could name, and a character read through it came back as eight.
+        //
+        // The widths that come out of a recovered program are the widths its
+        // types had, so this is not a detail: `buffer[index]` on a string is a
+        // byte, and reading eight walks off the end of it.
+        if (wanted.opcode == ghidra::CPUI_LOAD && wanted.writes && doing.writes &&
+            wanted.output.size > 0 && doing.output.size != wanted.output.size)
+            continue;
+        if (wanted.opcode == ghidra::CPUI_STORE && wanted.inputs.size() >= 3 &&
+            doing.inputs.size() >= 3 && wanted.inputs[2].size > 0 &&
+            static_cast<int>(doing.inputs[2].size) != wanted.inputs[2].size)
             continue;
 
         // A branch on a truth somebody already worked out.
@@ -1175,8 +1234,15 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                  operation.opcode == ghidra::CPUI_CBRANCH) &&
                 (!operation.successors.empty() || operation.skips_forward != 0);
             std::vector<Way> ways_that_work;
+            // How many registers the instruction chosen so far leaves changed
+            // besides the one it was asked to write. A candidate of the same
+            // length that leaves fewer is the better way of saying the same
+            // thing - see where this is counted, below.
+            size_t best_disturbs = 0;
             for (const catalogue::Form *form : *choose_from) {
-                if (!goes_somewhere_later && best != nullptr && form->shortest >= best->shortest)
+                // Longer is settled; the same length is not, so it is worked
+                // through and decided on what the bytes turn out to do.
+                if (!goes_somewhere_later && best != nullptr && form->shortest > best->shortest)
                     continue;
                 std::vector<uint8_t> bytes;
                 std::string refused;
@@ -1273,6 +1339,27 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     continue;
                 }
 
+                // And it does nothing else to memory.
+                //
+                // What was asked for being in there is not the same as nothing
+                // else being in there. RISC-V's `amoadd.w` reads a word, adds
+                // to it and writes the sum back, so its meaning contains
+                // exactly the load that was wanted over exactly the right
+                // register - and it was chosen as one. Every load written that
+                // way silently changed the word it had just read.
+                bool touches_more = false;
+                for (const Meaning &one : meant) {
+                    if (one.opcode == operation.opcode)
+                        continue;
+                    if (one.opcode == ghidra::CPUI_STORE)
+                        touches_more = true;
+                }
+                if (touches_more) {
+                    last_refusal = "the bytes it would write do more than that: " +
+                                   (reads.empty() ? unreadable : reads);
+                    continue;
+                }
+
                 // A return also has to go back where the caller came from,
                 // which no amount of looking at what it reads can tell: every
                 // kind of return goes through the program counter, and what
@@ -1363,9 +1450,37 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     way.places = taken != nullptr ? *taken : called_any;
                     ways_that_work.push_back(std::move(way));
                 }
-                if (best != nullptr && form->shortest >= best->shortest)
+                // How much of the machine it leaves changed besides the answer.
+                //
+                // Two instructions can mean the same thing and not cost the
+                // same. RISC-V's `lr.w` loads a word and takes a reservation on
+                // it, which the specification writes out as three more
+                // registers set - so its meaning contains the load that was
+                // asked for and nothing in it is wrong, and it was chosen over
+                // `lw` because it happened to come first among forms of the
+                // same length. Nothing about the load says which to take; what
+                // says it is that one of them does only the load.
+                //
+                // This is counted off the decoded bytes rather than off the
+                // form, because a form knows only the registers its own
+                // template names and an addressing mode that writes back does
+                // it in a table of its own.
+                std::set<uint64_t> disturbs;
+                for (const Meaning &one : meant) {
+                    if (!one.writes || one.output.space == nullptr ||
+                        one.output.space->getType() != ghidra::IPTR_PROCESSOR)
+                        continue;
+                    if (operation.writes && one.output.offset == operation.output.offset)
+                        continue;
+                    disturbs.insert(one.output.offset);
+                }
+
+                if (best != nullptr && (form->shortest > best->shortest ||
+                                        (form->shortest == best->shortest &&
+                                         disturbs.size() >= best_disturbs)))
                     continue;
                 best = form;
+                best_disturbs = disturbs.size();
                 best_roles = roles;
                 written = std::move(bytes);
             }

@@ -14,6 +14,7 @@
 #include "session.hh"
 
 #include <cstdio>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -545,6 +546,88 @@ void check_a_negative_number_goes_in_one_instruction()
     }
 }
 
+// A load of one byte loads one byte.
+//
+// How much an instruction moves is part of what it is, and nothing else says
+// so: a load of one byte and a load of eight are both a LOAD, from the same
+// place, into the same register. RISC-V's two-byte `c.ld` is shorter than its
+// four-byte `lb`, so it was taken for every load whose registers it could name
+// - and a character read through it came back as eight bytes, seven of them
+// past the end of the string it was reading.
+void check_a_load_moves_what_it_was_asked_to()
+{
+    const std::string language = "RISCV:LE:64:RV64GC";
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id(language, target, why) ||
+        !target.read_specification(why)) {
+        report(false, "the processor is read", why);
+        return;
+    }
+    catalogue::Catalogue catalogue;
+    if (!catalogue.read(target, why)) {
+        report(false, "its instructions are read", why);
+        return;
+    }
+
+    // Registers an integer addition can write, so the answer is not thrown by a
+    // floating-point register the convention happened to offer.
+    const std::set<uint64_t> ordinary = catalogue.registers_for_values(target);
+    std::vector<const ir::Target::RegisterPlace *> use;
+    std::set<uint64_t> seen;
+    for (const auto &one : target.register_places) {
+        if (ordinary.count(one.second.offset) == 0 || one.second.width != target.word_bytes)
+            continue;
+        if (!seen.insert(one.second.offset).second)
+            continue;
+        use.push_back(&one.second);
+        if (use.size() >= 2)
+            break;
+    }
+    if (use.size() < 2) {
+        report(false, "it has two registers to read through", "it has not");
+        return;
+    }
+
+    for (int size : {1, 2, 4, 8}) {
+        pcode::Operation load;
+        load.opcode = ghidra::CPUI_LOAD;
+        load.writes = true;
+        load.output.where = pcode::Where::Register;
+        load.output.offset = use[0]->offset;
+        load.output.size = size;
+        pcode::Varnode space;
+        space.where = pcode::Where::Constant;
+        space.offset = 0;
+        space.size = 4;
+        pcode::Varnode address;
+        address.where = pcode::Where::Register;
+        address.offset = use[1]->offset;
+        address.size = use[1]->width;
+        load.inputs.push_back(space);
+        load.inputs.push_back(address);
+
+        std::vector<uint8_t> bytes;
+        const std::string what = "a load of " + std::to_string(size) + " bytes is written";
+        if (!write_one(language, load, bytes, why)) {
+            report(false, what, why);
+            continue;
+        }
+        std::string trouble;
+        const std::string reads = reads_as(language, bytes, trouble);
+        report(!reads.empty(), what, trouble.empty() ? "it was not an instruction" : trouble);
+
+        // And the processor says it moves that many bytes.
+        int moved = 0;
+        for (const Meaning &one : means_as(language, bytes, trouble)) {
+            if (one.opcode == ghidra::CPUI_LOAD && one.writes)
+                moved = one.output.size;
+        }
+        report(moved == size, "  and it loads that many bytes",
+               reads + " loads " + std::to_string(moved));
+    }
+}
+
 } // namespace
 
 int main()
@@ -553,6 +636,7 @@ int main()
         std::printf("FAIL no compiled specifications were found; set ASTRAL_SPECS\n");
         return 1;
     }
+    check_a_load_moves_what_it_was_asked_to();
 
     check_an_instruction_is_written();
     check_a_branch_on_a_truth_goes_the_right_way();

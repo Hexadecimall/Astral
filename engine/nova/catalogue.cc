@@ -861,10 +861,27 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 const bool goes_somewhere = only->getOpcode() == ghidra::CPUI_BRANCH ||
                                             only->getOpcode() == ghidra::CPUI_CBRANCH ||
                                             only->getOpcode() == ghidra::CPUI_CALL;
+                const bool names_a_space = only->getOpcode() == ghidra::CPUI_STORE ||
+                                           only->getOpcode() == ghidra::CPUI_LOAD;
 
                 for (int input = 0; input < only->numInput(); ++input) {
                     Form::Piece piece = through_moves(all, only_at, only->getIn(input));
                     if (piece.is_slot || piece.is_fixed) {
+                        reads.push_back(piece);
+                        continue;
+                    }
+
+                    // Which memory it touches is not one of its values. p-code
+                    // names the space first, and that name is neither a place
+                    // nor a number, so demanding it be one marked every store
+                    // whose template does more than store as unnameable - which
+                    // on RISC-V is every ordinary store, since the address is a
+                    // register plus a displacement added inside the
+                    // instruction. What was left was the hypervisor stores,
+                    // whose address is a bare register and whose template is
+                    // therefore one operation. Everything downstream already
+                    // passes this input over; this is the same rule.
+                    if (names_a_space && input == 0) {
                         reads.push_back(piece);
                         continue;
                     }
@@ -1001,8 +1018,17 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                                                      doing->getOpcode() != ghidra::CPUI_INT_SEXT);
                 std::vector<Form::Piece> reads;
                 std::vector<int> zeroed;
+                const bool names_a_space = doing->getOpcode() == ghidra::CPUI_LOAD ||
+                                           doing->getOpcode() == ghidra::CPUI_STORE;
                 for (int input = 0; input < doing->numInput(); ++input) {
                     Form::Piece piece = through_moves(operations, doing_at, doing->getIn(input));
+                    // Which memory it touches is not one of its values - see
+                    // the store above, and `plainly_doing`, which passes over
+                    // the same input for the same reason.
+                    if (names_a_space && input == 0) {
+                        reads.push_back(piece);
+                        continue;
+                    }
                     // Or worked out from the form's own pieces, the way an
                     // address is. A shift by a register masks the amount to the
                     // width of what is being shifted before shifting by it, so
