@@ -840,9 +840,23 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 std::vector<Form::Piece> reads;
                 std::vector<int> zeroed;
                 bool nameable = true;
+                const bool goes_somewhere = only->getOpcode() == ghidra::CPUI_BRANCH ||
+                                            only->getOpcode() == ghidra::CPUI_CBRANCH ||
+                                            only->getOpcode() == ghidra::CPUI_CALL;
+
                 for (int input = 0; input < only->numInput(); ++input) {
                     Form::Piece piece = through_moves(all, only_at, only->getIn(input));
                     if (piece.is_slot || piece.is_fixed) {
+                        reads.push_back(piece);
+                        continue;
+                    }
+
+                    // Where a transfer goes is not named, it is worked out
+                    // while decoding - from where the instruction is and what
+                    // its offset field holds. Nothing puts a value there, so
+                    // requiring it to be a place anybody could name refused
+                    // every branch and every call on every processor.
+                    if (goes_somewhere && input == 0) {
                         reads.push_back(piece);
                         continue;
                     }
@@ -855,12 +869,26 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                     if (asks_a_question && input == 1) {
                         std::vector<Form::Piece> asked;
                         sources_of(all, only_at, only->getIn(input), asked);
-                        bool all_slots = !asked.empty();
+
+                        // A branch may ask about places the instruction does
+                        // not name at all. AARCH64 leaves facts about two
+                        // registers in its flags with one instruction and goes
+                        // somewhere when a combination of those holds with
+                        // another, so the second names no registers and depends
+                        // entirely on what the first left. Refusing every form
+                        // whose question is not over its own slots refused all
+                        // of those - which is every conditional branch AARCH64
+                        // has - so what is kept is the slots, and a form that
+                        // has none is a form that asks about the flags.
+                        bool all_known = !asked.empty();
                         for (const Form::Piece &one : asked)
-                            all_slots = all_slots && one.is_slot;
-                        if (all_slots) {
-                            for (size_t back = asked.size(); back > 0; --back)
-                                reads.push_back(asked[back - 1]);
+                            all_known = all_known && (one.is_slot ||
+                                                      (one.is_fixed && one.fixed_is_register));
+                        if (all_known) {
+                            for (size_t back = asked.size(); back > 0; --back) {
+                                if (asked[back - 1].is_slot)
+                                    reads.push_back(asked[back - 1]);
+                            }
                             // Which question, taken from whatever worked the
                             // answer out on the way - and which way round it is
                             // asked, since a branch that goes when a register
