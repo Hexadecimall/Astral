@@ -329,16 +329,27 @@ bool solve(const catalogue::Form &form,
         if (!answered)
             continue;
 
-        const uint64_t step_is_worth = reading[1] - reading[0];
+        // Counted as signed, because a field does not always count upwards.
+        // AARCH64 spells a small negative number with a move-not, whose value
+        // falls by one as the field rises by one, and unsigned arithmetic makes
+        // that step an enormous positive number that divides nothing. Every
+        // negative constant in every recovered function was refused for it, and
+        // a frame offset is negative on every processor whose stack grows down.
+        const int64_t step_is_worth =
+            static_cast<int64_t>(reading[1]) - static_cast<int64_t>(reading[0]);
         if (step_is_worth == 0)
             continue;
 
         const uint64_t wanted = places[which].number;
-        const uint64_t away = wanted - reading[0];
+        const int64_t away =
+            static_cast<int64_t>(wanted) - static_cast<int64_t>(reading[0]);
         if (away % step_is_worth != 0)
             continue;
+        const int64_t steps = away / step_is_worth;
+        if (steps < 0)
+            continue;  // a field holds what it holds, and it does not hold that
 
-        asking[which].number = away / step_is_worth;
+        asking[which].number = static_cast<uint64_t>(steps);
         std::vector<uint8_t> candidate;
         std::vector<std::string> spent;
         std::string trouble;
@@ -1127,8 +1138,22 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     continue;
                 }
 
+                // The numbers it was asked to carry, since which one would not
+                // fit is the first thing anybody reading this wants to know.
+                std::string carrying;
+                for (size_t at = first_input; at < operation.inputs.size(); ++at) {
+                    if (!operation.inputs[at].is_constant())
+                        continue;
+                    std::ostringstream said;
+                    said << (carrying.empty() ? " (carrying 0x" : ", 0x") << std::hex
+                         << operation.inputs[at].offset << std::dec;
+                    carrying += said.str();
+                }
+                if (!carrying.empty())
+                    carrying += ")";
+
                 problems.push_back(std::string("no way of doing a ") + called +
-                                   " on this processor writes those registers" +
+                                   " on this processor writes those registers" + carrying +
                                    (last_refusal.empty() ? std::string()
                                                          : ": " + last_refusal));
                 continue;
