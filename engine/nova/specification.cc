@@ -103,11 +103,13 @@ ghidra::SleighArchitecture *specification_for(const std::string &target, std::st
 }
 
 std::string reads_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                     std::string &error)
+                     std::string &error, size_t *consumed)
 {
     static std::mutex lock;
     static uint64_t next = 0x1000;
 
+    if (consumed != nullptr)
+        *consumed = 0;
     ghidra::SleighArchitecture *held = specification_for(target, error);
     if (held == nullptr || bytes.empty())
         return std::string();
@@ -137,8 +139,14 @@ std::string reads_as(const std::string &target, const std::vector<uint8_t> &byte
 
     Written written;
     try {
-        held->translate->printAssembly(written,
-                                       ghidra::Address(held->getDefaultCodeSpace(), next));
+        // Everything past the candidate reads as zero, which is what puts the
+        // candidate in a stream rather than at the end of a buffer: a form that
+        // is only the front of a longer instruction is read as the longer one,
+        // and says so by taking more bytes than were handed over.
+        const ghidra::int4 took = held->translate->printAssembly(
+            written, ghidra::Address(held->getDefaultCodeSpace(), next));
+        if (consumed != nullptr && took > 0)
+            *consumed = static_cast<size_t>(took);
     } catch (ghidra::LowlevelError &failure) {
         error = failure.explain;
         return std::string();
@@ -148,11 +156,13 @@ std::string reads_as(const std::string &target, const std::vector<uint8_t> &byte
 }
 
 std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                              std::string &error, uint64_t *at)
+                              std::string &error, uint64_t *at, size_t *consumed)
 {
     static std::mutex lock;
     static uint64_t next = 0x40000;
 
+    if (consumed != nullptr)
+        *consumed = 0;
     std::vector<Meaning> meant;
     ghidra::SleighArchitecture *held = specification_for(target, error);
     if (held == nullptr || bytes.empty())
@@ -193,8 +203,12 @@ std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8
     Collected collected;
     collected.into = &meant;
     try {
-        held->translate->oneInstruction(collected,
-                                        ghidra::Address(held->getDefaultCodeSpace(), next));
+        // As above: the reading is done with what follows present, and how many
+        // bytes it took is part of the answer.
+        const ghidra::int4 took = held->translate->oneInstruction(
+            collected, ghidra::Address(held->getDefaultCodeSpace(), next));
+        if (consumed != nullptr && took > 0)
+            *consumed = static_cast<size_t>(took);
     } catch (ghidra::LowlevelError &failure) {
         error = failure.explain;
         meant.clear();

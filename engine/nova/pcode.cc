@@ -782,15 +782,21 @@ bool Splitter::split(const Operation &operation)
         const Pair right = halves_of(operation.inputs[1]);
         const Pair into = halves_of(operation.output);
 
-        // The low half, and then what it carried into the high one. What comes
-        // out of an addition is what the processor calls a carry; what comes out
-        // of a subtraction is the low half of the first being below the low half
-        // of the second, which is that same question asked the way p-code asks
-        // it.
+        // The low half, and then what it carried into the high one.
+        //
+        // Both are asked as an unsigned comparison, because a comparison is an
+        // instruction every processor has and a carry is not. MIPS has no carry
+        // flag, so an INT_CARRY left here reached selection and was refused -
+        // "this processor has no instruction that is only a INT_CARRY over 2
+        // things" - which took the whole function with it. A sum carried
+        // exactly when it came out below what went into it, and a difference
+        // borrowed exactly when the first was below the second. Both are
+        // INT_LESS and both are exact.
         emit(operation.opcode, into.low, {left.low, right.low});
         const Varnode said = fresh(1);
-        emit(adding ? ghidra::CPUI_INT_CARRY : ghidra::CPUI_INT_LESS, said,
-             {left.low, right.low});
+        emit(ghidra::CPUI_INT_LESS, said,
+             adding ? std::vector<Varnode>{into.low, left.low}
+                    : std::vector<Varnode>{left.low, right.low});
         const Varnode carried = fresh(half_);
         emit(ghidra::CPUI_INT_ZEXT, carried, {said});
         const Varnode tops = fresh(half_);
@@ -823,15 +829,106 @@ bool Splitter::split(const Operation &operation)
         const Pair left = halves_of(operation.inputs[0]);
         const Pair right = halves_of(operation.inputs[1]);
 
-        // Two long values are equal when both halves are, and differ when
-        // either half does.
-        const Varnode low_says = fresh(1);
-        const Varnode high_says = fresh(1);
-        emit(operation.opcode, low_says, {left.low, right.low});
-        emit(operation.opcode, high_says, {left.high, right.high});
-        emit(operation.opcode == ghidra::CPUI_INT_EQUAL ? ghidra::CPUI_BOOL_AND
-                                                        : ghidra::CPUI_BOOL_OR,
-             operation.output, {low_says, high_says});
+        // Two long values are equal when neither half differs, which is asked
+        // by looking for a difference in either.
+        //
+        // Asking each half separately and joining the two answers needed a
+        // BOOL_AND or a BOOL_OR over one-byte answers, and MIPS has no
+        // instruction that is only that - so the join was refused and took the
+        // function with it. Combining the halves before the comparison instead
+        // needs only an exclusive-or and an or, both of which are ordinary
+        // whole-register instructions, and leaves exactly one comparison, which
+        // is the one operation that was going to produce a one-byte answer
+        // anyway.
+        const Varnode low_differs = fresh(half_);
+        const Varnode high_differs = fresh(half_);
+        emit(ghidra::CPUI_INT_XOR, low_differs, {left.low, right.low});
+        emit(ghidra::CPUI_INT_XOR, high_differs, {left.high, right.high});
+        const Varnode differs = fresh(half_);
+        emit(ghidra::CPUI_INT_OR, differs, {low_differs, high_differs});
+        emit(operation.opcode, operation.output, {differs, number(0, half_)});
+        return true;
+    }
+
+    case ghidra::CPUI_INT_LEFT:
+    case ghidra::CPUI_INT_RIGHT:
+    case ghidra::CPUI_INT_SRIGHT: {
+        // A shift by a fixed amount is two shifts and, where the amount is not
+        // a whole half, the bits carried across the join.
+        //
+        // Only by a fixed amount. Shifting by an amount not known until the
+        // program runs crosses the join by a distance not known either, which
+        // needs a branch, and a branch cannot be put here because this runs
+        // over a block's operations in place and has nowhere to put one. Those
+        // stay refused.
+        if (operation.inputs.size() != 2 || !operation.writes ||
+            !operation.inputs[1].is_constant() || !too_wide(operation.inputs[0]) ||
+            !too_wide(operation.output))
+            return false;
+
+        const int bits = half_ * 8;
+        const uint64_t by = operation.inputs[1].offset;
+        if (by >= static_cast<uint64_t>(bits) * 2)
+            return false;  // nothing of the value is left, which is not this shape
+
+        const bool leftwards = operation.opcode == ghidra::CPUI_INT_LEFT;
+        const bool signed_ = operation.opcode == ghidra::CPUI_INT_SRIGHT;
+        const Pair from = halves_of(operation.inputs[0]);
+
+        // Worked out into values of their own before either half of the answer
+        // is written, because the answer is allowed to be the same value that
+        // was read and writing a half early would change what the other half
+        // reads.
+        const Varnode low = fresh(half_);
+        const Varnode high = fresh(half_);
+        const auto amount = [&](uint64_t how) { return number(how, 4); };
+
+        if (by == 0) {
+            emit(ghidra::CPUI_COPY, low, {from.low});
+            emit(ghidra::CPUI_COPY, high, {from.high});
+        } else if (by < static_cast<uint64_t>(bits)) {
+            // The bits leaving one half arrive in the other, shifted the
+            // opposite way by what is left of a half.
+            const uint64_t across = static_cast<uint64_t>(bits) - by;
+            if (leftwards) {
+                const Varnode moved = fresh(half_);
+                const Varnode brought = fresh(half_);
+                emit(ghidra::CPUI_INT_LEFT, moved, {from.high, amount(by)});
+                emit(ghidra::CPUI_INT_RIGHT, brought, {from.low, amount(across)});
+                emit(ghidra::CPUI_INT_OR, high, {moved, brought});
+                emit(ghidra::CPUI_INT_LEFT, low, {from.low, amount(by)});
+            } else {
+                const Varnode moved = fresh(half_);
+                const Varnode brought = fresh(half_);
+                emit(ghidra::CPUI_INT_RIGHT, moved, {from.low, amount(by)});
+                emit(ghidra::CPUI_INT_LEFT, brought, {from.high, amount(across)});
+                emit(ghidra::CPUI_INT_OR, low, {moved, brought});
+                // Only the top half keeps the sign, because only it has one.
+                emit(signed_ ? ghidra::CPUI_INT_SRIGHT : ghidra::CPUI_INT_RIGHT, high,
+                     {from.high, amount(by)});
+            }
+        } else {
+            // A shift of a whole half or more moves one half onto the other and
+            // leaves nothing behind it - nothing, or the sign repeated.
+            const uint64_t rest = by - static_cast<uint64_t>(bits);
+            if (leftwards) {
+                emit(ghidra::CPUI_INT_LEFT, high, {from.low, amount(rest)});
+                emit(ghidra::CPUI_COPY, low, {number(0, half_)});
+            } else {
+                emit(signed_ ? ghidra::CPUI_INT_SRIGHT : ghidra::CPUI_INT_RIGHT, low,
+                     {from.high, amount(rest)});
+                if (signed_) {
+                    emit(ghidra::CPUI_INT_SRIGHT, high,
+                         {from.high, amount(static_cast<uint64_t>(bits) - 1)});
+                } else {
+                    emit(ghidra::CPUI_COPY, high, {number(0, half_)});
+                }
+            }
+        }
+
+        const Pair into = halves_of(operation.output);
+        emit(ghidra::CPUI_COPY, into.low, {low});
+        emit(ghidra::CPUI_COPY, into.high, {high});
         return true;
     }
 

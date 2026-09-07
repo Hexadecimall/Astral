@@ -93,6 +93,43 @@ bool is_nothing(const std::vector<Meaning> &meant, const ghidra::VarnodeData &va
     return false;
 }
 
+// Whether a value was worked out from numbers alone, with nothing read from
+// anywhere on the way.
+//
+// A mask is not always written down as a mask. RISC-V's `srl rd, rs1, rs2`
+// masks the shift amount to the width of what it is shifting, and the
+// specification spells the sixty-three as `0x40 - 1` computed into scratch
+// rather than as a literal - so testing the other side of the masking for being
+// a constant said it was not one, the masking did not look like masking, and
+// the register holding the amount could not be reached through it. That refused
+// the only instruction RISC-V has that shifts a register by a register, leaving
+// the thirty-two-bit `srlw`, which happens to spell its mask literally and
+// truncates every value it is given to four bytes.
+//
+// Reaching a number by subtracting one number from another is still reaching a
+// number, so what matters is that the whole side bottoms out in constants and
+// never in something read.
+bool made_of_numbers(const std::vector<Meaning> &meant, const ghidra::VarnodeData &value,
+                     int depth = 0)
+{
+    if (value.space == nullptr || depth > 8)
+        return false;
+    if (value.space->getType() == ghidra::IPTR_CONSTANT)
+        return true;
+    const Meaning *wrote = nullptr;
+    for (const Meaning &one : meant) {
+        if (one.writes && one.output.space == value.space && one.output.offset == value.offset)
+            wrote = &one;
+    }
+    if (wrote == nullptr || wrote->inputs.empty())
+        return false;
+    for (const ghidra::VarnodeData &input : wrote->inputs) {
+        if (!made_of_numbers(meant, input, depth + 1))
+            return false;
+    }
+    return true;
+}
+
 bool only_carries(const std::vector<Meaning> &meant, const Meaning &one)
 {
     // A move, or a masking, or an operation with nothing on the other side.
@@ -113,11 +150,14 @@ bool only_carries(const std::vector<Meaning> &meant, const Meaning &one)
     case ghidra::CPUI_CAST:
         return true;
     case ghidra::CPUI_INT_AND:
-        // Masking, whatever the mask, as long as it is a number and not
-        // something worked out - a shift by a register masks the amount to the
-        // width of what is being shifted, and that is still that register.
+        // Masking, whatever the mask, as long as the mask is worked out from
+        // numbers and not from something read - a shift by a register masks the
+        // amount to the width of what is being shifted, and that is still that
+        // register. Whether the mask was written as a literal or arrived at by
+        // arithmetic over literals makes no difference to that, and insisting
+        // on a literal refused RISC-V's `srl`.
         for (const ghidra::VarnodeData &input : one.inputs) {
-            if (input.space != nullptr && input.space->getType() == ghidra::IPTR_CONSTANT)
+            if (made_of_numbers(meant, input))
                 return true;
         }
         return false;
@@ -221,11 +261,40 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
                              wanted.opcode == ghidra::CPUI_BRANCHIND ||
                              wanted.opcode == ghidra::CPUI_RETURN ||
                              wanted.opcode == ghidra::CPUI_CALL;
+    //
+    // Not every branch inside an instruction is that, though, and refusing all
+    // of them refused every divide AARCH64 has. `sdiv x6, x8, x7` decodes to a
+    // guard on dividing by nothing: it works out whether x7 is zero, skips the
+    // division when it is, and leaves zero behind - which is what dividing on
+    // this processor is, and there is no other instruction that divides. What
+    // separates the two is where the condition came from. `csneg` branches on
+    // the zero flag, a register it reads and never writes, so which arm runs
+    // was settled by something else entirely and nothing here established it.
+    // `sdiv` branches on a question it asked itself about one of the very
+    // values it was handed, so the answer is a property of those values.
+    //
+    // So an inner branch is allowed only when every register its condition
+    // depends on is one of the operation's own operands.
     if (!asked_to_go) {
+        std::set<uint64_t> operands;
+        for (const pcode::Varnode &input : wanted.inputs) {
+            if (input.where == pcode::Where::Register)
+                operands.insert(input.offset);
+        }
         for (const Meaning &one : meant) {
-            if (one.opcode == ghidra::CPUI_CBRANCH || one.opcode == ghidra::CPUI_BRANCH ||
-                one.opcode == ghidra::CPUI_BRANCHIND)
+            if (one.opcode == ghidra::CPUI_BRANCH || one.opcode == ghidra::CPUI_BRANCHIND)
                 return false;
+            if (one.opcode != ghidra::CPUI_CBRANCH)
+                continue;
+            if (one.inputs.size() < 2)
+                return false;
+            for (const Place &reached : came_from(meant, one.inputs[1])) {
+                if (reached.first == nullptr ||
+                    reached.first->getType() != ghidra::IPTR_PROCESSOR)
+                    continue;
+                if (operands.count(reached.second) == 0)
+                    return false;
+            }
         }
     }
 
@@ -1519,14 +1588,34 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 }
 
                 std::string trouble;
+                size_t took = 0;
                 const std::string reads = reads_as(
                     target.compiler.empty() ? target.language_id
                                             : target.language_id + ":" + target.compiler,
-                    bytes, trouble);
+                    bytes, trouble, &took);
                 if (reads.empty()) {
                     promising_refusal = last_refusal = trouble.empty() ? "the bytes it would write are not an "
                                                      "instruction on this processor"
                                                    : trouble;
+                    continue;
+                }
+
+                // And the reading took exactly the bytes offered.
+                //
+                // A candidate is read back with what follows it present,
+                // because that is the only context it will ever be read in: the
+                // next instruction, not the end of a buffer. A form that is
+                // only the front of a longer instruction reads back as the
+                // longer one, and taking more bytes than were written is how it
+                // says so. MIPS wrote thirty-eight instructions two bytes long
+                // into a stream of four-byte ones this way - the two bytes
+                // `10 00` are a short branch on their own and the top half of
+                // `beq zero,zero` in an ordinary MIPS stream, so every
+                // instruction after one of them was read from the wrong place.
+                if (took != bytes.size()) {
+                    promising_refusal = last_refusal =
+                        "the bytes it would write are only part of a longer instruction here, so "
+                        "everything after them would be read from the wrong place: " + reads;
                     continue;
                 }
                 // And what the bytes mean is what was asked for.

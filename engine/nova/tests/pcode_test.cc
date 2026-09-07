@@ -963,6 +963,260 @@ void check_the_frame_is_taken_and_given_back()
 // sitting, so what a function does on the way out is put the answer in that
 // place and then go. Handing the value to the return instead asked every
 // processor for a return that takes an argument, and none has one.
+// Splitting a value too wide for a register, checked by running it.
+//
+// A wide operation rewritten as operations over halves is only right if the
+// answer comes out the same, so the same sequence is run twice: once whole, and
+// once after splitting. Anything that disagrees is a wrong translation, which is
+// the one kind of mistake that decodes perfectly and is therefore invisible
+// without this.
+//
+// It also watches which operations come out. Two of the ways of splitting used
+// operations no processor here has a single instruction for - a carry, and a
+// one-byte boolean join - so the split succeeded and selection then refused the
+// whole function. Producing only operations a machine plausibly has is part of
+// being right.
+void check_wide_operations_split_and_still_mean_it()
+{
+    ir::Target target;
+    std::string trouble;
+    if (!ir::Target::from_language_id("MIPS:BE:32:default", target, trouble) ||
+        !target.read_specification(trouble)) {
+        report(false, "a processor to split for", trouble);
+        return;
+    }
+
+    // Building the operations here rather than lowering source to them, because
+    // what is under test is one pass and the shapes it has to handle, not the
+    // ones a particular piece of source happens to produce.
+    uint64_t next = 0;
+    auto wide = [&]() {
+        pcode::Varnode node;
+        node.where = pcode::Where::Unique;
+        node.offset = next;
+        node.size = 8;
+        next += 8;
+        return node;
+    };
+    auto number = [](uint64_t value, int size) {
+        pcode::Varnode node;
+        node.where = pcode::Where::Constant;
+        node.offset = value;
+        node.size = size;
+        return node;
+    };
+    auto step = [](ghidra::OpCode opcode, const pcode::Varnode &into,
+                   const std::vector<pcode::Varnode> &from) {
+        pcode::Operation made;
+        made.opcode = opcode;
+        made.writes = true;
+        made.output = into;
+        made.inputs = from;
+        return made;
+    };
+
+    struct Case {
+        const char *what;
+        ghidra::OpCode opcode;
+        uint64_t left;
+        uint64_t right;
+        bool right_is_amount;
+    };
+
+    // Values chosen so the answer depends on what crosses between the halves:
+    // an addition that carries out of the low half, a subtraction that borrows
+    // into it, and shifts that move bits over the join in both directions.
+    const std::vector<Case> cases = {
+        {"adding carries out of the low half", ghidra::CPUI_INT_ADD,
+         0x00000001ffffffffull, 0x0000000000000002ull, false},
+        {"adding without a carry", ghidra::CPUI_INT_ADD, 0x0000000100000001ull,
+         0x0000000200000002ull, false},
+        {"subtracting borrows into the high half", ghidra::CPUI_INT_SUB,
+         0x0000000200000001ull, 0x0000000000000002ull, false},
+        {"an exclusive-or over both halves", ghidra::CPUI_INT_XOR, 0xdeadbeefcafef00dull,
+         0x0123456789abcdefull, false},
+        {"shifting up over the join", ghidra::CPUI_INT_LEFT, 0x00000000ffff0001ull, 20,
+         true},
+        {"shifting up by a whole half and more", ghidra::CPUI_INT_LEFT,
+         0x00000000abcd1234ull, 40, true},
+        {"shifting down over the join", ghidra::CPUI_INT_RIGHT, 0xffff000100000000ull, 20,
+         true},
+        {"shifting down by a whole half and more", ghidra::CPUI_INT_RIGHT,
+         0xabcd123400000000ull, 40, true},
+        {"shifting a signed value down over the join", ghidra::CPUI_INT_SRIGHT,
+         0xffffffff80000000ull, 12, true},
+        {"shifting a signed value down past the join", ghidra::CPUI_INT_SRIGHT,
+         0x8000000000000000ull, 40, true},
+        {"shifting by nothing at all", ghidra::CPUI_INT_LEFT, 0x0123456789abcdefull, 0,
+         true},
+    };
+
+    bool all_agreed = true;
+    bool all_nameable = true;
+    std::string first_disagreement;
+    std::string first_unnameable;
+
+    for (const Case &one : cases) {
+        next = 0;
+        const pcode::Varnode left = wide();
+        const pcode::Varnode right = wide();
+        const pcode::Varnode got = wide();
+
+        pcode::Varnode answered;
+        answered.where = pcode::Where::Unique;
+        answered.offset = next;
+        answered.size = 1;
+        next += 8;
+
+        pcode::Block block;
+        block.identifier = 0;
+        block.operations.push_back(
+            step(ghidra::CPUI_COPY, left, {number(one.left, 8)}));
+        if (one.right_is_amount) {
+            block.operations.push_back(
+                step(one.opcode, got, {left, number(one.right, 4)}));
+        } else {
+            block.operations.push_back(
+                step(ghidra::CPUI_COPY, right, {number(one.right, 8)}));
+            block.operations.push_back(step(one.opcode, got, {left, right}));
+        }
+
+        // The answer is compared inside the sequence rather than read out of it,
+        // because a wide value has no single place to be read from once it has
+        // been split, and a comparison is the operation the splitting has to get
+        // right anyway.
+        const pcode::Varnode wanted = wide();
+        block.operations.push_back(
+            step(ghidra::CPUI_COPY, wanted, {number(0, 8)}));
+        block.operations.push_back(
+            step(ghidra::CPUI_INT_EQUAL, answered, {got, wanted}));
+
+        pcode::Operation leaving;
+        leaving.opcode = ghidra::CPUI_RETURN;
+        block.operations.push_back(leaving);
+
+        pcode::Sequence whole;
+        whole.name = one.what;
+        whole.entry = 0;
+        whole.blocks.push_back(block);
+        whole.answer = got;  // read out whole, before anything is split
+
+        const pcode::Answer before = pcode::run(whole, pcode::Machine());
+        if (!before.ok) {
+            all_agreed = false;
+            if (first_disagreement.empty())
+                first_disagreement = std::string(one.what) + ": " + before.error;
+            continue;
+        }
+
+        // And now the same thing again, with the wide value carried in two, and
+        // the answer read as its two halves put back together.
+        pcode::Sequence split = whole;
+        std::vector<std::string> problems;
+        if (!pcode::split_wide(split, target, 4, problems)) {
+            all_agreed = false;
+            if (first_disagreement.empty())
+                first_disagreement = std::string(one.what) + ": " +
+                                     (problems.empty() ? "refused" : problems.front());
+            continue;
+        }
+
+        // Where the two halves of the answer ended up. The pass writes them, so
+        // the sequence is asked rather than guessed at: the last two operations
+        // that wrote a half of `got` name them.
+        // A split value has no single place to be read from any more, so the
+        // answer is taken out through operations the pass also has to handle:
+        // the low half by taking the low bytes, the high half by shifting down
+        // first. Registers are what survives into the answer, so both go there.
+        const ir::Target::RegisterPlace *low_reg = target.register_place("v0");
+        const ir::Target::RegisterPlace *high_reg = target.register_place("v1");
+        if (low_reg == nullptr || high_reg == nullptr) {
+            all_agreed = false;
+            first_disagreement = "this processor has no v0 and v1";
+            break;
+        }
+        pcode::Varnode into_low;
+        into_low.where = pcode::Where::Register;
+        into_low.offset = low_reg->offset;
+        into_low.size = 4;
+        pcode::Varnode into_high = into_low;
+        into_high.offset = high_reg->offset;
+
+        // SUBPIECE of nothing takes the low half; the high half is the same
+        // value shifted down by one half, which the pass also has to split.
+        pcode::Sequence reading = whole;
+        auto &ops = reading.blocks.front().operations;
+        ops.insert(ops.end() - 1,
+                   step(ghidra::CPUI_SUBPIECE, into_low, {got, number(0, 4)}));
+        pcode::Varnode moved = wide();
+        ops.insert(ops.end() - 1, step(ghidra::CPUI_INT_RIGHT, moved, {got, number(32, 4)}));
+        ops.insert(ops.end() - 1,
+                   step(ghidra::CPUI_SUBPIECE, into_high, {moved, number(0, 4)}));
+        reading.answer = pcode::Varnode();
+
+        std::vector<std::string> more;
+        if (!pcode::split_wide(reading, target, 4, more)) {
+            all_agreed = false;
+            if (first_disagreement.empty())
+                first_disagreement = std::string(one.what) + ": " +
+                                     (more.empty() ? "refused" : more.front());
+            continue;
+        }
+        const pcode::Answer after = pcode::run(reading, pcode::Machine());
+        if (!after.ok) {
+            all_agreed = false;
+            if (first_disagreement.empty())
+                first_disagreement = std::string(one.what) + ": " + after.error;
+            continue;
+        }
+        uint64_t rebuilt = 0;
+        auto low_seen = after.registers.find(low_reg->offset);
+        auto high_seen = after.registers.find(high_reg->offset);
+        if (low_seen != after.registers.end())
+            rebuilt |= low_seen->second & 0xffffffffull;
+        if (high_seen != after.registers.end())
+            rebuilt |= (high_seen->second & 0xffffffffull) << 32;
+
+        if (rebuilt != before.value) {
+            all_agreed = false;
+            if (first_disagreement.empty()) {
+                char said[256];
+                std::snprintf(said, sizeof said, "%s: whole gave %llx, split gave %llx",
+                              one.what, (unsigned long long)before.value,
+                              (unsigned long long)rebuilt);
+                first_disagreement = said;
+            }
+        }
+
+        // Nothing may come out that a processor has no single instruction for.
+        // A carry and a one-byte boolean join both did, and both were refused at
+        // selection after splitting had already said it succeeded.
+        for (const pcode::Operation &made : split.blocks.front().operations) {
+            if (made.opcode == ghidra::CPUI_INT_CARRY ||
+                made.opcode == ghidra::CPUI_BOOL_AND ||
+                made.opcode == ghidra::CPUI_BOOL_OR) {
+                all_nameable = false;
+                if (first_unnameable.empty())
+                    first_unnameable = std::string(one.what) + " produced a " +
+                                       pcode::opcode_name(made.opcode);
+            }
+            if (made.writes && made.output.size > 4 &&
+                made.output.where == pcode::Where::Unique) {
+                all_nameable = false;
+                if (first_unnameable.empty())
+                    first_unnameable =
+                        std::string(one.what) + " left a value eight bytes wide behind";
+            }
+        }
+    }
+
+    report(all_agreed, "a value too wide for a register means the same carried in two",
+           first_disagreement);
+    report(all_nameable,
+           "and splitting one leaves only operations a processor has an instruction for",
+           first_unnameable);
+}
+
 void check_leaving_puts_the_answer_in_its_place()
 {
     ir::Target target;
@@ -1037,6 +1291,7 @@ int main()
     check_frames_become_addresses();
     check_the_frame_is_taken_and_given_back();
     check_leaving_puts_the_answer_in_its_place();
+    check_wide_operations_split_and_still_mean_it();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

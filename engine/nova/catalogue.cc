@@ -9,6 +9,9 @@
 #include "specification.hh"
 
 #include <sstream>
+#include <set>
+#include <tuple>
+#include <utility>
 
 namespace astral_internal {
 namespace nova {
@@ -372,6 +375,71 @@ struct Constraint {
     bool from_context = false;
 };
 
+using Within = std::map<const ghidra::Constructor *, Constraint>;
+
+// A table's tree with the arithmetic already done, for instructions of one
+// length: every constructor in it, the bits reaching it demands, and for each
+// of its operands either the field a number goes in or the symbol to ask next.
+//
+// None of that depends on the way in - only on the tree and on how long the
+// instruction is - but it was being redone at every visit, and a table reached
+// along thousands of paths had `settle` run and its operands' types tested
+// thousands of times. With the tree walks already shared, this was what was
+// left of the x86-64 read: the whole of the remaining time was inside this
+// loop rather than beneath it.
+struct Settled {
+    struct Operand {
+        bool placed = false;  // a field a number is written straight into
+        Form::Slot::Field field;
+        const ghidra::TripleSymbol *deeper = nullptr;  // otherwise, ask this
+    };
+    struct Entry {
+        uint64_t mask = 0;
+        uint64_t bits = 0;
+        std::vector<Operand> operands;
+    };
+    std::vector<Entry> entries;
+};
+
+// Everything worked out once and kept for the length of one read: what each
+// table's tree says, that tree with the per-length arithmetic done, and the
+// ways behind each symbol.
+//
+// All three exist because the same question was being asked over and over. An
+// operand standing for a table is answered by walking that table's tree; each
+// constructor found there has operands of its own standing for further tables,
+// so a table reached along four different paths had its tree walked four times,
+// its bits settled four times and everything below it expanded four times -
+// and each level multiplies the paths of the one below. On a fixed-length
+// processor the tables are small and the product is small, so this only ever
+// cost a few seconds. On x86-64 - variable length, where every addressing
+// operand descends through the prefix, ModRM and SIB tables - `Catalogue::read`
+// did not finish in ten minutes and reached 1.2 GB of duplicate answers doing
+// it.
+//
+// None of them reads less. Each is keyed by everything its answer depends on,
+// and the answers are the same answers, worked out once instead of once per
+// path that happens to arrive.
+struct Asked {
+    // What each table's tree says. This lives as long as the read: a tree says
+    // the same thing whoever asks, so the answer is shared by everything.
+    std::map<const ghidra::DecisionNode *, Within> trees;
+
+    // The same trees with the per-length arithmetic done, kept per length
+    // because where a decision's bits sit depends on how long the instruction
+    // is.
+    std::map<std::pair<const ghidra::DecisionNode *, int>, Settled> settled_trees;
+
+    // Every way of writing a number behind a symbol, as if nothing had been
+    // demanded on the way in. Keyed by symbol, instruction length and the depth
+    // left, which is all the answer depends on - see `ways_behind`.
+    std::map<std::tuple<const ghidra::TripleSymbol *, int, int>, std::vector<Form::Slot::Way>>
+        ways;
+
+    const Within &tree(const ghidra::DecisionNode *node);
+    const Settled &settled(const ghidra::DecisionNode *node, int length);
+};
+
 void walk(const ghidra::DecisionNode *node, Constraint sofar,
           std::map<const ghidra::Constructor *, Constraint> &found)
 {
@@ -441,6 +509,16 @@ void walk(const ghidra::DecisionNode *node, Constraint sofar,
     }
 }
 
+const Within &Asked::tree(const ghidra::DecisionNode *node)
+{
+    auto where = trees.find(node);
+    if (where != trees.end())
+        return where->second;
+    Within made;
+    walk(node, Constraint(), made);
+    return trees.emplace(node, std::move(made)).first->second;
+}
+
 // The decisions turned into the bits of an instruction that long.
 //
 // A bit is counted from the top of the instruction rather than the bottom. That
@@ -467,6 +545,44 @@ void settle(const Constraint &constraint, int length, uint64_t &mask, uint64_t &
     bits &= mask;
 }
 
+const Settled &Asked::settled(const ghidra::DecisionNode *node, int length)
+{
+    const std::pair<const ghidra::DecisionNode *, int> key(node, length);
+    auto where = settled_trees.find(key);
+    if (where != settled_trees.end())
+        return where->second;
+
+    const Within &within = tree(node);
+    Settled made;
+    made.entries.reserve(within.size());
+    for (const auto &one : within) {
+        Settled::Entry entry;
+        settle(one.second, length, entry.mask, entry.bits);
+        const int operands = one.first->getNumOperands();
+        entry.operands.reserve(static_cast<size_t>(operands < 0 ? 0 : operands));
+        for (int slot = 0; slot < operands; ++slot) {
+            const ghidra::OperandSymbol *inner = one.first->getOperand(slot);
+            if (inner == nullptr)
+                continue;
+            Settled::Operand operand;
+            if (const ghidra::TokenField *field =
+                    dynamic_cast<const ghidra::TokenField *>(inner->getDefiningExpression())) {
+                operand.field = field_of(field);
+                if (!operand.field.is_placed())
+                    continue;
+                operand.placed = true;
+            } else {
+                operand.deeper = inner->getDefiningSymbol();
+                if (operand.deeper == nullptr)
+                    continue;
+            }
+            entry.operands.push_back(operand);
+        }
+        made.entries.push_back(std::move(entry));
+    }
+    return settled_trees.emplace(key, std::move(made)).first->second;
+}
+
 // Where an operand is written, and what can go there.
 //
 // An operand is a field of bits somewhere in the instruction. Which bits, is on
@@ -484,7 +600,7 @@ void settle(const Constraint &constraint, int length, uint64_t &mask, uint64_t &
 // `depth` stops a specification that refers to itself from doing so forever.
 void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
                        const std::map<uint64_t, std::string> &by_offset, uint64_t sofar_mask,
-                       uint64_t sofar_bits, int depth, Form::Slot &into);
+                       uint64_t sofar_bits, int depth, Asked &asked, Form::Slot &into);
 
 // The fields a number can be written into, behind whatever stands for them.
 //
@@ -498,52 +614,105 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
 // What the table does to the field on the way out is not worked out here. That
 // is a question with an easier answer than reading the template: write the
 // field and ask the processor what number came out.
-void resolve_numbers(const ghidra::TripleSymbol *symbol, int length, uint64_t sofar_mask,
-                     uint64_t sofar_bits, int depth, Form::Slot &into)
+// The ways behind a symbol, taken as if nothing had been demanded to get here.
+//
+// What the way in demanded is only ever added to what is found - it is never
+// looked at, and never decides anything. So the ways behind a symbol are the
+// same ways whichever path arrived at it, and the path's own bits can be added
+// afterwards. That makes the answer a property of the symbol, the instruction
+// length and the depth left, and it is worked out once for each.
+//
+// This is what made x86-64 readable. Without it the same subtable was expanded
+// again for every distinct combination of bits that reached it, and since each
+// level multiplies the paths of the level below, the work was the product of
+// the table sizes down four levels rather than their sum. On a fixed-length
+// processor the tables are small and the product is small; on x86-64, where
+// every addressing operand descends through the prefix, ModRM and SIB tables,
+// `Catalogue::read` did not finish in ten minutes. Nothing is dropped: every
+// path that existed still contributes its ways, with its own bits on them.
+//
+// Depth only ever increases here, so a specification that refers to itself
+// still terminates and an answer kept under one depth is never used for
+// another.
+const std::vector<Form::Slot::Way> &ways_behind(const ghidra::TripleSymbol *symbol, int length,
+                                                int depth, Asked &asked)
 {
+    static const std::vector<Form::Slot::Way> nothing;
     if (symbol == nullptr || depth > 4)
-        return;
+        return nothing;
+
+    const std::tuple<const ghidra::TripleSymbol *, int, int> key(symbol, length, depth);
+    auto where = asked.ways.find(key);
+    if (where != asked.ways.end())
+        return where->second;
+
+    std::vector<Form::Slot::Way> made;
 
     if (const ghidra::ValueSymbol *value = dynamic_cast<const ghidra::ValueSymbol *>(symbol)) {
         if (const ghidra::TokenField *field =
                 dynamic_cast<const ghidra::TokenField *>(value->getPatternValue())) {
             Form::Slot::Way way;
             way.field = field_of(field);
-            way.along_mask = sofar_mask;
-            way.along_bits = sofar_bits;
             if (way.field.is_placed())
-                into.numbers.push_back(way);
+                made.push_back(way);
         }
-        return;
+        return asked.ways.emplace(key, std::move(made)).first->second;
     }
 
     const ghidra::SubtableSymbol *table = dynamic_cast<const ghidra::SubtableSymbol *>(symbol);
     if (table == nullptr)
-        return;
+        return asked.ways.emplace(key, std::move(made)).first->second;
 
-    std::map<const ghidra::Constructor *, Constraint> within;
-    walk(table->getDecisionTree(), Constraint(), within);
-    for (const auto &one : within) {
-        uint64_t mask = 0;
-        uint64_t bits = 0;
-        settle(one.second, length, mask, bits);
-        for (int slot = 0; slot < one.first->getNumOperands(); ++slot) {
-            const ghidra::OperandSymbol *inner = one.first->getOperand(slot);
-            if (inner == nullptr)
-                continue;
-            if (const ghidra::TokenField *field =
-                    dynamic_cast<const ghidra::TokenField *>(inner->getDefiningExpression())) {
+    // The same way listed twice is the same alternative listed twice, and one
+    // slot can be reached through thousands of paths that agree on both the
+    // field and the bits. Keeping only the first of each says exactly what the
+    // list said before, at a size anything downstream can walk.
+    std::set<std::tuple<int, int, int, int, bool, bool, uint64_t, uint64_t>> already;
+    auto remember = [&](const Form::Slot::Way &way) {
+        if (already
+                .emplace(way.field.first_byte, way.field.last_byte, way.field.shift,
+                         way.field.width, way.field.big_endian, way.field.is_signed,
+                         way.along_mask, way.along_bits)
+                .second)
+            made.push_back(way);
+    };
+
+    const Settled &ready = asked.settled(table->getDecisionTree(), length);
+    for (const Settled::Entry &one : ready.entries) {
+        for (const Settled::Operand &operand : one.operands) {
+            if (operand.placed) {
                 Form::Slot::Way way;
-                way.field = field_of(field);
-                way.along_mask = sofar_mask | mask;
-                way.along_bits = sofar_bits | bits;
-                if (way.field.is_placed())
-                    into.numbers.push_back(way);
+                way.field = operand.field;
+                way.along_mask = one.mask;
+                way.along_bits = one.bits;
+                remember(way);
                 continue;
             }
-            resolve_numbers(inner->getDefiningSymbol(), length, sofar_mask | mask,
-                            sofar_bits | bits, depth + 1, into);
+            // Whatever is behind that symbol, with what this level demanded
+            // added to each. The reference is taken before anything is pushed
+            // and the map is never rewritten, only added to, so it stays good.
+            const std::vector<Form::Slot::Way> &below =
+                ways_behind(operand.deeper, length, depth + 1, asked);
+            for (const Form::Slot::Way &one_below : below) {
+                Form::Slot::Way way = one_below;
+                way.along_mask |= one.mask;
+                way.along_bits |= one.bits;
+                remember(way);
+            }
         }
+    }
+
+    return asked.ways.emplace(key, std::move(made)).first->second;
+}
+
+void resolve_numbers(const ghidra::TripleSymbol *symbol, int length, uint64_t sofar_mask,
+                     uint64_t sofar_bits, int depth, Asked &asked, Form::Slot &into)
+{
+    for (const Form::Slot::Way &one : ways_behind(symbol, length, depth, asked)) {
+        Form::Slot::Way way = one;
+        way.along_mask |= sofar_mask;
+        way.along_bits |= sofar_bits;
+        into.numbers.push_back(way);
     }
 }
 
@@ -585,7 +754,7 @@ bool exported_register(const ghidra::Constructor *made,
 
 void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
                        const std::map<uint64_t, std::string> &by_offset, uint64_t sofar_mask,
-                       uint64_t sofar_bits, int depth, Form::Slot &into)
+                       uint64_t sofar_bits, int depth, Asked &asked, Form::Slot &into)
 {
     if (symbol == nullptr || depth > 4)
         return;
@@ -621,8 +790,7 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
     if (table == nullptr)
         return;
 
-    std::map<const ghidra::Constructor *, Constraint> within;
-    walk(table->getDecisionTree(), Constraint(), within);
+    const Within &within = asked.tree(table->getDecisionTree());
     for (const auto &one : within) {
         uint64_t mask = 0;
         uint64_t bits = 0;
@@ -651,13 +819,13 @@ void resolve_registers(const ghidra::TripleSymbol *symbol, int length,
             const ghidra::OperandSymbol *inner = one.first->getOperand(forwards_to);
             if (inner != nullptr)
                 resolve_registers(inner->getDefiningSymbol(), length, by_offset,
-                                  sofar_mask | mask, sofar_bits | bits, depth + 1, into);
+                                  sofar_mask | mask, sofar_bits | bits, depth + 1, asked, into);
         }
     }
 }
 
 Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
-                     const std::map<uint64_t, std::string> &by_offset)
+                     const std::map<uint64_t, std::string> &by_offset, Asked &asked)
 {
     Form::Slot slot;
     if (operand == nullptr)
@@ -681,10 +849,10 @@ Form::Slot read_slot(const ghidra::OperandSymbol *operand, int length,
         if (way.field.is_placed())
             slot.numbers.push_back(way);
     } else if (expression == nullptr) {
-        resolve_numbers(symbol, length, 0, 0, 0, slot);
+        resolve_numbers(symbol, length, 0, 0, 0, asked, slot);
     }
 
-    resolve_registers(symbol, length, by_offset, 0, 0, 0, slot);
+    resolve_registers(symbol, length, by_offset, 0, 0, 0, asked, slot);
 
     // Which bits actually choose between registers, as opposed to bits the
     // table happened to insist on along the way.
@@ -758,8 +926,8 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
 
     // The patterns, taken off the tree that decides which constructor a stream
     // of bits means, since a loaded specification carries them nowhere else.
-    std::map<const ghidra::Constructor *, Constraint> patterns;
-    walk(root->getDecisionTree(), Constraint(), patterns);
+    Asked asked;
+    const Within &patterns = asked.tree(root->getDecisionTree());
 
     for (int i = 0; i < root->getNumConstructors(); ++i) {
         ghidra::Constructor *made = root->getConstructor(i);
@@ -772,7 +940,8 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
         form.line = made->getLineno();
 
         for (int slot = 0; slot < made->getNumOperands(); ++slot)
-            form.slots.push_back(read_slot(made->getOperand(slot), form.shortest, by_offset));
+            form.slots.push_back(
+                read_slot(made->getOperand(slot), form.shortest, by_offset, asked));
 
         ghidra::ConstructTpl *templ = made->getTempl();
         const ghidra::OpTpl *only = nullptr;

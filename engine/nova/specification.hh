@@ -35,8 +35,20 @@ ghidra::SleighArchitecture *specification_for(const std::string &target, std::st
 // Nothing is remembered between calls: each is asked at an address of its own,
 // because a reading is kept once made and asking twice at one address answers
 // with the first bytes rather than the second.
+//
+// `consumed`, when given, is told how many bytes the reading took. That is not
+// always as many as were handed over, and the difference is a whole class of
+// wrong answers. Bytes are read back with whatever follows them present - and
+// what follows a candidate in a real program is the next instruction, not the
+// end of the buffer - so a candidate that is only the first part of a longer
+// instruction reads back as that longer instruction rather than as itself. On
+// MIPS the two bytes `10 00` decode alone as a short branch, while `0x1000xxxx`
+// in an ordinary MIPS stream is `beq zero,zero`: writing the short one puts two
+// bytes into a stream of four-byte instructions, and everything after it is
+// then read from the wrong place. Whoever asks has to require that the reading
+// took exactly the candidate's length.
 std::string reads_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                     std::string &error);
+                     std::string &error, size_t *consumed = nullptr);
 
 // One operation of what bytes mean, as the processor works it out.
 struct Meaning {
@@ -65,8 +77,11 @@ struct Meaning {
 // written as how far it reaches from where it is, so what the processor makes
 // of one depends on where it was standing - and solving for a field that holds
 // a distance needs to know where that was.
+// `consumed`, when given, is told how many bytes the reading took, for the
+// reason set out above `reads_as`.
 std::vector<Meaning> means_as(const std::string &target, const std::vector<uint8_t> &bytes,
-                              std::string &error, uint64_t *at = nullptr);
+                              std::string &error, uint64_t *at = nullptr,
+                              size_t *consumed = nullptr);
 
 } // namespace nova
 } // namespace astral_internal

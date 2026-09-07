@@ -396,6 +396,95 @@ void check_a_value_too_wide_is_refused()
     report(kept_its_width, "and the value is still eight bytes wide", "it was trimmed to fit");
 }
 
+// A narrow value on a processor that writes its biggest byte first still lands
+// somewhere the processor has a name for.
+//
+// A value narrower than the register holding it sits at the far end of that
+// register on a big-endian machine, and that is where it was put. But selection
+// writes a register name into an instruction and finds the name by the exact
+// address the value sits at, and MIPS names its registers only at four-byte
+// boundaries - nothing inside one. So a one-byte value moved three bytes along
+// had no name, and every instruction over it was refused: loads of single
+// characters, the one-byte answers of comparisons, and the branches reading
+// them, around two hundred and fifty refusals in all.
+void check_a_narrow_value_lands_somewhere_named()
+{
+    ir::Target target;
+    if (!target_for("MIPS:BE:32:default", target))
+        return;
+    catalogue::Catalogue catalogue;
+    std::string trouble;
+    if (!catalogue.read(target, trouble)) {
+        report(false, "reads what MIPS can do", trouble);
+        return;
+    }
+
+    // A one-byte answer, of the shape a comparison makes and a branch reads.
+    pcode::Operation compare;
+    compare.opcode = ghidra::CPUI_INT_EQUAL;
+    compare.writes = true;
+    compare.output = homeless(0, 1);
+    compare.inputs.push_back(homeless(8, 4));
+    compare.inputs.push_back(homeless(12, 4));
+
+    pcode::Operation branch;
+    branch.opcode = ghidra::CPUI_CBRANCH;
+    branch.inputs.push_back(homeless(0, 1));
+
+    pcode::Block block;
+    block.identifier = 1;
+    block.operations.push_back(compare);
+    block.operations.push_back(branch);
+
+    pcode::Sequence sequence;
+    sequence.name = "compares";
+    sequence.entry = 1;
+    sequence.blocks.push_back(block);
+
+    std::vector<std::string> problems;
+    if (!homes::give(sequence, target, problems, &catalogue)) {
+        report(false, "a one-byte value is housed on a big-endian processor",
+               problems.empty() ? "" : problems.front());
+        return;
+    }
+
+    bool every_one_named = true;
+    std::string first_nameless;
+    for (const pcode::Block &one : sequence.blocks) {
+        for (const pcode::Operation &operation : one.operations) {
+            auto look = [&](const pcode::Varnode &node) {
+                if (node.where != pcode::Where::Register)
+                    return;
+                for (const auto &named : target.register_places) {
+                    if (named.second.offset == node.offset)
+                        return;
+                }
+                every_one_named = false;
+                if (first_nameless.empty())
+                    first_nameless = "nothing is named at " + std::to_string(node.offset);
+            };
+            if (operation.writes)
+                look(operation.output);
+            for (const pcode::Varnode &input : operation.inputs)
+                look(input);
+        }
+    }
+    report(every_one_named,
+           "a one-byte value on a big-endian processor lands where a register is named",
+           first_nameless);
+
+    // And it is still one byte: the operation works in the width it was written
+    // in, and widening it here would be a different operation.
+    bool kept_its_width = true;
+    for (const pcode::Block &one : sequence.blocks) {
+        for (const pcode::Operation &operation : one.operations) {
+            if (operation.writes && operation.opcode == ghidra::CPUI_INT_EQUAL)
+                kept_its_width = operation.output.size == 1;
+        }
+    }
+    report(kept_its_width, "and it is still one byte wide", "its width was changed to fit");
+}
+
 } // namespace
 
 int main()
@@ -412,6 +501,7 @@ int main()
     check_nothing_to_do();
     check_a_value_fits_in_a_bigger_register();
     check_the_way_back_is_kept();
+    check_a_narrow_value_lands_somewhere_named();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

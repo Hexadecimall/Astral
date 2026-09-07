@@ -30,6 +30,19 @@ struct Life {
     size_t died = 0;
 };
 
+// Whether the processor has a name for exactly this many bytes at exactly this
+// address. Instruction selection writes register names into instructions and
+// finds one by address, so a value put where nothing is named cannot be named
+// either, however correct the address is.
+bool named_at(const ir::Target &target, uint64_t offset, int size)
+{
+    for (const auto &one : target.register_places) {
+        if (one.second.offset == offset && one.second.width == size)
+            return true;
+    }
+    return false;
+}
+
 // The registers a function may use for values of its own.
 //
 // Not every register on a processor: the stack pointer is not free, and neither
@@ -319,10 +332,25 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
                 // it sits at whichever end of the register a smaller value
                 // sits at on this processor. On a machine that writes its
                 // biggest byte first that is the far end.
-                if (place->width > node.size && target.data_big_endian)
-                    node.offset += static_cast<uint64_t>(place->width - node.size);
-                if (place->width < node.size)
-                    node.size = place->width;
+                //
+                // Only where the processor has a name for that far end, though.
+                // Instruction selection can only write a register it can name,
+                // and it looks a name up by the exact address a value sits at.
+                // MIPS names its registers at four-byte boundaries and names
+                // nothing inside one, so a one-byte value moved three bytes
+                // along landed somewhere with no name and every instruction
+                // over it was refused - loads of single characters, the
+                // one-byte answers of comparisons, and the branches reading
+                // them. Where there is no name for the far end, the value stays
+                // at the register's own address and keeps its own width, which
+                // is how the same case is already handled on processors that
+                // write their smallest byte first.
+                if (place->width > node.size && target.data_big_endian) {
+                    const uint64_t far =
+                        place->offset + static_cast<uint64_t>(place->width - node.size);
+                    if (named_at(target, far, node.size))
+                        node.offset = far;
+                }
             };
             if (operation.writes)
                 house(operation.output);
