@@ -147,8 +147,18 @@ private:
     // The width a binary operation works in. Its own type says so when it has
     // one; a level-1 expression has none, and then the operands do, which is
     // how `w0 + w0` comes out four bytes wide rather than eight.
-    int width_of_operands(const Expression &expression) const;
+    int width_of_operands(const Expression &expression);
     int width_of(const ir::Value &value) const;
+
+    // What an expression is, worked out from the tree rather than read off it.
+    // The tree's own `type` is filled in while checking and is null during
+    // this, so reading it made every untyped expression the machine word: the
+    // `*char` in `*((text + index) as *char)` came out as an eight-byte load,
+    // and on a 32-bit processor that is a value no register can hold. The
+    // pointee of a cast, the element of an array, the member of a record and
+    // the type of a local are all written down, so this asks them. Null means
+    // nothing said, and then the word is the guess it always was.
+    TypePtr type_of(const Expression &expression);
 
     // What the whole file says, so a call can ask what the thing it calls
     // answers with. The tree's own types are filled in while checking and are
@@ -200,31 +210,152 @@ int Lowerer::width_of(const ir::Value &value) const
     return width_of_value(value.type, value.storage, target_);
 }
 
-int Lowerer::width_of_operands(const Expression &expression) const
+static bool is_comparison(compiler::BinaryOp op)
 {
-    if (expression.type != nullptr && expression.type->kind != compiler::Type::Kind::Void)
-        return width_of_type(expression.type, target_);
+    switch (op) {
+    case compiler::BinaryOp::Equal:
+    case compiler::BinaryOp::NotEqual:
+    case compiler::BinaryOp::Less:
+    case compiler::BinaryOp::LessEqual:
+    case compiler::BinaryOp::Greater:
+    case compiler::BinaryOp::GreaterEqual:
+        return true;
+    default:
+        return false;
+    }
+}
+
+int Lowerer::width_of_operands(const Expression &expression)
+{
+    // A comparison answers in a byte whatever it compares, so its own type
+    // says nothing about the width it works in: only the operands do.
+    if (!is_comparison(expression.binary_op)) {
+        const TypePtr own = type_of(expression);
+        if (own != nullptr && own->kind != compiler::Type::Kind::Void)
+            return width_of_type(own, target_);
+    }
     // No type of its own, so the operands answer. A pinned name is the register
     // it was pinned to and the register says how wide it is; a local is its
-    // slot, and the slot was made the width the declaration asked for.
+    // slot, and the slot was made the width the declaration asked for; and
+    // anything else says what it is when asked.
     //
     // Falling through to the machine word makes an addition between two
     // four-byte values answer in eight, which is not what was written and is
     // an instruction wider than it needed to be on every processor.
     for (const Expression *side : {expression.left.get(), expression.right.get()}) {
-        if (side == nullptr || side->kind != Expression::Kind::Name)
+        if (side == nullptr)
             continue;
-        auto parameter = pinned_.find(side->name);
-        if (parameter != pinned_.end()) {
-            const int width = width_of(parameter->second);
-            if (width > 0)
-                return width;
+        if (side->kind == Expression::Kind::Name) {
+            auto parameter = pinned_.find(side->name);
+            if (parameter != pinned_.end()) {
+                const int width = width_of(parameter->second);
+                if (width > 0)
+                    return width;
+            }
+            const Slot *slot = look_up(side->name);
+            if (slot != nullptr && slot->width > 0)
+                return slot->width;
         }
-        const Slot *slot = look_up(side->name);
-        if (slot != nullptr && slot->width > 0)
-            return slot->width;
+        const TypePtr said = type_of(*side);
+        if (said != nullptr && said->kind != compiler::Type::Kind::Void)
+            return width_of_type(said, target_);
     }
     return width_of_type(expression.type, target_);
+}
+
+TypePtr Lowerer::type_of(const Expression &expression)
+{
+    if (expression.type != nullptr)
+        return expression.type;
+
+    switch (expression.kind) {
+    case Expression::Kind::Name: {
+        auto parameter = pinned_.find(expression.name);
+        if (parameter != pinned_.end())
+            return parameter->second.type;
+        if (const Slot *slot = look_up(expression.name))
+            return slot->type;
+        if (const Variable *global = global_named(expression.name))
+            return global->type;
+        return nullptr;
+    }
+    case Expression::Kind::As:
+        return expression.named_type;
+    case Expression::Kind::Unary: {
+        if (!expression.left)
+            return nullptr;
+        const TypePtr inner = type_of(*expression.left);
+        switch (expression.unary_op) {
+        case compiler::UnaryOp::Dereference:
+            return inner != nullptr && (inner->kind == compiler::Type::Kind::Pointer ||
+                                        inner->kind == compiler::Type::Kind::Array)
+                       ? inner->target
+                       : nullptr;
+        case compiler::UnaryOp::AddressOf:
+            return inner != nullptr ? types_.pointer_to(inner) : nullptr;
+        case compiler::UnaryOp::Not:
+            return types_.boolean();
+        default:
+            return inner;
+        }
+    }
+    case Expression::Kind::Binary: {
+        if (is_comparison(expression.binary_op) ||
+            expression.binary_op == compiler::BinaryOp::LogicalAnd ||
+            expression.binary_op == compiler::BinaryOp::LogicalOr)
+            return types_.boolean();
+        if (expression.binary_op == compiler::BinaryOp::Comma)
+            return expression.right ? type_of(*expression.right) : nullptr;
+        // The side that said something. A pointer stepped by an integer is a
+        // pointer, which the pointer side says and the integer side does not.
+        const TypePtr left = expression.left ? type_of(*expression.left) : nullptr;
+        const TypePtr right = expression.right ? type_of(*expression.right) : nullptr;
+        if (left != nullptr && left->kind == compiler::Type::Kind::Pointer)
+            return left;
+        if (right != nullptr && right->kind == compiler::Type::Kind::Pointer)
+            return right;
+        // Two integers of different widths work at the wider one, which is
+        // what a store into either of them can be narrowed from.
+        if (left != nullptr && right != nullptr &&
+            width_of_type(right, target_) > width_of_type(left, target_))
+            return right;
+        return left != nullptr ? left : right;
+    }
+    case Expression::Kind::Assign:
+        return expression.left ? type_of(*expression.left) : nullptr;
+    case Expression::Kind::Conditional: {
+        const TypePtr taken = expression.right ? type_of(*expression.right) : nullptr;
+        return taken != nullptr ? taken : (expression.third ? type_of(*expression.third) : nullptr);
+    }
+    case Expression::Kind::Call: {
+        if (!expression.callee || expression.callee->kind != Expression::Kind::Name)
+            return nullptr;
+        for (const Function &other : unit_.functions)
+            if (other.name == expression.callee->name)
+                return other.result;
+        return nullptr;
+    }
+    case Expression::Kind::Index: {
+        const TypePtr holding = expression.left ? type_of(*expression.left) : nullptr;
+        return holding != nullptr && (holding->kind == compiler::Type::Kind::Pointer ||
+                                      holding->kind == compiler::Type::Kind::Array)
+                   ? holding->target
+                   : nullptr;
+    }
+    case Expression::Kind::Member: {
+        TypePtr holding = expression.left ? type_of(*expression.left) : nullptr;
+        if (holding != nullptr && holding->kind == compiler::Type::Kind::Pointer)
+            holding = holding->target;
+        if (holding == nullptr || holding->kind != compiler::Type::Kind::Struct)
+            return nullptr;
+        for (const compiler::Type::Member &member : holding->members)
+            if (member.name == expression.name)
+                return member.type;
+        return nullptr;
+    }
+    default:
+        return nullptr;
+    }
 }
 
 const Slot *Lowerer::look_up(const std::string &name) const
@@ -317,7 +448,8 @@ ir::Value Lowerer::cast(const Expression &expression)
     if (!inner.is_valid())
         return ir::Value();
 
-    const int from = width_of_value(expression.left->type, inner.storage, target_);
+    const TypePtr was = type_of(*expression.left);
+    const int from = width_of_value(was, inner.storage, target_);
     const int to = width_of_type(expression.named_type, target_);
     if (to == from || to == 0)
         return inner;
@@ -327,7 +459,7 @@ ir::Value Lowerer::cast(const Expression &expression)
     instruction.width = to;
     // Widening keeps the sign of what it came from, not of what it becomes: a
     // signed byte in a word is still negative.
-    instruction.is_signed = type_is_signed(expression.left->type);
+    instruction.is_signed = type_is_signed(was);
     instruction.arguments.push_back(inner);
     instruction.result = builder_->value(expression.named_type);
     return builder_->emit(std::move(instruction));
@@ -346,11 +478,12 @@ ir::Value Lowerer::conditional(const Expression &expression)
     if (!condition.is_valid())
         return ir::Value();
 
-    const int width = width_of_type(expression.type, target_);
+    const TypePtr answers = type_of(expression);
+    const int width = width_of_type(answers, target_);
     Slot answer;
     next_offset_ -= width > 0 ? width : 8;
     answer.offset = next_offset_;
-    answer.type = expression.type;
+    answer.type = answers;
     answer.width = width > 0 ? width : 8;
 
     const uint32_t deciding = builder_->current();
@@ -538,7 +671,7 @@ ir::Value Lowerer::binary(const Expression &expression)
         Slot answer;
         next_offset_ -= 1;
         answer.offset = next_offset_;
-        answer.type = expression.type;
+        answer.type = types_.boolean();
         answer.width = 1;
 
         const uint32_t deciding = builder_->current();
@@ -587,8 +720,9 @@ ir::Value Lowerer::binary(const Expression &expression)
         return ir::Value();
 
     const int width = width_of_operands(expression);
-    const bool is_signed = type_is_signed(expression.type) ||
-                           (expression.left && type_is_signed(expression.left->type));
+    const TypePtr answers = type_of(expression);
+    const bool is_signed = type_is_signed(answers) ||
+                           (expression.left && type_is_signed(type_of(*expression.left)));
 
     ir::Operation operation = ir::Operation::Add;
     switch (expression.binary_op) {
@@ -610,17 +744,16 @@ ir::Value Lowerer::binary(const Expression &expression)
     // operation fewer to select on every processor rather than two spellings
     // of the same comparison.
     case compiler::BinaryOp::Greater:
-        return builder_->binary(ir::Operation::Less, right, left, width, is_signed,
-                                expression.type);
+        return builder_->binary(ir::Operation::Less, right, left, width, is_signed, answers);
     case compiler::BinaryOp::GreaterEqual:
         return builder_->binary(ir::Operation::LessOrEqual, right, left, width, is_signed,
-                                expression.type);
+                                answers);
     default:
         complain(expression.where, "this operator is not lowered yet");
         return ir::Value();
     }
 
-    return builder_->binary(operation, left, right, width, is_signed, expression.type);
+    return builder_->binary(operation, left, right, width, is_signed, answers);
 }
 
 ir::Value Lowerer::unary(const Expression &expression)
@@ -633,12 +766,16 @@ ir::Value Lowerer::unary(const Expression &expression)
     if (!inner.is_valid())
         return ir::Value();
 
-    const int width = width_of_type(expression.type, target_);
+    // What the result is. For a dereference that is the pointee, which is where
+    // the width of the load comes from: `*char` is one byte however wide the
+    // pointer to it is.
+    const TypePtr answers = type_of(expression);
+    const int width = width_of_type(answers, target_);
     ir::Instruction instruction;
     instruction.width = width;
-    instruction.is_signed = type_is_signed(expression.type);
+    instruction.is_signed = type_is_signed(answers);
     instruction.arguments.push_back(inner);
-    instruction.result = builder_->value(expression.type);
+    instruction.result = builder_->value(answers);
 
     switch (expression.unary_op) {
     case compiler::UnaryOp::Plus:
@@ -653,9 +790,13 @@ ir::Value Lowerer::unary(const Expression &expression)
         // Not a bit operation. `!value` asks whether the value is nothing, and
         // flipping its bits answers a different question: the negation of three
         // is minus four, and the negation of three as a truth is false.
-        return builder_->binary(ir::Operation::Equal, inner,
-                                builder_->constant(0, width > 0 ? width : 1), 1, false,
-                                expression.type);
+        {
+            // Asked at the width of what is being tested, not of the answer.
+            const int tested = width_of(inner);
+            return builder_->binary(ir::Operation::Equal, inner,
+                                    builder_->constant(0, tested > 0 ? tested : 1), 1, false,
+                                    answers);
+        }
     case compiler::UnaryOp::PreIncrement:
     case compiler::UnaryOp::PreDecrement:
     case compiler::UnaryOp::PostIncrement:
@@ -670,10 +811,11 @@ ir::Value Lowerer::unary(const Expression &expression)
             expression.unary_op == compiler::UnaryOp::PostDecrement;
 
         const int stepping = width > 0 ? width : width_of(inner);
+        const TypePtr stepping_what = type_of(*expression.left);
         const ir::Value stepped =
             builder_->binary(upwards ? ir::Operation::Add : ir::Operation::Subtract, inner,
                              builder_->constant(1, stepping), stepping,
-                             type_is_signed(expression.left->type), expression.left->type);
+                             type_is_signed(stepping_what), stepping_what);
         if (!stepped.is_valid())
             return ir::Value();
 
@@ -787,7 +929,9 @@ ir::Value Lowerer::assign(const Expression &expression)
         const ir::Value address = this->expression(*expression.left->left);
         if (!address.is_valid())
             return ir::Value();
-        builder_->store(address, held, width_of_type(expression.left->type, target_),
+        // As wide as what the pointer points at, which is what a store through
+        // it writes: a `*char` takes one byte whatever is being stored.
+        builder_->store(address, held, width_of_type(type_of(*expression.left), target_),
                         ir::Space::Data);
         return held;
     }
@@ -824,14 +968,14 @@ ir::Value Lowerer::call(const Expression &expression)
         if (!lowered.is_valid())
             return ir::Value();
         given.push_back(lowered);
-        widths.push_back(width_of_value(argument->type, lowered.storage, target_));
+        widths.push_back(width_of_value(type_of(*argument), lowered.storage, target_));
     }
 
     // How wide the answer is, taken from what the called function was declared
     // to answer with. Guessing the machine word would ask for a register that
     // is right by accident on a processor whose narrow registers overlap its
     // wide ones, and wrong on one whose do not.
-    TypePtr answers = expression.type;
+    TypePtr answers = type_of(expression);
     if (answers == nullptr) {
         for (const Function &other : unit_.functions) {
             if (other.name == expression.callee->name) {

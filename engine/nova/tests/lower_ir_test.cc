@@ -219,6 +219,35 @@ void check_target_changes_widths()
            wide.empty() || narrow.empty() ? why : "");
 }
 
+// A dereference is as wide as what is pointed at, not as wide as the pointer or
+// the machine word. `*(text as *char)` was coming out as an eight-byte load on
+// a sixty-four bit processor, which read seven bytes that were never asked
+// for, and on a thirty-two bit one asked for a value no register could hold.
+// A `u64` local is still eight bytes: the width has to be the source's own,
+// narrower in one place and no narrower in the other.
+void check_dereference_is_as_wide_as_the_pointee()
+{
+    std::string why;
+    const std::string text = lowered_text(
+        "func f(text: i64): u64 {\n"
+        "    var length: u64 = 7;\n"
+        "    if (*((text + length) as *char) != '\\0') {\n"
+        "        *((text + 1) as *char) = 'x';\n"
+        "    }\n"
+        "    return length;\n"
+        "}\n",
+        "AARCH64:LE:64:AppleSilicon", why);
+
+    if (text.empty()) {
+        report(false, "a dereference through a cast pointer lowers", why);
+        return;
+    }
+    report(contains(text, "load.1"), "reading a *char is a one-byte load", text);
+    report(contains(text, "store.1 ") || contains(text, "store.1.signed"),
+           "writing through a *char is a one-byte store", text);
+    report(contains(text, "load.8"), "the u64 local is still read eight bytes wide", text);
+}
+
 // Loops. Each shape has a different place the test sits and a different place
 // `continue` goes, which is the whole of what distinguishes them.
 void check_loops()
@@ -485,6 +514,7 @@ int main()
     check_fixed_address();
     check_branch();
     check_target_changes_widths();
+    check_dereference_is_as_wide_as_the_pointee();
     check_loops();
     check_unpinned_parameters_follow_the_convention();
     check_refuses_rather_than_drops();
