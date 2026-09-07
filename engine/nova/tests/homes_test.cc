@@ -328,6 +328,74 @@ void check_the_way_back_is_kept()
     }
 }
 
+// A value too wide for any register is refused, not quietly made narrower.
+//
+// A thirty-two bit processor has nowhere to put a sixty-four bit value, and
+// recovered code is full of them - a length, an index, anything the source
+// declared as eight bytes. Housing one in a four-byte register and shortening
+// it to fit loses the top half of every such value, and the instructions that
+// come out decode perfectly while computing on half a number.
+//
+// That is what happened: a register let go while one width was being placed
+// went back on the list for that width whatever its own width was, so a
+// four-byte register was handed to an eight-byte value, and the placing then
+// trimmed the value to the register. Saying plainly that there is nowhere to
+// put it is the honest answer, and the only one that is not wrong.
+void check_a_value_too_wide_is_refused()
+{
+    ir::Target target;
+    if (!target_for("MIPS:BE:32:default", target))
+        return;
+    catalogue::Catalogue catalogue;
+    std::string trouble;
+    if (!catalogue.read(target, trouble)) {
+        report(false, "its instructions are read", trouble);
+        return;
+    }
+
+    // This processor keeps values in registers of four bytes and has none of
+    // eight, which is what makes it the case worth checking.
+    std::vector<std::string> wide;
+    const bool any_wide = target.value_registers(8, wide, trouble) && !wide.empty();
+    report(!any_wide, "this processor has no register wide enough for eight bytes",
+           any_wide ? wide.front() + " is one" : "");
+
+    pcode::Operation adding;
+    adding.opcode = ghidra::CPUI_INT_ADD;
+    adding.writes = true;
+    adding.output = homeless(16, 8);
+    adding.inputs.push_back(homeless(0, 8));
+    adding.inputs.push_back(homeless(8, 8));
+
+    pcode::Block block;
+    block.identifier = 1;
+    block.operations.push_back(adding);
+    pcode::Sequence sequence;
+    sequence.name = "wide";
+    sequence.entry = 1;
+    sequence.blocks.push_back(block);
+
+    std::vector<std::string> problems;
+    const bool housed = homes::give(sequence, target, problems, &catalogue);
+    report(!housed, "an eight-byte value is refused rather than housed",
+           housed ? "it was given somewhere" : "");
+    report(!problems.empty() && problems.front().find("wide enough") != std::string::npos,
+           "and the reason says nothing is wide enough for it",
+           problems.empty() ? "" : problems.front());
+
+    // And nothing was narrowed on the way out.
+    bool kept_its_width = true;
+    for (const pcode::Block &one : sequence.blocks) {
+        for (const pcode::Operation &operation : one.operations) {
+            if (operation.writes)
+                kept_its_width = kept_its_width && operation.output.size == 8;
+            for (const pcode::Varnode &input : operation.inputs)
+                kept_its_width = kept_its_width && input.size == 8;
+        }
+    }
+    report(kept_its_width, "and the value is still eight bytes wide", "it was trimmed to fit");
+}
+
 } // namespace
 
 int main()
@@ -336,6 +404,7 @@ int main()
         std::printf("FAIL no compiled specifications were found; set ASTRAL_SPECS\n");
         return 1;
     }
+    check_a_value_too_wide_is_refused();
 
     check_everything_gets_somewhere();
     check_only_ordinary_registers_are_used();

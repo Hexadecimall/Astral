@@ -217,37 +217,73 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
                   return one.second.born < two.second.born;
               });
 
-    // A register per width, since a processor's registers come in sizes and a
-    // four-byte value does not go in a two-byte place.
-    std::map<int, std::vector<std::string>> free_by_size;
+    // What the processor offers for a value of each width, worked out once per
+    // width and then left alone. This is a list of candidates, not a list of
+    // what is free: what is free is whatever none of them is holding, which is
+    // a different question and the one below asks it.
+    std::map<int, std::vector<std::string>> candidates;
+    auto offer = [&](int size) -> const std::vector<std::string> & {
+        auto found = candidates.find(size);
+        if (found == candidates.end()) {
+            found = candidates
+                        .emplace(size, free_registers(target, size, taken,
+                                                      for_values.empty() ? nullptr : &for_values))
+                        .first;
+        }
+        return found->second;
+    };
+
+    // Which registers are holding something, kept by the place they sit at
+    // rather than by name. One register has as many names as it has widths -
+    // the four-byte name and the eight-byte name of the same register are the
+    // same register - and a list of names does not know that, so handing out
+    // the wide name of a register whose narrow name was already spoken for
+    // wrote one value over another.
+    std::set<uint64_t> in_use;
     std::map<Homeless, std::string> given;
-    std::vector<std::pair<std::string, size_t>> busy;  // register, until when
+    std::vector<std::pair<uint64_t, size_t>> busy;  // where, until when
 
     for (const auto &one : order) {
         const Homeless &value = one.first;
         const Life &life = one.second;
 
-        // Anything finished with is free again.
+        // Anything finished with is free again - free for a value of any width,
+        // not only of the width that happened to be asked for when it was let
+        // go. Returning it to a list kept per width stranded it there: a
+        // register let go while placing a one-byte value was never offered to a
+        // four-byte one again, so a function mixing widths ran out of registers
+        // it had not run out of.
         for (auto held = busy.begin(); held != busy.end();) {
             if (held->second < life.born) {
-                free_by_size[value.size].push_back(held->first);
+                in_use.erase(held->first);
                 held = busy.erase(held);
             } else {
                 ++held;
             }
         }
 
-        auto &free = free_by_size[value.size];
-        if (free.empty()) {
-            free = free_registers(target, value.size, taken,
-                                  for_values.empty() ? nullptr : &for_values);
-            for (const auto &already : given) {
-                auto used = std::find(free.begin(), free.end(), already.second);
-                if (used != free.end())
-                    free.erase(used);
-            }
+        const std::vector<std::string> &could = offer(value.size);
+        if (could.empty()) {
+            problems.push_back(
+                "no register on this processor is wide enough to hold a value of " +
+                std::to_string(value.size) + " bytes, and holding one across a pair of "
+                "registers is not done here");
+            return false;
         }
-        if (free.empty()) {
+
+        // Taken from the back, because that is where the registers of exactly
+        // the right width were put.
+        const ir::Target::RegisterPlace *chosen = nullptr;
+        const std::string *name = nullptr;
+        for (auto candidate = could.rbegin(); candidate != could.rend(); ++candidate) {
+            const ir::Target::RegisterPlace *place = target.register_place(*candidate);
+            if (place == nullptr || in_use.count(place->offset) != 0)
+                continue;
+            chosen = place;
+            name = &*candidate;
+            break;
+        }
+        if (chosen == nullptr) {
             problems.push_back(
                 "this function wants more values at once than this processor has registers of " +
                 std::to_string(value.size) + " bytes, and putting some in the frame instead is "
@@ -255,10 +291,9 @@ bool give(pcode::Sequence &sequence, const ir::Target &target,
             return false;
         }
 
-        const std::string where = free.back();
-        free.pop_back();
-        given.emplace(value, where);
-        busy.emplace_back(where, life.died);
+        given.emplace(value, *name);
+        in_use.insert(chosen->offset);
+        busy.emplace_back(chosen->offset, life.died);
     }
 
     // And now they have somewhere, so say so.
