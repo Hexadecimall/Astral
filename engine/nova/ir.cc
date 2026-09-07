@@ -307,15 +307,19 @@ bool Target::value_registers(int width, std::vector<std::string> &out, std::stri
         // might live, and an integer instruction cannot name those. Which they
         // are is the same question asked of the same specification, with a
         // float where the integer was.
+        // Asked at the sizes a float comes in rather than at the size being
+        // housed. There is no one-byte float, so asking for one found nothing
+        // and left b8 and b9 - which are a byte of a floating-point register -
+        // among the places a byte-wide value might live.
         std::set<uint64_t> for_floats;
-        {
+        for (int size : {4, 8}) {
             ghidra::PrototypePieces proto;
             proto.model = model;
             proto.name = "asked";
-            proto.outtype = held->types->getBase(width, ghidra::TYPE_FLOAT);
+            proto.outtype = held->types->getBase(size, ghidra::TYPE_FLOAT);
             proto.firstVarArgSlot = -1;
             for (int i = 0; i < 12; ++i) {
-                proto.intypes.push_back(held->types->getBase(width, ghidra::TYPE_FLOAT));
+                proto.intypes.push_back(held->types->getBase(size, ghidra::TYPE_FLOAT));
                 proto.innames.push_back(std::string());
             }
             std::vector<ghidra::ParameterPieces> places;
