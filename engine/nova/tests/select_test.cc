@@ -403,6 +403,65 @@ void check_a_whole_function()
            "and the last of them goes back through the link register", last);
 }
 
+// A branch on a truth goes when the truth holds, not when it does not.
+//
+// The representation's conditional branch goes when its condition is not zero.
+// AARCH64 has nothing that reads a truth directly - its conditional branches
+// read flags, and the two that read a register ask whether it is zero - so what
+// means this is `cbnz`. Its opposite, `cbz`, decodes to the same shape: one
+// comparison against nothing and a branch over the answer. Nothing about the
+// shape separates them, and taking the wrong one runs the other arm of every
+// condition in the recovered program.
+void check_a_branch_on_a_truth_goes_the_right_way()
+{
+    ir::Target target;
+    std::string why;
+    if (!ir::Target::from_language_id("AARCH64:LE:64:v8A", target, why) ||
+        !target.read_specification(why)) {
+        report(false, "the processor is read", why);
+        return;
+    }
+    const ir::Target::RegisterPlace *place = target.register_place("w9");
+    if (place == nullptr) {
+        report(false, "it has a register to ask about", "w9 is not one of them");
+        return;
+    }
+
+    pcode::Operation going;
+    going.opcode = ghidra::CPUI_CBRANCH;
+    going.writes = false;
+    going.skips_forward = 1;
+    pcode::Varnode truth;
+    truth.where = pcode::Where::Register;
+    truth.offset = place->offset;
+    truth.size = place->width;
+    going.inputs.push_back(truth);
+
+    std::vector<uint8_t> bytes;
+    if (!write_one("AARCH64:LE:64:v8A", going, bytes, why)) {
+        report(false, "a branch on a truth in a register is written", why);
+        return;
+    }
+    std::string trouble;
+    const std::string reads = reads_as("AARCH64:LE:64:v8A", bytes, trouble);
+    report(!reads.empty(), "a branch on a truth in a register is written",
+           trouble.empty() ? "it was not an instruction" : trouble);
+
+    // What it means, rather than what it is called. Which comparison the branch
+    // is over is in the operations the bytes decode to and nowhere else.
+    const std::vector<Meaning> meant = means_as("AARCH64:LE:64:v8A", bytes, trouble);
+    bool asks_if_it_holds = false;
+    bool asks_if_it_does_not = false;
+    for (const Meaning &one : meant) {
+        if (one.opcode == ghidra::CPUI_INT_NOTEQUAL)
+            asks_if_it_holds = true;
+        if (one.opcode == ghidra::CPUI_INT_EQUAL)
+            asks_if_it_does_not = true;
+    }
+    report(asks_if_it_holds && !asks_if_it_does_not,
+           "and it goes when the truth holds rather than when it does not", reads);
+}
+
 } // namespace
 
 int main()
@@ -413,6 +472,7 @@ int main()
     }
 
     check_an_instruction_is_written();
+    check_a_branch_on_a_truth_goes_the_right_way();
     check_shorter_is_not_taken_when_it_means_something_else();
     check_a_register_it_has_not_got();
     check_a_value_with_no_home();

@@ -202,6 +202,47 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
         if (doing.opcode != looking_for)
             continue;
 
+        // A branch on a truth somebody already worked out.
+        //
+        // The representation's conditional branch goes when its condition is
+        // not zero. Some processors have nothing that reads a truth directly -
+        // AARCH64's conditional branches read flags, and the only ones that
+        // read a register ask whether it is zero - so the branch that means
+        // this is `cbnz`, which goes when a register is not zero. That is the
+        // same question asked the way the processor asks it.
+        //
+        // `cbz` is the opposite and decodes to the same shape, one comparison
+        // and a branch over it, so nothing about the shape separates them. What
+        // separates them is which comparison, and taking the wrong one inverts
+        // the control flow of the recovered program: every condition would run
+        // the other arm.
+        if (wanted.opcode == ghidra::CPUI_CBRANCH && wanted.compares == ghidra::CPUI_COPY &&
+            !wanted.inputs.empty() && doing.inputs.size() >= 2) {
+            const ghidra::VarnodeData &condition = doing.inputs[1];
+            for (const Meaning &wrote : meant) {
+                if (!wrote.writes || wrote.output.space != condition.space ||
+                    wrote.output.offset != condition.offset)
+                    continue;
+                if (wrote.opcode != ghidra::CPUI_INT_NOTEQUAL || wrote.inputs.size() != 2)
+                    continue;
+                // One side nothing, the other side the value asked about.
+                for (int side = 0; side < 2; ++side) {
+                    const ghidra::VarnodeData &zero = wrote.inputs[side];
+                    const ghidra::VarnodeData &value = wrote.inputs[1 - side];
+                    if (zero.space == nullptr ||
+                        zero.space->getType() != ghidra::IPTR_CONSTANT || zero.offset != 0)
+                        continue;
+                    for (const Place &one : came_from(meant, value, true)) {
+                        if (one.first != nullptr &&
+                            one.first->getType() == ghidra::IPTR_PROCESSOR &&
+                            !wanted.inputs.front().is_constant() &&
+                            one.second == wanted.inputs.front().offset)
+                            return true;
+                    }
+                }
+            }
+        }
+
         // Everywhere its inputs came from, taken together, because an
         // instruction is free to name its operands in whatever order it likes.
         // Where each of the instruction's own inputs came from, kept apart.
