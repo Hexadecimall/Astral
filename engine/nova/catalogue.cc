@@ -1112,9 +1112,17 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
 
 std::set<uint64_t> Catalogue::registers_for_values(const ir::Target &target) const
 {
-    std::set<uint64_t> where;
-    for (ghidra::OpCode what : {ghidra::CPUI_INT_ADD, ghidra::CPUI_COPY, ghidra::CPUI_INT_OR,
-                                ghidra::CPUI_INT_AND, ghidra::CPUI_INT_SUB}) {
+    // What an integer addition can write into, and nothing else.
+    //
+    // Adding is the question because nothing an integer adds into is a
+    // floating-point register - that is what makes it one. Asking more widely
+    // does not narrow it: a move crosses between the files on purpose, since
+    // MIPS moves between its general and floating-point registers with `mfc1`,
+    // and MIPS spells some floating-point work as an or. Either put f20 to f30
+    // among the places an integer value might live, so half of what this
+    // processor offered was somewhere no integer instruction could reach and
+    // every value landing there was refused with nowhere else to go.
+    auto written_by = [&](ghidra::OpCode what, std::set<uint64_t> &into) {
         for (const Form *form : doing(what)) {
             if (!form->writes || !form->writes_to.is_slot || form->writes_to.slot < 0 ||
                 static_cast<size_t>(form->writes_to.slot) >= form->slots.size())
@@ -1122,9 +1130,25 @@ std::set<uint64_t> Catalogue::registers_for_values(const ir::Target &target) con
             for (const auto &one : form->slots[form->writes_to.slot].registers) {
                 const ir::Target::RegisterPlace *place = target.register_place(one.first);
                 if (place != nullptr)
-                    where.insert(place->offset);
+                    into.insert(place->offset);
             }
         }
+    };
+
+    std::set<uint64_t> where;
+    written_by(ghidra::CPUI_INT_ADD, where);
+    if (!where.empty())
+        return where;
+
+    // A processor whose addition names no register to write - because it adds
+    // into one particular place, or because it has no addition - is asked the
+    // other way. Saying nothing here means no filtering at all, which is worse
+    // than a wider answer.
+    for (ghidra::OpCode what :
+         {ghidra::CPUI_INT_SUB, ghidra::CPUI_INT_AND, ghidra::CPUI_INT_OR, ghidra::CPUI_COPY}) {
+        written_by(what, where);
+        if (!where.empty())
+            return where;
     }
     return where;
 }
