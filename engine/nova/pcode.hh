@@ -80,6 +80,12 @@ struct Operation {
     // that had already been taken apart was taken apart again, over and over,
     // until the block ran out of room and everything after it went unwritten.
     bool made_while_writing = false;
+
+    // How many instructions ahead a branch goes, when it goes over some rather
+    // than to a block. Answering a question with a truth needs one of these on
+    // a processor that has no instruction for it: put one in, jump over putting
+    // nought in. Zero means it goes to the block its successors name.
+    int skips_forward = 0;
 };
 
 // A block of operations, still in the order and shape the representation had.

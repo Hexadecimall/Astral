@@ -514,7 +514,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
         const catalogue::Form *form = nullptr;
         std::vector<catalogue::Catalogue::Wanted> places;
         std::vector<int> roles;
-        uint32_t to = 0;
+        uint32_t to = 0;      // the block it goes to
+        int skips = 0;        // or how many instructions it goes over
     };
     std::vector<Aiming> aiming;
 
@@ -673,6 +674,98 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 pending[at] = what_differs;
                 pending.insert(pending.begin() + static_cast<long>(at) + 1, answering);
                 ++at;
+            }
+        }
+
+        // And where even that is not available, the answer is control.
+        //
+        // AARCH64 has no instruction that sets a register from a comparison of
+        // any kind: it compares into its flags and then reads the flags under a
+        // condition, which is a different shape. What it does have is a branch
+        // on whether a register is nothing. So the truth is put together the
+        // way a person would: put one in, and jump over putting nought in
+        // unless the two things differ.
+        if (catalogue.plainly_doing(ghidra::CPUI_INT_EQUAL, 2, true).empty() &&
+            catalogue.plainly_doing(ghidra::CPUI_INT_LESS, 2, true).empty() &&
+            !catalogue.plainly_doing(ghidra::CPUI_INT_XOR, 2, true).empty()) {
+            for (size_t at = 0; at < pending.size(); ++at) {
+                const pcode::Operation asking = pending[at];
+                const bool same = asking.opcode == ghidra::CPUI_INT_EQUAL;
+                const bool different = asking.opcode == ghidra::CPUI_INT_NOTEQUAL;
+                if ((!same && !different) || !asking.writes || asking.inputs.size() != 2 ||
+                    asking.compares != ghidra::CPUI_COPY || asking.made_while_writing)
+                    continue;
+
+                const int wide = asking.inputs[0].size > 0 ? asking.inputs[0].size : 4;
+                uint64_t spare = 0;
+                bool have_spare = false;
+                for (uint64_t candidate : scratch) {
+                    if (candidate == asking.output.offset)
+                        continue;
+                    bool clashes = false;
+                    for (const pcode::Varnode &input : asking.inputs)
+                        clashes = clashes || (input.where == pcode::Where::Register &&
+                                              input.offset == candidate);
+                    if (!clashes) {
+                        spare = candidate;
+                        have_spare = true;
+                        break;
+                    }
+                }
+                if (!have_spare)
+                    continue;
+
+                pcode::Varnode differing;
+                differing.where = pcode::Where::Register;
+                differing.offset = spare;
+                differing.size = wide;
+
+                pcode::Operation what_differs;
+                what_differs.opcode = ghidra::CPUI_INT_XOR;
+                what_differs.writes = true;
+                what_differs.output = differing;
+                what_differs.inputs = asking.inputs;
+                what_differs.made_while_writing = true;
+
+                pcode::Operation guessing;   // the answer, assumed
+                guessing.opcode = ghidra::CPUI_COPY;
+                guessing.writes = true;
+                guessing.output = asking.output;
+                pcode::Varnode assumed;
+                assumed.where = pcode::Where::Constant;
+                assumed.offset = same ? 1 : 0;
+                assumed.size = asking.output.size > 0 ? asking.output.size : 1;
+                guessing.inputs.push_back(assumed);
+                guessing.made_while_writing = true;
+
+                pcode::Operation going;      // and kept, unless they differ
+                going.opcode = ghidra::CPUI_CBRANCH;
+                going.writes = false;
+                // One thing, not two. A branch on whether a register is
+                // nothing names the register and nothing else - `cbz` - so
+                // asking for a comparison of two places finds the forms that
+                // compare two and none of them is this.
+                going.inputs.push_back(differing);
+                going.compares = ghidra::CPUI_INT_EQUAL;
+                going.skips_forward = 1;
+                going.made_while_writing = true;
+
+                pcode::Operation otherwise;
+                otherwise.opcode = ghidra::CPUI_COPY;
+                otherwise.writes = true;
+                otherwise.output = asking.output;
+                pcode::Varnode other;
+                other.where = pcode::Where::Constant;
+                other.offset = same ? 0 : 1;
+                other.size = assumed.size;
+                otherwise.inputs.push_back(other);
+                otherwise.made_while_writing = true;
+
+                pending[at] = what_differs;
+                pending.insert(pending.begin() + static_cast<long>(at) + 1, otherwise);
+                pending.insert(pending.begin() + static_cast<long>(at) + 1, going);
+                pending.insert(pending.begin() + static_cast<long>(at) + 1, guessing);
+                at += 3;
             }
         }
 
@@ -1265,17 +1358,19 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             chosen.bytes = std::move(written);
             chosen.form = best;
             chosen.in_block = block.identifier;
-            if (!operation.successors.empty() &&
-                (operation.opcode == ghidra::CPUI_BRANCH ||
-                 operation.opcode == ghidra::CPUI_CBRANCH)) {
+            if ((operation.opcode == ghidra::CPUI_BRANCH ||
+                 operation.opcode == ghidra::CPUI_CBRANCH) &&
+                (!operation.successors.empty() || operation.skips_forward != 0)) {
                 chosen.goes_somewhere = true;
-                chosen.goes_to = operation.successors.front();
+                chosen.goes_to =
+                    operation.successors.empty() ? 0 : operation.successors.front();
                 Aiming later;
                 later.which = out.size();
                 later.form = best;
                 later.places = taken != nullptr ? *taken : called_any;
                 later.roles = best_roles;
-                later.to = operation.successors.front();
+                later.to = chosen.goes_to;
+                later.skips = operation.skips_forward;
                 aiming.push_back(std::move(later));
             }
             out.push_back(std::move(chosen));
@@ -1307,11 +1402,21 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             starts.emplace(block.identifier, running);
 
         for (const Aiming &one : aiming) {
-            auto lands = starts.find(one.to);
-            if (lands == starts.end())
-                continue;
-            const int64_t reaches = static_cast<int64_t>(lands->second) -
-                                    static_cast<int64_t>(at[one.which]);
+            int64_t lands_at = 0;
+            if (one.skips != 0) {
+                // Over so many instructions from this one, which is how a
+                // question is answered with a truth where nothing answers it
+                // directly.
+                const size_t past = one.which + static_cast<size_t>(one.skips) + 1;
+                lands_at = past < at.size() ? static_cast<int64_t>(at[past])
+                                            : static_cast<int64_t>(running);
+            } else {
+                auto lands = starts.find(one.to);
+                if (lands == starts.end())
+                    continue;
+                lands_at = static_cast<int64_t>(lands->second);
+            }
+            const int64_t reaches = lands_at - static_cast<int64_t>(at[one.which]);
             std::vector<uint8_t> aimed;
             std::string refused;
             if (aim(*one.form, one.places, one.roles, target, reaches, aimed, refused)) {
