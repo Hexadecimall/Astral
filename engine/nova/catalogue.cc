@@ -260,7 +260,15 @@ Form::Piece through_moves(const std::vector<ghidra::OpTpl *> &operations, size_t
         const ghidra::OpTpl *wrote = writer_of(operations, before, value, at);
         if (wrote == nullptr)
             return read_piece(value);  // it was there before the instruction ran
-        if (wrote->getOpcode() != ghidra::CPUI_COPY || wrote->numInput() < 1)
+        // A widening is a move. `sltu rd, rs, rt` compares and then zero-extends
+        // the answer into rd, so following only plain copies stopped at the
+        // extension and the form was read as an extension that happens to
+        // compare - which is why not one processor appeared to have a single
+        // instruction that compares.
+        if ((wrote->getOpcode() != ghidra::CPUI_COPY &&
+             wrote->getOpcode() != ghidra::CPUI_INT_ZEXT &&
+             wrote->getOpcode() != ghidra::CPUI_INT_SEXT) ||
+            wrote->numInput() < 1)
             return Form::Piece();      // computed on the way: not a place
         value = wrote->getIn(0);
         before = at;
@@ -891,8 +899,12 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                 // What produced the answer, with the moves followed through.
                 const ghidra::OpTpl *doing = ends_at;
                 size_t doing_at = ends_at_index;
-                for (int steps = 0; steps < 8 && doing->getOpcode() == ghidra::CPUI_COPY &&
-                                    doing->numInput() > 0;
+                for (int steps = 0;
+                     steps < 8 &&
+                     (doing->getOpcode() == ghidra::CPUI_COPY ||
+                      doing->getOpcode() == ghidra::CPUI_INT_ZEXT ||
+                      doing->getOpcode() == ghidra::CPUI_INT_SEXT) &&
+                     doing->numInput() > 0;
                      ++steps) {
                     size_t at = 0;
                     const ghidra::OpTpl *earlier =
@@ -903,7 +915,9 @@ bool Catalogue::read(const ir::Target &target, std::string &error)
                     doing_at = at;
                 }
 
-                bool nameable = doing != ends_at || doing->getOpcode() != ghidra::CPUI_COPY;
+                bool nameable = doing != ends_at || (doing->getOpcode() != ghidra::CPUI_COPY &&
+                                                     doing->getOpcode() != ghidra::CPUI_INT_ZEXT &&
+                                                     doing->getOpcode() != ghidra::CPUI_INT_SEXT);
                 std::vector<Form::Piece> reads;
                 for (int input = 0; input < doing->numInput(); ++input) {
                     const Form::Piece piece =

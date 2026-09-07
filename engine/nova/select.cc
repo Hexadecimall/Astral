@@ -617,6 +617,65 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             }
         }
 
+        // Asking whether two things are equal, where the processor can only
+        // say which is smaller.
+        //
+        // Nothing computes equality into a register in one instruction, but
+        // MIPS and RISC-V both set a register from a comparison of size - `sltu
+        // rd, rs, rt`. Two things are equal exactly when the bits that differ
+        // between them are none, and "none" is "smaller than one": so a is b
+        // when (a xor b) is below one, and a is not b when nought is below (a
+        // xor b). Both halves are operations this already knows how to choose.
+        if (catalogue.plainly_doing(ghidra::CPUI_INT_EQUAL, 2, true).empty() &&
+            !catalogue.plainly_doing(ghidra::CPUI_INT_LESS, 2, true).empty() &&
+            !catalogue.plainly_doing(ghidra::CPUI_INT_XOR, 2, true).empty()) {
+            for (size_t at = 0; at < pending.size(); ++at) {
+                const pcode::Operation asking = pending[at];
+                const bool same = asking.opcode == ghidra::CPUI_INT_EQUAL;
+                const bool different = asking.opcode == ghidra::CPUI_INT_NOTEQUAL;
+                if ((!same && !different) || !asking.writes || asking.inputs.size() != 2 ||
+                    asking.compares != ghidra::CPUI_COPY || asking.made_while_writing)
+                    continue;
+
+                const int wide = asking.inputs[0].size > 0 ? asking.inputs[0].size : 4;
+                pcode::Varnode differing = asking.output;
+                differing.size = wide;
+
+                pcode::Operation what_differs;
+                what_differs.opcode = ghidra::CPUI_INT_XOR;
+                what_differs.writes = true;
+                what_differs.output = differing;
+                what_differs.inputs = asking.inputs;
+                what_differs.made_while_writing = true;
+
+                pcode::Varnode one;
+                one.where = pcode::Where::Constant;
+                one.offset = 1;
+                one.size = wide;
+                pcode::Varnode nothing;
+                nothing.where = pcode::Where::Constant;
+                nothing.offset = 0;
+                nothing.size = wide;
+
+                pcode::Operation answering;
+                answering.opcode = ghidra::CPUI_INT_LESS;
+                answering.writes = true;
+                answering.output = asking.output;
+                if (same) {
+                    answering.inputs.push_back(differing);
+                    answering.inputs.push_back(one);
+                } else {
+                    answering.inputs.push_back(nothing);
+                    answering.inputs.push_back(differing);
+                }
+                answering.made_while_writing = true;
+
+                pending[at] = what_differs;
+                pending.insert(pending.begin() + static_cast<long>(at) + 1, answering);
+                ++at;
+            }
+        }
+
         // Taking part of a value out of it is a shift and a narrower read.
         //
         // No processor has an instruction for it - none of the three has a
