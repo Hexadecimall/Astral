@@ -2,6 +2,7 @@
 
 #include "specification.hh"
 
+#include <functional>
 #include <map>
 #include <set>
 #include <sstream>
@@ -54,39 +55,50 @@ using Place = std::pair<const ghidra::AddrSpace *, uint64_t>;
 // through a register with no displacement says so that way.
 bool only_carries(const Meaning &one)
 {
-    if (one.opcode == ghidra::CPUI_COPY || one.opcode == ghidra::CPUI_INT_ZEXT ||
-        one.opcode == ghidra::CPUI_INT_SEXT || one.opcode == ghidra::CPUI_SUBPIECE ||
-        one.opcode == ghidra::CPUI_PIECE || one.opcode == ghidra::CPUI_CAST)
+    // A move, or a masking, or an operation with nothing on the other side.
+    //
+    // The distinction is whether the value could have come from anywhere else.
+    // Masking picks bits out of one value and adding nothing leaves it alone,
+    // so a register reached through either is still where the value came from.
+    // Combining it with something else is not that, however the something else
+    // is written: AARCH64's `eon` is an exclusive-or with a temporary holding
+    // every bit set, and reading it as an exclusive-or of the two registers
+    // gave `eon w1, w8, w9` where `eor` was meant - every bit inverted.
+    switch (one.opcode) {
+    case ghidra::CPUI_COPY:
+    case ghidra::CPUI_INT_ZEXT:
+    case ghidra::CPUI_INT_SEXT:
+    case ghidra::CPUI_SUBPIECE:
+    case ghidra::CPUI_PIECE:
+    case ghidra::CPUI_CAST:
         return true;
-    if (one.opcode != ghidra::CPUI_INT_ADD && one.opcode != ghidra::CPUI_INT_OR &&
-        one.opcode != ghidra::CPUI_INT_XOR && one.opcode != ghidra::CPUI_INT_SUB &&
-        one.opcode != ghidra::CPUI_INT_AND && one.opcode != ghidra::CPUI_INT_MULT)
-        return false;
-
-    // Everything but one of its inputs leaves the value as it was: adding
-    // nothing, or-ing nothing, multiplying by one, and-ing with every bit. A
-    // narrower view of a register is taken by masking, so that last one is how
-    // an instruction says "the low half of this" and is a carrying, not a
-    // change.
-    int carrying = 0;
-    for (const ghidra::VarnodeData &input : one.inputs) {
-        if (input.space == nullptr || input.space->getType() != ghidra::IPTR_CONSTANT) {
-            ++carrying;
-            continue;
+    case ghidra::CPUI_INT_AND:
+        // Masking, whatever the mask, as long as it is a number and not
+        // something worked out - a shift by a register masks the amount to the
+        // width of what is being shifted, and that is still that register.
+        for (const ghidra::VarnodeData &input : one.inputs) {
+            if (input.space != nullptr && input.space->getType() == ghidra::IPTR_CONSTANT)
+                return true;
         }
-        const bool idle =
-            (input.offset == 0 && one.opcode != ghidra::CPUI_INT_AND &&
-             one.opcode != ghidra::CPUI_INT_MULT) ||
-            (input.offset == 1 && one.opcode == ghidra::CPUI_INT_MULT) ||
-            (one.opcode == ghidra::CPUI_INT_AND && input.size > 0 && input.size < 8 &&
-             input.offset == (~static_cast<uint64_t>(0) >>
-                              static_cast<unsigned>(64 - 8 * input.size))) ||
-            (one.opcode == ghidra::CPUI_INT_AND && input.size >= 8 &&
-             input.offset == ~static_cast<uint64_t>(0));
-        if (!idle)
-            ++carrying;
+        return false;
+    case ghidra::CPUI_INT_ADD:
+    case ghidra::CPUI_INT_SUB:
+    case ghidra::CPUI_INT_OR:
+    case ghidra::CPUI_INT_XOR: {
+        // Nothing on the other side, so the value is the one side.
+        int carrying = 0;
+        for (const ghidra::VarnodeData &input : one.inputs) {
+            const bool nothing = input.space != nullptr &&
+                                 input.space->getType() == ghidra::IPTR_CONSTANT &&
+                                 input.offset == 0;
+            if (!nothing)
+                ++carrying;
+        }
+        return carrying <= 1;
     }
-    return carrying <= 1;
+    default:
+        return false;
+    }
 }
 
 // Every place a value came from, following what the instruction did backwards.
@@ -214,32 +226,39 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
                 ? 1
                 : 0;
 
-        std::vector<bool> spoken(sources.size(), false);
-        bool reads_them_all = true;
-        for (size_t at = first; at < wanted.inputs.size(); ++at) {
-            const pcode::Varnode &node = wanted.inputs[at];
-            bool found = false;
-            for (size_t which = 0; which < sources.size() && !found; ++which) {
-                if (spoken[which])
+        // Which of the instruction's inputs could stand for which of the
+        // wanted values, and then whether they can be paired off one to one.
+        // Taking the first that fits is not enough: the first wanted value may
+        // be reachable from both inputs while the second is reachable from only
+        // one, and taking that one first leaves the second with nothing.
+        auto could_be = [&](size_t which, const pcode::Varnode &node) {
+            for (const Place &one : sources[which]) {
+                if (one.first == nullptr)
                     continue;
-                for (const Place &one : sources[which]) {
-                    if (one.first == nullptr)
-                        continue;
-                    const bool is_register = one.first->getType() == ghidra::IPTR_PROCESSOR;
-                    const bool is_number = one.first->getType() == ghidra::IPTR_CONSTANT;
-                    const bool matches = node.is_constant()
-                                             ? (is_number && one.second == node.offset)
-                                             : (is_register && one.second == node.offset);
-                    if (matches) {
-                        spoken[which] = true;
-                        found = true;
-                        break;
-                    }
-                }
+                const bool is_register = one.first->getType() == ghidra::IPTR_PROCESSOR;
+                const bool is_number = one.first->getType() == ghidra::IPTR_CONSTANT;
+                if (node.is_constant() ? (is_number && one.second == node.offset)
+                                       : (is_register && one.second == node.offset))
+                    return true;
             }
-            reads_them_all = reads_them_all && found;
-        }
-        if (!reads_them_all)
+            return false;
+        };
+
+        std::vector<bool> spoken(sources.size(), false);
+        std::function<bool(size_t)> pair_off = [&](size_t at) {
+            if (at >= wanted.inputs.size())
+                return true;
+            for (size_t which = 0; which < sources.size(); ++which) {
+                if (spoken[which] || !could_be(which, wanted.inputs[at]))
+                    continue;
+                spoken[which] = true;
+                if (pair_off(at + 1))
+                    return true;
+                spoken[which] = false;
+            }
+            return false;
+        };
+        if (!pair_off(first))
             continue;
 
         if (!wanted.writes)
@@ -258,8 +277,12 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
                 after.output.space->getType() != ghidra::IPTR_PROCESSOR ||
                 after.output.offset != wanted.output.offset)
                 continue;
+            // Strictly, the same as the inputs. AARCH64's `eon` is the
+            // negation of an exclusive-or, so the exclusive-or is right there
+            // reading the right registers and it is what happens afterwards
+            // that makes the instruction the wrong one - every bit inverted.
             for (const ghidra::VarnodeData &input : after.inputs) {
-                for (const Place &one : came_from(meant, input)) {
+                for (const Place &one : came_from(meant, input, true)) {
                     if (doing.writes && one.first == doing.output.space &&
                         one.second == doing.output.offset)
                         return true;
