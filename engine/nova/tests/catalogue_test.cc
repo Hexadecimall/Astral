@@ -468,6 +468,82 @@ void check_writing_an_instruction()
     }
 }
 
+// A form may name one slot twice.
+//
+// A compressed two-operand add reads and writes the same slot, so the answer
+// and one of the operands are the same place by construction. Walking the slots
+// and refusing the second because the slot was already filled threw away every
+// instruction of that shape even where the caller had asked for exactly the
+// register the bits already select - and RISC-V then spelled `sp = sp + 19` as
+// a constant loaded into a scratch register and added to sp, which cost an
+// instruction and clobbered the scratch.
+//
+// What must not happen is the other half: a different register in an occupied
+// slot has to stay refused, because those bits can only name one register and
+// writing them anyway would say one register where two were meant.
+void check_a_slot_named_twice()
+{
+    catalogue::Catalogue riscv;
+    if (!catalogue_for("RISCV:LE:64:RV64GC", riscv))
+        return;
+
+    // A form that adds, whose answer and first operand are the same slot.
+    const catalogue::Form *destructive = nullptr;
+    for (const catalogue::Form *form : riscv.plainly_doing(ghidra::CPUI_INT_ADD, 2, true)) {
+        if (!form->writes || !form->writes_to.is_slot || form->reads.size() != 2)
+            continue;
+        if (!form->reads[0].is_slot || form->reads[0].slot != form->writes_to.slot)
+            continue;
+        if (static_cast<size_t>(form->writes_to.slot) >= form->slots.size())
+            continue;
+        if (form->slots[form->writes_to.slot].registers.count("sp") == 0)
+            continue;
+        // The other operand a register too, so that what is being checked is
+        // the repeated slot rather than whether some number fits some field.
+        if (!form->reads[1].is_slot ||
+            static_cast<size_t>(form->reads[1].slot) >= form->slots.size() ||
+            form->slots[form->reads[1].slot].registers.count("t0") == 0)
+            continue;
+        destructive = form;
+        break;
+    }
+    if (destructive == nullptr) {
+        report(false, "a form that adds into the register it read is there", "none was found");
+        return;
+    }
+
+    std::vector<catalogue::Catalogue::Wanted> places(2);
+    places[0].names.push_back("sp");
+    places[1].names.push_back("sp");
+    places.resize(3);
+    places[2].names.push_back("t0");
+    std::vector<int> roles;
+    roles.push_back(destructive->writes_to.slot);
+    roles.push_back(destructive->reads[0].slot);
+    roles.push_back(destructive->reads[1].slot);
+
+    std::vector<uint8_t> bytes;
+    std::vector<std::string> used;
+    std::string why;
+    const bool same =
+        catalogue::Catalogue::write_mixed(*destructive, places, bytes, used, why, roles);
+    report(same && !bytes.empty(),
+           "a slot named twice takes the same register twice, because the bits already say so",
+           same ? "no bytes came back" : why);
+
+    // The same slot, a different register: there is one field and it can only
+    // name one, so this has to be refused rather than written as one of them.
+    places[1].names.assign(1, "ra");
+    std::vector<uint8_t> nowhere;
+    std::vector<std::string> spent;
+    std::string refused;
+    const bool differing =
+        catalogue::Catalogue::write_mixed(*destructive, places, nowhere, spent, refused, roles);
+    report(!differing && !refused.empty(),
+           "but a different register in that slot is refused rather than written as the first",
+           differing ? "it was written anyway" : refused);
+}
+
 } // namespace
 
 int main()
@@ -486,6 +562,7 @@ int main()
     check_bits_against_real_instructions();
     check_a_form_holds_the_whole_instruction();
     check_writing_an_instruction();
+    check_a_slot_named_twice();
 
     std::printf("\n%d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;

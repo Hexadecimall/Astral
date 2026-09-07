@@ -321,8 +321,14 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
         // that were never going to match. Looking for it rejected every load
         // and every store that was otherwise exactly right - `ldur x9, [x9]`
         // among them.
+        // Where a call goes is not one of the values either, and for the same
+        // reason: it is an address, and there is no address until the program
+        // has a layout. The decoded instruction names the place the probe bytes
+        // happened to point at, which was never going to be the place the
+        // representation names, and looking for it refused every call.
         const size_t first =
-            (wanted.opcode == ghidra::CPUI_LOAD || wanted.opcode == ghidra::CPUI_STORE) &&
+            (wanted.opcode == ghidra::CPUI_LOAD || wanted.opcode == ghidra::CPUI_STORE ||
+             wanted.opcode == ghidra::CPUI_CALL) &&
                     !wanted.inputs.empty()
                 ? 1
                 : 0;
@@ -363,6 +369,13 @@ bool does_what_was_asked(const std::vector<Meaning> &meant, const pcode::Operati
             continue;
 
         if (!wanted.writes)
+            return true;
+        // A call's answer comes back where the calling convention says, not
+        // where the instruction says: AARCH64's `bl` writes the link register
+        // and nothing else, so asking whether the answer reached the register
+        // the representation named refused every call that was otherwise
+        // exactly right.
+        if (wanted.opcode == ghidra::CPUI_CALL)
             return true;
         if (wanted.compares != ghidra::CPUI_COPY)
             return true;  // the answer stays inside the instruction
@@ -427,6 +440,23 @@ bool goes_to_in(const std::vector<Meaning> &meant, uint64_t &where)
         return true;
     }
     return false;
+}
+
+// A constant as wide as the value it is, and no wider.
+//
+// A constant carries its own width, and everything above that width is not part
+// of it: a four-byte minus nine is 0xfffffff7, not 0xfffffffffffffff7. Lowering
+// hands the second of those out on a thirty-two bit processor, and asking a
+// four-byte field to hold a sixty-four bit pattern refused every small negative
+// number on MIPS - a hundred and forty-eight of them across twenty functions,
+// every one of which `addiu` holds in sixteen signed bits. The processor reads
+// its own constants out at their own width, so a comparison against what it
+// read has to be at that width too.
+uint64_t as_wide_as(uint64_t number, int bytes)
+{
+    if (bytes <= 0 || bytes >= 8)
+        return number;
+    return number & ((static_cast<uint64_t>(1) << (bytes * 8)) - 1);
 }
 
 // The numbers an instruction holds, as the processor reads them out.
@@ -529,42 +559,93 @@ bool solve(const catalogue::Form &form,
             continue;
 
         const uint64_t wanted = places[which].number;
-        const int64_t away =
-            static_cast<int64_t>(wanted) - static_cast<int64_t>(reading[0]);
-        if (away % step_is_worth != 0)
-            continue;
-        const int64_t steps = away / step_is_worth;
 
-        // A field counting downwards is asked for a negative number of steps,
-        // and whether it holds one is the field's own business: a field the
-        // processor reads as signed does, in two's complement, and one it reads
-        // as unsigned does not. Refusing every negative here refused every frame
-        // offset on RISC-V, whose `addi` holds -4 in twelve signed bits.
+        // The number, counted twice: once as it stands and once as what it means
+        // if the value it belongs to is signed.
         //
-        // Nothing is taken on trust for it. What is put in the field is checked
-        // by asking the processor what number the instruction now holds, below,
-        // so a field that cannot hold it fails there rather than here.
-        asking[which].number = static_cast<uint64_t>(steps);
-        std::vector<uint8_t> candidate;
-        std::vector<std::string> spent;
-        std::string trouble;
-        if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble, roles)) {
-            refused = trouble;
-            continue;
+        // A constant carries a width, and a negative one at that width is a
+        // large positive one at sixty-four bits: minus nine in four bytes is
+        // 0xfffffff7, which is four thousand million above where any sixteen-bit
+        // field starts. Counting the steps to it from where the field starts
+        // then asks for four thousand million steps and the field refuses, which
+        // refused every small negative constant on MIPS - a hundred and forty
+        // eight across twenty recovered functions, each of which `addiu` holds
+        // in sixteen signed bits. Read as signed the same bits are minus nine
+        // and the count is minus nine, which the field holds.
+        //
+        // Both readings are tried rather than one being decided on, because a
+        // field is as likely to be counting a genuinely large unsigned number.
+        // Neither is trusted: what is put in the field is written and the
+        // processor is asked what number the instruction now holds, so a reading
+        // that was the wrong one fails there.
+        std::vector<uint64_t> readings;
+        readings.push_back(wanted);
+        const int carried = places[which].bytes;
+        if (carried > 0 && carried < 8) {
+            const uint64_t sign = static_cast<uint64_t>(1) << (carried * 8 - 1);
+            if ((wanted & sign) != 0) {
+                readings.push_back(wanted |
+                                   ~((static_cast<uint64_t>(1) << (carried * 8)) - 1));
+            }
         }
 
-        // And the processor holds the number wanted, which is what all of this
-        // was for.
-        std::string unreadable;
-        bool holds_it = false;
-        for (uint64_t one : numbers_in(means_as(spoken, candidate, unreadable)))
-            holds_it = holds_it || one == wanted;
-        if (!holds_it)
-            continue;
+        for (uint64_t reading_of_it : readings) {
+            const int64_t away =
+                static_cast<int64_t>(reading_of_it) - static_cast<int64_t>(reading[0]);
+            if (away % step_is_worth != 0)
+                continue;
+            const int64_t steps = away / step_is_worth;
 
-        bytes = std::move(candidate);
-        used = std::move(spent);
-        return true;
+            // A field counting downwards is asked for a negative number of
+            // steps, and whether it holds one is the field's own business: a
+            // field the processor reads as signed does, in two's complement, and
+            // one it reads as unsigned does not. Refusing every negative here
+            // refused every frame offset on RISC-V, whose `addi` holds -4 in
+            // twelve signed bits. What goes in is the bits that mean it, cut to
+            // the field's own width, because the whole sixty-four bit pattern is
+            // a number no narrow field will take.
+            //
+            // Nothing is taken on trust for it. What is put in the field is
+            // checked by asking the processor what number the instruction now
+            // holds, below, so a field that cannot hold it fails there rather
+            // than here.
+            uint64_t held = static_cast<uint64_t>(steps);
+            if (steps < 0 && slot < form.slots.size() && way < form.slots[slot].numbers.size()) {
+                const int width = form.slots[slot].numbers[way].field.width;
+                if (width <= 0 || width >= 64)
+                    continue;
+                held = static_cast<uint64_t>(steps) & ((static_cast<uint64_t>(1) << width) - 1);
+            }
+
+            asking[which].number = held;
+            std::vector<uint8_t> candidate;
+            std::vector<std::string> spent;
+            std::string trouble;
+            if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble,
+                                                   roles)) {
+                refused = trouble;
+                continue;
+            }
+
+            // And the processor holds the number wanted, which is what all of
+            // this was for.
+            //
+            // What it reads out has to be the number itself. Nothing is cut
+            // down or stretched to make a match: a candidate for minus four on
+            // AARCH64 comes back holding 0xffffffff, which is minus one, and
+            // allowing the same bits at some other width to count let that
+            // through.
+            std::string unreadable;
+            bool holds_it = false;
+            for (uint64_t one : numbers_in(means_as(spoken, candidate, unreadable)))
+                holds_it = holds_it || one == wanted;
+            if (!holds_it)
+                continue;
+
+            bytes = std::move(candidate);
+            used = std::move(spent);
+            return true;
+        }
     }
 
     if (refused.empty())
@@ -646,35 +727,50 @@ bool aim(const catalogue::Form &form, const std::vector<catalogue::Catalogue::Wa
 
             // A branch that goes backwards reaches a negative distance, and a
             // field holds that the way a field holds anything negative: as the
-            // bits that mean it. Whether those bits really reach back that far
-            // is settled below by asking, the same as everything else.
-            const int width = form.slots[slot].numbers[way].field.width;
+            // bits that mean it, cut to however many bits the field really has.
+            //
+            // How many that is cannot be read off the field. A branch offset is
+            // rarely one run of bits - RISC-V scatters its across the
+            // instruction and the width recorded for one piece is the width of
+            // that piece, not of the number - so cutting to that width wrote a
+            // branch that reached forwards fourteen where it was asked to reach
+            // back a hundred and fourteen. Eighty-seven branches in twenty
+            // recovered functions were then reported as out of reach when every
+            // one of them was well inside it.
+            //
+            // So the width is not guessed at: the count is cut to each width in
+            // turn and the processor is asked where the instruction it makes
+            // would go. The one that goes where it was asked to go is the
+            // answer, and if none does the branch really cannot reach.
             uint64_t held = static_cast<uint64_t>(steps);
-            if (steps < 0) {
-                if (width <= 0 || width >= 64)
+            for (int cut = 64; cut >= 0; --cut) {
+                if (cut < 64) {
+                    if (steps >= 0)
+                        break;  // a forward reach is the count itself
+                    held = static_cast<uint64_t>(steps) &
+                           ((static_cast<uint64_t>(1) << cut) - 1);
+                }
+
+                asking.back().number = held;
+                std::vector<uint8_t> candidate;
+                std::vector<std::string> spent;
+                std::string trouble;
+                if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble,
+                                                       where))
                     continue;
-                held = static_cast<uint64_t>(steps) &
-                       ((static_cast<uint64_t>(1) << width) - 1);
+
+                uint64_t stood_at = 0;
+                std::string unreadable;
+                uint64_t lands = 0;
+                if (!goes_to_in(means_as(spoken, candidate, unreadable, &stood_at), lands))
+                    continue;
+                if (static_cast<int64_t>(lands) - static_cast<int64_t>(stood_at) != reaches)
+                    continue;
+
+                bytes = std::move(candidate);
+                return true;
             }
-
-            asking.back().number = held;
-            std::vector<uint8_t> candidate;
-            std::vector<std::string> spent;
-            std::string trouble;
-            if (!catalogue::Catalogue::write_mixed(form, asking, candidate, spent, trouble,
-                                                   where))
-                continue;
-
-            uint64_t stood_at = 0;
-            std::string unreadable;
-            uint64_t lands = 0;
-            if (!goes_to_in(means_as(spoken, candidate, unreadable, &stood_at), lands))
-                continue;
-            if (static_cast<int64_t>(lands) - static_cast<int64_t>(stood_at) != reaches)
-                continue;
-
-            bytes = std::move(candidate);
-            return true;
+            continue;
         }
     }
 
@@ -721,6 +817,9 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
         std::vector<Way> ways;  // shortest first
         uint32_t to = 0;      // the block it goes to
         int skips = 0;        // or how many instructions it goes over
+        // Or nowhere at all, which is where a call to something outside this
+        // unit goes until a linker says otherwise.
+        bool stays_put = false;
     };
     std::vector<Aiming> aiming;
 
@@ -1040,7 +1139,38 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             if ((widening.opcode != ghidra::CPUI_INT_ZEXT && !signed_one) || !widening.writes ||
                 widening.inputs.size() != 1 || widening.made_while_writing)
                 continue;
-            if (!catalogue.doing(widening.opcode).empty())
+            // Only when nothing that does it can write where the answer has to
+            // go.
+            //
+            // Asking whether the processor has any form at all said yes for
+            // RISC-V, which has two indexed under a zero-extension and both of
+            // them write a floating-point register - so the answer would have
+            // gone somewhere an integer value cannot live, and sixty-two
+            // widenings were refused with the form's own complaint rather than
+            // being spelled out as the shift pair RV64GC spells them as. What
+            // matters is not that a form exists but that one can write a value.
+            bool something_can_write_it = false;
+            {
+                const std::set<uint64_t> for_values = catalogue.registers_for_values(target);
+                for (const catalogue::Form *form : catalogue.doing(widening.opcode)) {
+                    if (something_can_write_it)
+                        break;
+                    if (!form->writes_to.is_slot ||
+                        static_cast<size_t>(form->writes_to.slot) >= form->slots.size())
+                        continue;
+                    for (const auto &named : form->slots[form->writes_to.slot].registers) {
+                        const ir::Target::RegisterPlace *place =
+                            target.register_place(named.first);
+                        if (place == nullptr)
+                            continue;
+                        if (for_values.empty() || for_values.count(place->offset) != 0) {
+                            something_can_write_it = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (something_can_write_it)
                 continue;  // this processor says how, so let it
             const int from = widening.inputs[0].size;
             const int into = widening.output.size;
@@ -1096,10 +1226,10 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 if (node.is_constant()) {
                     catalogue::Catalogue::Wanted number;
                     number.is_number = true;
-                    number.number = node.offset;
                     // How wide it is, because a negative number means nothing
                     // without it: minus four is 0xfffffffc in four bytes.
                     number.bytes = node.size > 0 ? node.size : 8;
+                    number.number = as_wide_as(node.offset, number.bytes);
                     called_any.push_back(std::move(number));
                     return;
                 }
@@ -1160,7 +1290,18 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     ? 1
                     : 0;
 
-            if (operation.writes)
+            // Where a call's answer comes back is not part of the call.
+            //
+            // p-code gives a call an output because the function it names
+            // returns something, but the instruction says nothing about where:
+            // the register the answer arrives in is the calling convention's
+            // business, and AARCH64's `bl` has one slot and it is the address.
+            // Asking that form to hold the answer as well asked for a place too
+            // many, and every call in every recovered function was refused for
+            // it - "this instruction has nowhere for one of those values".
+            const bool names_its_answer =
+                operation.writes && operation.opcode != ghidra::CPUI_CALL;
+            if (names_its_answer)
                 want(operation.output, "writes to");
             for (size_t at = first_input; at < operation.inputs.size(); ++at)
                 want(operation.inputs[at], "reads");
@@ -1281,12 +1422,27 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             std::vector<int> best_roles;
             const std::vector<catalogue::Catalogue::Wanted> *taken = nullptr;
             std::string last_refusal;
+            // And the complaint of the most promising candidate: one whose bytes
+            // were written and then found not to say what was asked.
+            //
+            // A refusal that comes from filling slots names whichever register
+            // the last form tried could not take, and that register is usually
+            // incidental: a form that would have encoded perfectly well can be
+            // buried behind one that failed for an unrelated reason, and the
+            // cause reported then points at a register that was never the
+            // problem. What a candidate that got as far as being written and
+            // read back says is about the instruction rather than about a
+            // form's table, so that is the one worth reporting.
+            std::string promising_refusal;
             // Every way that works, for a branch, which cannot be settled until
             // it is known how far it has to go.
+            // A call is settled by laying the program out too, so it is kept
+            // among the ways that work the same way a branch is.
             const bool goes_somewhere_later =
-                (operation.opcode == ghidra::CPUI_BRANCH ||
-                 operation.opcode == ghidra::CPUI_CBRANCH) &&
-                (!operation.successors.empty() || operation.skips_forward != 0);
+                operation.opcode == ghidra::CPUI_CALL ||
+                ((operation.opcode == ghidra::CPUI_BRANCH ||
+                  operation.opcode == ghidra::CPUI_CBRANCH) &&
+                 (!operation.successors.empty() || operation.skips_forward != 0));
             std::vector<Way> ways_that_work;
             // How many registers the instruction chosen so far leaves changed
             // besides the one it was asked to write. A candidate of the same
@@ -1296,7 +1452,8 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             for (const catalogue::Form *form : *choose_from) {
                 // Longer is settled; the same length is not, so it is worked
                 // through and decided on what the bytes turn out to do.
-                if (!goes_somewhere_later && best != nullptr && form->shortest > best->shortest)
+                if (!goes_somewhere_later && best != nullptr && !best->needs_context &&
+                    !form->needs_context && form->shortest > best->shortest)
                     continue;
                 std::vector<uint8_t> bytes;
                 std::string refused;
@@ -1312,7 +1469,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 // that a form which disturbs a slot can be asked what it would
                 // be disturbing.
                 std::vector<const pcode::Varnode *> stands_for;
-                if (operation.writes) {
+                if (names_its_answer) {
                     roles.push_back(form->writes_to.is_slot ? form->writes_to.slot : -1);
                     stands_for.push_back(&operation.output);
                 }
@@ -1367,7 +1524,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                                             : target.language_id + ":" + target.compiler,
                     bytes, trouble);
                 if (reads.empty()) {
-                    last_refusal = trouble.empty() ? "the bytes it would write are not an "
+                    promising_refusal = last_refusal = trouble.empty() ? "the bytes it would write are not an "
                                                      "instruction on this processor"
                                                    : trouble;
                     continue;
@@ -1388,7 +1545,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                                             : target.language_id + ":" + target.compiler,
                     bytes, unreadable);
                 if (!does_what_was_asked(meant, operation)) {
-                    last_refusal = std::string("the bytes it would write do not mean a ") + called +
+                    promising_refusal = last_refusal = std::string("the bytes it would write do not mean a ") + called +
                                    " over those places: " + (reads.empty() ? unreadable : reads);
                     continue;
                 }
@@ -1409,7 +1566,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                         touches_more = true;
                 }
                 if (touches_more) {
-                    last_refusal = "the bytes it would write do more than that: " +
+                    promising_refusal = last_refusal = "the bytes it would write do more than that: " +
                                    (reads.empty() ? unreadable : reads);
                     continue;
                 }
@@ -1427,7 +1584,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                         goes_back = goes_back || reaches(meant, one.inputs.front(), back_through);
                     }
                     if (!goes_back) {
-                        last_refusal = "the bytes it would write go back somewhere else: " +
+                        promising_refusal = last_refusal = "the bytes it would write go back somewhere else: " +
                                        (reads.empty() ? unreadable : reads);
                         continue;
                     }
@@ -1456,7 +1613,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                         writes_over_something = true;
                 }
                 if (writes_over_something) {
-                    last_refusal = "it writes over a register this function is keeping "
+                    promising_refusal = last_refusal = "it writes over a register this function is keeping "
                                    "something in";
                     continue;
                 }
@@ -1492,7 +1649,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     }
                 }
                 if (clobbers) {
-                    last_refusal = "it would write over a register this function is keeping "
+                    promising_refusal = last_refusal = "it would write over a register this function is keeping "
                                    "something in";
                     continue;
                 }
@@ -1529,9 +1686,31 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     disturbs.insert(one.output.offset);
                 }
 
-                if (best != nullptr && (form->shortest > best->shortest ||
-                                        (form->shortest == best->shortest &&
-                                         disturbs.size() >= best_disturbs)))
+                // A form that is real only while the processor is in some mode
+                // is never taken over one that is always real, however short it
+                // is.
+                //
+                // MIPS's shortest add is two bytes and those two bytes in an
+                // ordinary MIPS program are a floating-point store, so taking
+                // it for being shorter writes a different instruction. It is
+                // worse than that: every instruction after it in the function
+                // then sits two bytes off where a four-byte processor puts it,
+                // and fifty-five branches in twenty recovered functions were
+                // reported as unable to reach a block that had been moved to an
+                // address no MIPS instruction can start at. Thirty-eight such
+                // forms were being written.
+                //
+                // They are still offered, because on some processors every form
+                // needs a mode and there would otherwise be nothing to choose
+                // from. They just lose to anything that does not.
+                const bool worse =
+                    best != nullptr &&
+                    ((form->needs_context && !best->needs_context) ||
+                     (form->needs_context == best->needs_context &&
+                      (form->shortest > best->shortest ||
+                       (form->shortest == best->shortest &&
+                        disturbs.size() >= best_disturbs))));
+                if (worse)
                     continue;
                 best = form;
                 best_disturbs = disturbs.size();
@@ -1539,129 +1718,18 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 written = std::move(bytes);
             }
             if (!ways_that_work.empty()) {
+                // Shortest first, and anything that always applies before
+                // anything that is real only in some mode - for the same reason
+                // it is preferred above.
                 std::stable_sort(ways_that_work.begin(), ways_that_work.end(),
                                  [](const Way &one, const Way &two) {
+                                     if (one.form->needs_context != two.form->needs_context)
+                                         return !one.form->needs_context;
                                      return one.form->shortest < two.form->shortest;
                                  });
             }
 
             if (best == nullptr) {
-                // A number no field can hold goes in a register first.
-                //
-                // Every processor has instructions that take a number and a
-                // limit on how big it may be, and an address is over that limit
-                // on all of them. The instruction that adds an address is the
-                // one that adds a register, with the address put in a register
-                // beforehand - so that is what is written, and both halves go
-                // through this same choosing rather than being written by some
-                // other rule that could be wrong differently.
-                // A number no single instruction can hold is built in pieces.
-                //
-                // Every processor puts a limit on how big a number an
-                // instruction may carry, and an address is over it on all of
-                // them: AARCH64 carries sixteen bits and an address is
-                // thirty-three. So the number is made out of a smaller one
-                // shifted up and the rest put in underneath, which are three
-                // operations this already knows how to choose - and if the
-                // smaller one is still too big it is made the same way again.
-                if (operation.opcode == ghidra::CPUI_COPY && operation.writes &&
-                    operation.inputs.size() == 1 && operation.inputs[0].is_constant() &&
-                    !catalogue.can_carry(ghidra::CPUI_COPY, operation.inputs[0].offset,
-                                         operation.inputs[0].size > 0 ? operation.inputs[0].size
-                                                                      : 8) &&
-                    !scratch.empty() && !operation.made_while_writing) {
-                    const uint64_t whole = operation.inputs[0].offset;
-                    const int width = operation.output.size > 0 ? operation.output.size : 8;
-                    const uint64_t low = whole & 0xffff;
-
-                    pcode::Varnode held;
-                    held.where = pcode::Where::Register;
-                    held.offset = scratch.front();
-                    held.size = width;
-                    for (uint64_t candidate : scratch) {
-                        if (candidate != operation.output.offset) {
-                            held.offset = candidate;
-                            break;
-                        }
-                    }
-
-                    pcode::Varnode number;
-                    number.where = pcode::Where::Constant;
-                    number.offset = whole >> 16;
-                    number.size = width;
-
-                    pcode::Operation top;      // the rest of it, in a register
-                    top.opcode = ghidra::CPUI_COPY;
-                    top.writes = true;
-                    top.output = held;
-                    top.inputs.push_back(number);
-
-                    // How far to move it, in a register of its own.
-                    //
-                    // A processor may spell a shift by a written-in amount with
-                    // a field this cannot solve: AARCH64 builds one out of two
-                    // fields that do not step evenly, so what the solving finds
-                    // is a shift by sixty-three. The shift whose amount is in a
-                    // register has no such field, and the shift's own place
-                    // cannot hold the amount because that is where the thing
-                    // being shifted is - so it needs one more.
-                    pcode::Varnode by;
-                    by.where = pcode::Where::Constant;
-                    by.offset = 16;
-                    by.size = width;
-                    pcode::Operation how_far;
-                    bool put_it_somewhere = false;
-                    for (uint64_t candidate : scratch) {
-                        if (candidate == held.offset || candidate == operation.output.offset)
-                            continue;
-                        pcode::Varnode place;
-                        place.where = pcode::Where::Register;
-                        place.offset = candidate;
-                        place.size = width;
-                        how_far.opcode = ghidra::CPUI_COPY;
-                        how_far.writes = true;
-                        how_far.output = place;
-                        how_far.inputs.push_back(by);
-                        how_far.made_while_writing = true;
-                        by = place;
-                        put_it_somewhere = true;
-                        break;
-                    }
-
-                    pcode::Operation shifted;   // moved up out of the way
-                    shifted.opcode = ghidra::CPUI_INT_LEFT;
-                    shifted.writes = true;
-                    shifted.output = held;
-                    shifted.inputs.push_back(held);
-                    shifted.inputs.push_back(by);
-
-                    pcode::Varnode bottom;
-                    bottom.where = pcode::Where::Constant;
-                    bottom.offset = low;
-                    bottom.size = width;
-
-                    pcode::Operation joined;    // and the bottom put underneath
-                    joined.opcode = ghidra::CPUI_INT_OR;
-                    joined.writes = true;
-                    joined.output = operation.output;
-                    joined.inputs.push_back(held);
-                    joined.inputs.push_back(bottom);
-
-                    // The two that are finished are marked; the top is built
-                    // again if it is still too big, which it may be. Sixteen
-                    // bits at a time takes four rounds to reach the top of a
-                    // sixty-four bit address, and each round is smaller than the
-                    // last, so it ends.
-                    shifted.made_while_writing = true;
-                    joined.made_while_writing = true;
-                    pending[step] = top;
-                    pending.insert(pending.begin() + static_cast<long>(step) + 1, joined);
-                    pending.insert(pending.begin() + static_cast<long>(step) + 1, shifted);
-                    if (put_it_somewhere)
-                        pending.insert(pending.begin() + static_cast<long>(step) + 1, how_far);
-                    --step;
-                    continue;
-                }
 
                 size_t too_big = operation.inputs.size();
                 for (size_t at = first_input; at < operation.inputs.size(); ++at) {
@@ -1723,6 +1791,136 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     pending[step] = putting;
                     pending.insert(pending.begin() + static_cast<long>(step) + 1, again);
                     --step;  // and the copy is chosen next, like anything else
+                    continue;
+                }
+
+                // A number no field can hold goes in a register first.
+                //
+                // Every processor has instructions that take a number and a
+                // limit on how big it may be, and an address is over that limit
+                // on all of them. The instruction that adds an address is the
+                // one that adds a register, with the address put in a register
+                // beforehand - so that is what is written, and both halves go
+                // through this same choosing rather than being written by some
+                // other rule that could be wrong differently.
+                // A number no single instruction can hold is built in pieces.
+                //
+                // Every processor puts a limit on how big a number an
+                // instruction may carry, and an address is over it on all of
+                // them: AARCH64 carries sixteen bits and an address is
+                // thirty-three. So the number is made out of a smaller one
+                // shifted up and the rest put in underneath, which are three
+                // operations this already knows how to choose - and if the
+                // smaller one is still too big it is made the same way again.
+                //
+                // Where to cut it is the number's own business rather than the
+                // processor's. Asking whether some form has a field wide enough
+                // says yes too readily: RISC-V's `lui` has a twenty-bit field
+                // and answers yes for 0xf491, which it cannot mean because the
+                // field is the top twenty bits of a thirty-two bit value and
+                // 0xf491 is not a multiple of 0x1000. Every form has already
+                // been tried and refused by the time this is reached, so what
+                // the fields could hold in principle settles nothing and the
+                // cut is made where the number can be cut.
+                //
+                // Sixteen bits at a time while there is more than that left,
+                // because that is what the processors that carry sixteen want
+                // and it keeps the pieces few. Below that the number is halved
+                // at its own significant bits, which is what puts 0xf491 within
+                // reach of a twelve-bit field as 0xf4 and 0x91. Each piece has
+                // strictly fewer significant bits than the number it came from,
+                // so this ends.
+                const uint64_t constant_wanted =
+                    operation.inputs.empty()
+                        ? 0
+                        : as_wide_as(operation.inputs[0].offset,
+                                     operation.inputs[0].size > 0 ? operation.inputs[0].size : 8);
+                int cut_at = 0;
+                if (constant_wanted >> 16 != 0) {
+                    cut_at = 16;
+                } else {
+                    int significant = 0;
+                    while ((constant_wanted >> significant) != 0)
+                        ++significant;
+                    cut_at = significant / 2;
+                }
+                if (operation.opcode == ghidra::CPUI_COPY && operation.writes &&
+                    operation.inputs.size() == 1 && operation.inputs[0].is_constant() &&
+                    cut_at > 0 && !scratch.empty()) {
+                    const uint64_t whole = constant_wanted;
+                    const int width = operation.output.size > 0 ? operation.output.size : 8;
+                    const uint64_t low = whole & ((static_cast<uint64_t>(1) << cut_at) - 1);
+
+                    pcode::Varnode held;
+                    held.where = pcode::Where::Register;
+                    held.offset = scratch.front();
+                    held.size = width;
+                    for (uint64_t candidate : scratch) {
+                        if (candidate != operation.output.offset) {
+                            held.offset = candidate;
+                            break;
+                        }
+                    }
+
+                    pcode::Varnode number;
+                    number.where = pcode::Where::Constant;
+                    number.offset = whole >> cut_at;
+                    number.size = width;
+
+                    pcode::Operation top;      // the rest of it, in a register
+                    top.opcode = ghidra::CPUI_COPY;
+                    top.writes = true;
+                    top.output = held;
+                    top.inputs.push_back(number);
+
+                    // How far to move it, written into the shift.
+                    //
+                    // It used to be put in a register of its own first, because
+                    // AARCH64 spells a shift by a written-in amount with two
+                    // fields that do not step evenly and what the solving finds
+                    // there is a shift by sixty-three. But RISC-V's `slli` has a
+                    // plain field for it, and forcing the amount into a register
+                    // there asked for a shift by a register that no form would
+                    // write - ninety-seven refusals where the written-in amount
+                    // would have been taken. So the amount is written in, and a
+                    // processor that cannot take it that way falls to the rule
+                    // below that puts an operand no field can hold into a
+                    // register, which is where AARCH64 ends up.
+                    pcode::Varnode by;
+                    by.where = pcode::Where::Constant;
+                    by.offset = static_cast<uint64_t>(cut_at);
+                    by.size = width;
+
+                    pcode::Operation shifted;   // moved up out of the way
+                    shifted.opcode = ghidra::CPUI_INT_LEFT;
+                    shifted.writes = true;
+                    shifted.output = held;
+                    shifted.inputs.push_back(held);
+                    shifted.inputs.push_back(by);
+
+                    pcode::Varnode bottom;
+                    bottom.where = pcode::Where::Constant;
+                    bottom.offset = low;
+                    bottom.size = width;
+
+                    pcode::Operation joined;    // and the bottom put underneath
+                    joined.opcode = ghidra::CPUI_INT_OR;
+                    joined.writes = true;
+                    joined.output = operation.output;
+                    joined.inputs.push_back(held);
+                    joined.inputs.push_back(bottom);
+
+                    // The two that are finished are marked; the top is built
+                    // again if it is still too big, which it may be. Sixteen
+                    // bits at a time takes four rounds to reach the top of a
+                    // sixty-four bit address, and each round is smaller than the
+                    // last, so it ends.
+                    shifted.made_while_writing = true;
+                    joined.made_while_writing = true;
+                    pending[step] = top;
+                    pending.insert(pending.begin() + static_cast<long>(step) + 1, joined);
+                    pending.insert(pending.begin() + static_cast<long>(step) + 1, shifted);
+                    --step;
                     continue;
                 }
 
@@ -1797,14 +1995,18 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                         (operation.callee.empty() ? std::string("something unnamed")
                                                   : operation.callee) +
                         " cannot be written until it is known where that is, which is "
-                        "settled by laying the program out");
+                        "settled by laying the program out" +
+                        (promising_refusal.empty()
+                             ? (last_refusal.empty() ? std::string() : ": " + last_refusal)
+                             : ": " + promising_refusal));
                     continue;
                 }
 
+                const std::string &said_it =
+                    promising_refusal.empty() ? last_refusal : promising_refusal;
                 problems.push_back(std::string("no way of doing a ") + called +
                                    " on this processor writes those registers" + carrying +
-                                   (last_refusal.empty() ? std::string()
-                                                         : ": " + last_refusal));
+                                   (said_it.empty() ? std::string() : ": " + said_it));
                 continue;
             }
 
@@ -1812,9 +2014,7 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             chosen.bytes = std::move(written);
             chosen.form = best;
             chosen.in_block = block.identifier;
-            if ((operation.opcode == ghidra::CPUI_BRANCH ||
-                 operation.opcode == ghidra::CPUI_CBRANCH) &&
-                (!operation.successors.empty() || operation.skips_forward != 0)) {
+            if (goes_somewhere_later) {
                 chosen.goes_somewhere = true;
                 chosen.goes_to =
                     operation.successors.empty() ? 0 : operation.successors.front();
@@ -1823,6 +2023,14 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                 later.ways = ways_that_work;
                 later.to = chosen.goes_to;
                 later.skips = operation.skips_forward;
+                // A call to a function this unit does not contain has no
+                // address here at all - `strlen` is somewhere a linker decides.
+                // What an assembler writes for that is a call that goes
+                // nowhere, which a relocation then fixes, and the instruction
+                // written really is a call: it is aimed at its own address and
+                // read back to say so. Nothing else would be honest, since any
+                // other number would name a place picked at random.
+                later.stays_put = operation.opcode == ghidra::CPUI_CALL;
                 aiming.push_back(std::move(later));
             }
             out.push_back(std::move(chosen));
@@ -1879,7 +2087,9 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
                     continue;
                 }
                 int64_t lands_at = 0;
-                if (one.skips != 0) {
+                if (one.stays_put) {
+                    lands_at = static_cast<int64_t>(at[one.which]);
+                } else if (one.skips != 0) {
                     // Over so many instructions from this one, which is how a
                     // question is answered with a truth where nothing answers
                     // it directly.
@@ -1921,9 +2131,14 @@ bool write(const pcode::Sequence &sequence, const ir::Target &target,
             if (!anything_moved || pass == 7) {
                 // Settled, or given up on settling. Anything still unaimed
                 // cannot be reached by any way this processor has.
-                for (const std::string &why : could_not) {
-                    if (!why.empty())
-                        problems.push_back("a branch cannot reach where it goes: " + why);
+                for (size_t which = 0; which < could_not.size(); ++which) {
+                    if (could_not[which].empty())
+                        continue;
+                    problems.push_back(
+                        (aiming[which].stays_put ? std::string("a call cannot be aimed: ")
+                                                 : std::string("a branch cannot reach where it "
+                                                               "goes: ")) +
+                        could_not[which]);
                 }
                 break;
             }

@@ -1372,6 +1372,11 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
     // first or the register first, and both are the same instruction. So the
     // pairing is made rather than assumed, and each slot is used once.
     std::vector<bool> filled(form.slots.size(), false);
+    // What each slot was actually given, by the name the slot knew it under.
+    // A form may name one slot twice - a compressed two-operand add reads and
+    // writes the same slot - and a second place asking for the register that is
+    // already there is asking for something the bits already say.
+    std::vector<std::string> holding(form.slots.size());
     const uint64_t may_touch = ~form.fixed_mask;
 
     // The displacements an address is made of are set to nought first, and are
@@ -1420,8 +1425,35 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
         for (size_t which = 0; which < form.slots.size() && !placed; ++which) {
             if (only < form.slots.size() && which != only)
                 continue;
-            if (filled[which])
-                continue;
+            if (filled[which]) {
+                // Unless the slot is already holding the very register being
+                // asked for. A form may name one slot twice - a compressed
+                // two-operand add reads and writes the same one - and then the
+                // answer and an operand are the same place by construction.
+                // Refusing the second was refusing every instruction of that
+                // shape even where the caller had asked for exactly the
+                // register the bits already select, and the bits need no
+                // further change to say so.
+                //
+                // Only where it is the same register: a different one in an
+                // occupied slot is a form that cannot say what was asked, and
+                // writing it anyway would encode one register where two were
+                // meant.
+                if (places[next].is_number || holding[which].empty())
+                    continue;
+                bool already = false;
+                for (const std::string &name : places[next].names) {
+                    if (name == holding[which]) {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already)
+                    continue;
+                used.push_back(holding[which]);
+                placed = true;
+                break;
+            }
             const Form::Slot &slot = form.slots[which];
 
             if (places[next].is_number) {
@@ -1483,6 +1515,7 @@ bool Catalogue::write_mixed(const Form &form, const std::vector<Wanted> &places,
             word = (word & ~form.fixed_mask) | form.fixed_bits;
             used.push_back(name_used);
             filled[which] = true;
+            holding[which] = name_used;
             placed = true;
         }
 
